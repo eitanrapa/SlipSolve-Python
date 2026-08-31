@@ -1,0 +1,26 @@
+# conda env create -f environment.yml && conda activate slipsolve
+#
+# A separate environment from nisar_tools on purpose: this package needs none of
+# the raster stack (h5py, snaphu, dask, rasterio, gdal), so its solve is much
+# smaller and it installs on machines where those are painful.
+name: slipsolve
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - xarray
+  - zarr>=2.18,<3
+  - rioxarray
+  - pyproj
+  - matplotlib
+  # Optional [layered]: EDGRN/EDCMP needs a Fortran compiler to build.
+  - gfortran
+  # Optional [dev]
+  - pytest
+  - pytest-xdist
+  - pip
+  - pip:
+      - pygrnwang
+      - cutde

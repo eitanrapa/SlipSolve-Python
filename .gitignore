@@ -1,0 +1,32 @@
+# --- Local experiment directories: NOT for GitHub -------------------------
+# Real runs against real scenes. They carry data paths, multi-GB zarr stores
+# and machine-specific configuration, and they are the working record of what
+# was measured rather than anything a user of this package needs. Kept in the
+# working tree deliberately -- the analysis scripts and results live here and
+# should not be lost -- but never pushed.
+venezuela_six_scene_run/
+unstructured_session/
+scratchpad_vz/
+scratchpad/
+workdir/
+
+# --- Agent / editor local memory ------------------------------------------
+CLAUDE.md
+.claude/
+*.local.md
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Build artefacts ------------------------------------------------------
+*.aux
+*.log
+*.out
+*.toc
+.DS_Store

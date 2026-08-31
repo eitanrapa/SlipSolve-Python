@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slipsolve-python"
+version = "0.1.0"
+description = "Resolution-driven geodetic slip inversion on curved triangular fault meshes."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Eitan Rapaport" }]
+keywords = ["insar", "geodesy", "earthquake", "slip inversion", "dislocation"]
+
+# Deliberately short. This package works on points and meshes rather than
+# rasters, is eager throughout, and uses no dask at all -- so it does not
+# inherit the raster pipeline's dependencies (h5py, snaphu, rasterio, dask).
+dependencies = [
+    "numpy",
+    "scipy",
+    "xarray",
+    # SlipModel.save writes a zarr ZipStore; the <3 pin is what the tests run
+    # against, since zarr 3 reworked the store API.
+    "zarr>=2.18,<3",
+    # _geo.py only: the .rio accessor, for writing GMT .grd exports.
+    "rioxarray",
+    "pyproj",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+# pygrnwang bundles Rongjiang Wang's EDGRN/EDCMP Fortran and builds it with
+# gfortran, which is how slipsolve.edgrn.run_edgrn generates layered Green's
+# function tables from a velocity model. Optional because the reference
+# workflow has the user run EDGRN themselves and hand over the tables, and
+# because a Fortran toolchain is not something to require of every install.
+layered = ["pygrnwang"]
+# cutde is a TEST ORACLE ONLY -- an independent implementation of the same
+# Nikkhoo & Walter triangular dislocation that slipsolve._tde ports, used to
+# cross-check it. tests/test_slip_tde.py skips when it is absent.
+dev = ["pytest", "pytest-xdist", "cutde"]
+
+[project.urls]
+Homepage = "https://github.com/eitanrapa/slipsolve-python"
+"Original (MATLAB)" = "https://github.com/x3zou/SlipSolve-Curve"
+
+[tool.setuptools.packages.find]
+include = ["slipsolve*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
