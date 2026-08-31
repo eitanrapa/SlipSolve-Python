@@ -41,7 +41,7 @@ layered = ["pygrnwang"]
 dev = ["pytest", "pytest-xdist", "cutde"]
 
 [project.urls]
-Homepage = "https://github.com/eitanrapa/slipsolve-python"
+Homepage = "https://github.com/eitanrapa/SlipSolve-Python"
 "Original (MATLAB)" = "https://github.com/x3zou/SlipSolve-Curve"
 
 [tool.setuptools.packages.find]
