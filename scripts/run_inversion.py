@@ -1,6 +1,6 @@
 """Stage 3: solve once at the chosen weight, and write the result.
 
-    cd ~/Documents/GitHub/nisar_tools
+    cd ~/Documents/GitHub/slipsolve-python
     KMP_DUPLICATE_LIB_OK=TRUE \
     nohup ~/miniforge3/envs/remote_sensing/bin/python -u scripts/run_inversion.py \
           > workdir/inversion.log 2>&1 &

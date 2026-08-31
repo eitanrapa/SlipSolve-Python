@@ -1,6 +1,6 @@
 """Is the nuisance ramp eating the earthquake? Run after stage 1.
 
-    cd ~/Documents/GitHub/nisar_tools
+    cd ~/Documents/GitHub/slipsolve-python
     KMP_DUPLICATE_LIB_OK=TRUE \
     nohup ~/miniforge3/envs/remote_sensing/bin/python -u scripts/run_ramp_check.py \
           > workdir/ramp_check.log 2>&1 &

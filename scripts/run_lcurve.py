@@ -1,6 +1,6 @@
 """Stage 2: sweep the smoothing weight over the observations stage 1 wrote.
 
-    cd ~/Documents/GitHub/nisar_tools
+    cd ~/Documents/GitHub/slipsolve-python
     KMP_DUPLICATE_LIB_OK=TRUE \
     nohup ~/miniforge3/envs/remote_sensing/bin/python -u scripts/run_lcurve.py \
           > workdir/lcurve.log 2>&1 &

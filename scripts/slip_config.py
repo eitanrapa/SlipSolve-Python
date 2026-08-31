@@ -52,7 +52,20 @@ matplotlib.use("Agg")            # headless: before pyplot is imported anywhere
 
 import matplotlib.pyplot as plt  # noqa: E402
 
-from nisar_tools import LOSStack, Workspace                                    # noqa: E402
+# ⚠️ The RUNNERS need `nisar_tools`, the package does not. These scripts drive
+# real NISAR products end to end -- reading a `Workspace`, loading a persisted
+# `LOSStack` -- which is raster work this package deliberately knows nothing
+# about. `slipsolve` itself imports none of it; only `scripts/` does, and only to
+# get data in. Install with `pip install nisar-tools`, or replace the two names
+# below with your own loader: everything downstream needs an object with a `.ds`.
+try:
+    from nisar_tools import LOSStack, Workspace                                # noqa: E402
+except ImportError as exc:                                                      # pragma: no cover
+    raise SystemExit(
+        "scripts/ need nisar_tools to load NISAR products (the slipsolve "
+        "package itself does not). pip install nisar-tools, or point these "
+        "runners at your own loader."
+    ) from exc
 from slipsolve import (                                                 # noqa: E402
     EdgrnTables, FaultMesh, FaultSegment, FaultTrace, LayeredPointSource,
     VelocityModel, run_edgrn, scene_report,
