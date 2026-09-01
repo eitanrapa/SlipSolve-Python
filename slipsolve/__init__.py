@@ -48,6 +48,8 @@ Sign conventions, which matter more here than anywhere else in the package:
   policing it after the fact.
 """
 
+from . import calibrate
+from ._geo import LosGrid, read_grd
 from .basis import ElementBasis, NodeBasis
 from .covariance import (
     correlated_field,
@@ -96,8 +98,8 @@ from .surface import FaultSurface, gridfit
 from .trace import FaultSegment, FaultTrace
 
 __all__ = [
+    "ARCSEC_10",
     "CovarianceModel",
-    "correlated_field",
     "EdgrnTables",
     "ElementBasis",
     "FaultMesh",
@@ -107,23 +109,23 @@ __all__ = [
     "HalfSpaceTDE",
     "LayeredPointSource",
     "LocalFrame",
+    "LosGrid",
     "MeshLayout",
     "NodeBasis",
     "Observations",
     "SlipInversion",
     "SlipModel",
-    "ARCSEC_10",
-    "frame_lattice",
-    "resample_all",
-    "resample_to_frame",
     "VelocityModel",
     "adapt_layout",
     "bound_fraction",
+    "calibrate",
     "cell_size_ladder",
+    "correlated_field",
     "data_importance",
     "element_resolution",
     "empirical_variogram",
     "fit_covariance",
+    "frame_lattice",
     "graded_layout",
     "gridfit",
     "iterate_sampling",
@@ -136,6 +138,9 @@ __all__ = [
     "ramp_content",
     "ramp_leakage",
     "ramp_sweep",
+    "read_grd",
+    "resample_all",
+    "resample_to_frame",
     "resolution_bias",
     "resolution_diagonal",
     "resolution_gain",

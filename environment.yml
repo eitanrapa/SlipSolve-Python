@@ -1,14 +1,21 @@
 # conda env create -f environment.yml && conda activate slipsolve
 #
 # A separate environment from nisar_tools on purpose: this package needs none of
-# the raster stack (h5py, snaphu, dask, rasterio, gdal), so its solve is much
-# smaller and it installs on machines where those are painful.
+# the raster stack (snaphu, dask, gdal), so its solve is much smaller and it
+# installs on machines where those are painful.
+#
+# h5py is the one exception, and it is here for a file format, not for NISAR:
+# GMT 6 writes .grd as HDF5-backed NetCDF-4, and `_geo.read_grd` opens those
+# through h5py because netcdf4/h5netcdf are heavier and GDAL needs a separate
+# plugin for them. Reading ALOS/GMTSAR .grd is core to this package, not an
+# extra -- it is how the Venezuela scenes arrive.
 name: slipsolve
 channels:
   - conda-forge
 dependencies:
   - python=3.11
   - numpy
+  - h5py
   - scipy
   - xarray
   - zarr>=2.18,<3

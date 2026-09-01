@@ -242,3 +242,144 @@ def test_frame_round_trips_through_a_dict(setup):
     rebuilt = LocalFrame.from_dict(frame.to_dict())
     np.testing.assert_allclose(rebuilt.to_projected(0.0, 0.0),
                                frame.to_projected(0.0, 0.0), atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# The `.grd` round trip.
+#
+# `write_grd` came across in the extraction and `read_grd` did not, so for a
+# while a standalone slipsolve could write a GMT grid it could not read back --
+# and `.grd` is how ALOS and GMTSAR products arrive. These pin both halves and
+# the two things a `.grd` cannot record, `units` and `sign`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def grd_scene(tmp_path):
+    """A geographic `.grd` quadruple: displacement in cm plus a look vector."""
+    import xarray as xr
+
+    lon = np.linspace(-68.6, -66.4, 41)
+    lat = np.linspace(10.0, 11.0, 23)
+    field = np.outer(np.sin(np.linspace(0, 3, lat.size)),
+                     np.cos(np.linspace(0, 3, lon.size))).astype("float32")
+
+    def write(name, values):
+        path = tmp_path / f"{name}.grd"
+        xr.DataArray(values, coords={"lat": lat, "lon": lon},
+                     dims=("lat", "lon"), name="z").to_netcdf(path)
+        return path
+
+    # A plausible descending right-looking unit vector: east positive, north
+    # negative, up positive -- ALOS's geometry, not NISAR's.
+    ones = np.ones((lat.size, lon.size), dtype="float32")
+    return dict(
+        los=write("los_cm", 10.0 * field),
+        look_e=write("look_e", 0.62 * ones),
+        look_n=write("look_n", -0.11 * ones),
+        look_u=write("look_u", np.sqrt(1 - 0.62 ** 2 - 0.11 ** 2) * ones),
+        field=field, lon=lon, lat=lat)
+
+
+def test_read_grd_round_trips_write_grd(tmp_path, grd_scene):
+    """`read_grd` is the inverse of `write_grd`, values and CRS alike."""
+    from slipsolve._geo import read_grd, write_grd
+
+    original = read_grd(grd_scene["los"])
+    assert original.rio.crs is not None and original.rio.crs.is_geographic
+
+    path = write_grd(original.rio.write_crs("EPSG:4326"), tmp_path / "again.grd")
+    again = read_grd(path)
+
+    # `write_grd` reprojects, and rioxarray normalises the result to north-up, so
+    # a grid written from south-up input comes back with its rows reversed. That
+    # is a property of the georeferencing, not a difference in the field --
+    # compare on the coordinates rather than on row order.
+    assert again.shape == original.shape
+    a = again.sortby("y").sortby("x")
+    b = original.sortby("y").sortby("x")
+    np.testing.assert_allclose(a["y"].values, b["y"].values, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(a.values, float),
+                               np.asarray(b.values, float),
+                               rtol=1e-4, atol=1e-5)
+
+
+def test_read_grd_names_its_axes_x_and_y(grd_scene):
+    """GMT writes `lon`/`lat`; everything downstream indexes `x`/`y`."""
+    from slipsolve._geo import read_grd
+
+    da = read_grd(grd_scene["los"])
+    assert da.dims == ("y", "x")
+    np.testing.assert_allclose(da["x"].values, grd_scene["lon"])
+
+
+def test_from_grd_applies_units_and_sign(grd_scene):
+    """`units` and `sign` are applied on load, so what is stored is canonical.
+
+    A ``.grd`` records neither, and both are silent when wrong -- ``units`` as a
+    factor of 100 in the recovered slip, ``sign`` as a fault slipping backwards.
+    """
+    from slipsolve import LosGrid
+
+    kw = dict(direction="descending", look_direction="right")
+    positive = LosGrid.from_grd(grd_scene["los"], grd_scene["look_e"],
+                                grd_scene["look_n"], grd_scene["look_u"],
+                                units="cm", sign=+1, **kw)
+    negative = LosGrid.from_grd(grd_scene["los"], grd_scene["look_e"],
+                                grd_scene["look_n"], grd_scene["look_u"],
+                                units="cm", sign=-1, **kw)
+
+    a = np.asarray(positive.ds["los"].values, float)
+    b = np.asarray(negative.ds["los"].values, float)
+    good = np.isfinite(a) & np.isfinite(b)
+    # cm -> m, and the sign applied once on load; nothing re-applies it.
+    assert np.nanmax(np.abs(a[good])) == pytest.approx(0.1, rel=0.05)
+    np.testing.assert_allclose(a[good], -b[good], rtol=1e-6)
+    assert positive.ds.attrs["sign"] == +1
+    assert negative.ds.attrs["sign"] == -1
+
+
+def test_from_grd_reprojects_geographic_to_metres(grd_scene):
+    """A lon/lat lattice would put `width_min=1000` at a million columns."""
+    from slipsolve import LosGrid
+
+    stack = LosGrid.from_grd(grd_scene["los"], grd_scene["look_e"],
+                             grd_scene["look_n"], grd_scene["look_u"],
+                             units="cm", direction="descending",
+                             look_direction="right")
+    assert not stack.crs.is_geographic
+    assert abs(float(np.diff(stack.x)[0])) > 100.0        # metres, not degrees
+    assert stack.ds.attrs["look_direction"] == "right"
+
+
+def test_from_grd_rejects_an_inverted_look_vector(grd_scene, tmp_path):
+    """`los_up` is cos(incidence) and must be positive; a flip is raised on."""
+    import xarray as xr
+
+    from slipsolve import LosGrid
+
+    from slipsolve._geo import read_grd
+
+    down = tmp_path / "look_d.grd"
+    da = read_grd(grd_scene["look_u"])
+    xr.DataArray(-np.asarray(da.values), coords={"lat": grd_scene["lat"],
+                                                 "lon": grd_scene["lon"]},
+                 dims=("lat", "lon"), name="z").to_netcdf(down)
+
+    with pytest.raises(ValueError, match="sensor_to_target"):
+        LosGrid.from_grd(grd_scene["los"], grd_scene["look_e"],
+                         grd_scene["look_n"], down, units="cm")
+
+
+def test_los_grid_rebuilds_from_a_dataset(grd_scene):
+    """`type(stack)(ds)` is how `resample` and `calibrate` rebuild a stack."""
+    from slipsolve import LosGrid
+
+    stack = LosGrid.from_grd(grd_scene["los"], grd_scene["look_e"],
+                             grd_scene["look_n"], grd_scene["look_u"],
+                             units="cm", direction="descending",
+                             look_direction="right")
+    again = type(stack)(stack.ds)
+    assert isinstance(again, LosGrid)
+    np.testing.assert_array_equal(again.x, stack.x)
+    assert again.crs == stack.crs

@@ -5,6 +5,7 @@
 # working tree deliberately -- the analysis scripts and results live here and
 # should not be lost -- but never pushed.
 venezuela_six_scene_run/
+venezuela_seven_scene_run/
 unstructured_session/
 scratchpad_vz/
 scratchpad/
