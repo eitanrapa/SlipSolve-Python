@@ -99,6 +99,54 @@ def test_ceiling_is_pure_geometry_and_flags_the_undersampled_wavelength(mesh):
             < rows[60e3]["pattern_correlation"])
 
 
+def test_a_mesh_that_loses_its_depth_levels_fails_a_ceiling_mesh0_passed(mesh):
+    """Why `run_case` rechecks the ceiling, and why the check tests BOTH axes.
+
+    `calibration_plan` scores `mesh0`, but every case then adapts away from it,
+    and the adaptation is free to spend its budget along strike. Measured on the
+    real Venezuela geometry, the default `size_max` took 11 depth levels to 5 and
+    the coarsest element to 19.9 km, and the 20 km rung then retained 0.754 where
+    `mesh0` had reported 0.993 -- so a "resolution" failure at that wavelength was
+    partly discretisation, and nothing in the protocol would have said so.
+
+    ⚠️ The subtler half: `amplitude_retained` is nearly blind to this. Measured on
+    the trace below at a 20 km cell it reads 1.007 at 11 depth levels and 1.007 at
+    4, falling only at 3 where the sampling lands on the cell's own zeros -- a
+    nearest-neighbour hold preserves variance while destroying the pattern. So
+    `usable` cannot rest on amplitude plus an along-strike Nyquist count; the
+    down-dip count is what sees a collapsed mesh.
+    """
+    trace = FaultTrace(_LON, _LAT, name="calib")
+    collapsed = FaultMesh.curved(trace, trace.local_frame(), uniform_dip=100.0,
+                                 max_depth=40e3, edge_length=8e3,
+                                 down_dip_levels=4)
+    fine = C.discretisation_ceiling(mesh, (20e3,))[0]
+    coarse = C.discretisation_ceiling(collapsed, (20e3,))[0]
+
+    assert fine["usable"] and fine["samples_down_dip"] >= 2.0
+    assert not coarse["usable"]
+    assert coarse["samples_down_dip"] < 2.0
+    # The along-strike axis is untouched, so the old test would have passed both.
+    assert coarse["samples_per_cell"] == pytest.approx(fine["samples_per_cell"])
+    # And amplitude alone would have passed both too -- that is the point.
+    assert coarse["amplitude_retained"] > 0.95
+    assert coarse["pattern_correlation"] < fine["pattern_correlation"]
+
+
+def test_run_case_accepts_mesh_adaptation_overrides():
+    """`size_max` must be reachable from a driver, or the collapse is unavoidable.
+
+    Signature-level, deliberately: exercising `run_case` needs scenes, Green's
+    functions and a sampling loop, and the thing that broke was simply that there
+    was no way to pass a cap in.
+    """
+    import inspect
+
+    sig = inspect.signature(C.run_case)
+    assert "mesh_adapt" in sig.parameters
+    assert sig.parameters["mesh_adapt"].default is None
+
+
 # -- the scoring convention -------------------------------------------------
 
 def test_score_removes_the_mean_so_a_uniform_offset_cannot_flatter_it():

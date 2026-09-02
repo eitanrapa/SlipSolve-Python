@@ -62,6 +62,7 @@ Thirteen loops instead of the ninety a full factorial would need.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -208,22 +209,37 @@ def discretisation_ceiling(mesh, cells=DEFAULT_CELLS, probe=None,
     ps, pz = probe[:, 0], probe[:, 1]
     s, z = mesh.params[:, 0], mesh.params[:, 1]
 
-    # Node spacing along strike is the tight axis on a fault that is far longer
-    # than it is deep, so it is what decides whether a wavelength is sampled.
+    # ⚠️ **Both axes are tested, and the down-dip one is not redundant.** This
+    # used to measure along-strike spacing alone, on the reasoning that a fault
+    # far longer than it is deep is sampled more tightly down dip -- true of a
+    # uniform mesh, and false the moment `adapt_layout` is free to spend its
+    # budget along strike. Measured on the Venezuela geometry, the default
+    # `size_max` collapsed 11 depth levels to 5 and `amplitude_retained` did not
+    # notice: it reads 1.007 at 11 levels, 1.007 at 4, and only falls off a cliff
+    # to 0.000 at 3, where the sampling hits the cell's own zeros. A
+    # nearest-neighbour hold preserves variance while destroying the pattern, so
+    # amplitude is the wrong statistic for undersampling; `pattern_correlation`
+    # does see it (0.923 -> 0.785 over that range) but is a smooth function with
+    # no natural cut. The Nyquist count on each axis is the honest test.
     columns = np.unique(np.round(s, -2)).size
     spacing = float(s.max() / max(columns - 1, 1))
+    levels = np.unique(np.round(z, -2))
+    down = (float(np.abs(np.diff(levels)).max()) if levels.size > 1
+            else float(np.ptp(z)) or np.inf)
 
     rows = []
     for cell in cells:
         exact = np.sin(np.pi * ps / cell) * np.sin(np.pi * pz / cell)
         held = (np.sin(np.pi * s / cell) * np.sin(np.pi * z / cell))[nearest]
+        along_n, down_n = cell / spacing, cell / down
         rows.append({
             "cell": float(cell),
-            "samples_per_cell": float(cell / spacing),
+            "samples_per_cell": float(along_n),
+            "samples_down_dip": float(down_n),
             "amplitude_retained": float(np.std(held) / np.std(exact)),
             "pattern_correlation": float(np.corrcoef(held, exact)[0, 1]),
             "usable": bool(np.std(held) / np.std(exact) >= threshold
-                           and cell / spacing >= 2.0),
+                           and along_n >= 2.0 and down_n >= 2.0),
         })
     return rows
 
@@ -486,13 +502,32 @@ def truth_on_probe(mesh, target, probe):
 
 def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
              solve_kwargs, geometry, covariances=None, spacing=2000.0,
-             full_coverage=False, probe=None, max_rounds=3, verbose=True):
+             full_coverage=False, probe=None, max_rounds=3, verbose=True,
+             mesh_adapt=None):
     """One loop of the plan: plant, forward-model, invert, score every rung.
 
     Returns one row per rank rung. The expensive part is the single
     :func:`~slipsolve.predict.iterate_sampling` loop; the rungs after it
     re-solve on a factorisation that already exists, which is what makes a ladder
     affordable and a factorial not.
+
+    ``mesh_adapt`` merges extra keys into the adaptation spec -- in practice
+    ``size_max``, and it is not optional on a real fault. Left to its default,
+    :func:`~slipsolve.resolution.target_element_size` caps growth at
+    ``current.max() * max_ratio``; measured on the Venezuela geometry that is
+    21.6 km, and the loop spent its whole budget on along-strike detail, taking
+    the mesh from 11 depth levels to **5** and its coarsest element to 19.9 km.
+
+    ⚠️ **The ceiling is rechecked on the ADAPTED mesh**, and this is the whole
+    reason the parameter exists. :func:`calibration_plan` runs
+    :func:`discretisation_ceiling` on ``mesh0``, but every case then adapts away
+    from it before solving -- so the guarantee that a recovery failure is
+    attributable to resolution rather than discretisation was never enforced on
+    the mesh that produces the answer. Measured on the collapsed mesh above, the
+    20 km rung retained **0.754** of its amplitude while ``mesh0`` had said
+    0.993. Each row carries ``ceiling_amplitude`` and ``ceiling_usable`` for the
+    cell it planted; a failure warns rather than raising, because the row is
+    still worth recording as long as it is read as a discretisation result.
     """
     import time
 
@@ -517,11 +552,21 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
              "rounds": max(1, max_rounds - 1)}
     if case.layout != "rows":
         adapt["structure"] = case.layout
+    adapt.update(mesh_adapt or {})
     obs, model, _ = iterate_sampling(
         world, mesh0, trace, frame, sample_kwargs,
         inversion_kwargs=inversion_kwargs, solve_kwargs=solve_kwargs,
         max_rounds=max_rounds, verbose=False, mesh_adapt=adapt,
         sampling_field="both")
+
+    ceiling = discretisation_ceiling(model.mesh, [case.cell])[0]
+    if not ceiling["usable"]:
+        warnings.warn(
+            "%s: the adapted mesh retains only %.3f of a %.0f km checkerboard "
+            "(mesh0 was checked, this mesh was not until now) -- read this "
+            "case as a discretisation result, not a resolution one"
+            % (case.name, ceiling["amplitude_retained"], case.cell / 1e3),
+            RuntimeWarning, stacklevel=2)
 
     inversion = SlipInversion(model.mesh, obs, **inversion_kwargs)
     grid = np.logspace(-1.5, 4, 28)
@@ -548,6 +593,8 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
                    smoothing=lam, n_obs=int(obs.n),
                    n_elements=int(model.mesh.n_elements),
                    converged=bool(solved.converged),
+                   ceiling_amplitude=float(ceiling["amplitude_retained"]),
+                   ceiling_usable=bool(ceiling["usable"]),
                    max_ramp_m=float(np.abs(solved.ramp).max())
                    if solved.ramp.size else 0.0,
                    seconds=round(time.time() - started, 1),
