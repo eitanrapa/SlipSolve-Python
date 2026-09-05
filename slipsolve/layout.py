@@ -247,42 +247,92 @@ def layout_quality(params, triangles):
 
 
 # -- boundaries ------------------------------------------------------------
-def boundary_node_mask(params, side):
+def node_components(triangles, n_nodes):
+    """An integer label per node: which connected piece of the mesh it is in.
+
+    Two faults carried in one mesh share a frame and a parameterization but no
+    triangles, so "which fault is this node on" is a property of the connectivity
+    and needs nothing stored. A single-fault mesh labels every node ``0``, which
+    is what keeps :func:`boundary_node_mask` bit-identical for one.
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    triangles = np.asarray(triangles, dtype=int)
+    edges = triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2)
+    graph = coo_matrix(
+        (np.ones(len(edges)), (edges[:, 0], edges[:, 1])),
+        shape=(int(n_nodes), int(n_nodes)))
+    return connected_components(graph, directed=False)[1]
+
+
+def boundary_node_mask(params, side, labels=None):
     """Nodes on one edge of the parameter rectangle, by exact equality.
 
     Exact, deliberately: every builder in this module puts a level's nodes on a
     literally shared ``z`` and a level's ends on a literally shared ``s``, so
     there is nothing to round. A tolerance would instead have to be guessed from
     the local spacing, and guessing it too small is silent.
+
+    ⚠️ **``labels`` is what makes this work for more than one fault.** Without
+    it the test is against a *global* extremum, so on a mesh holding two faults
+    only the deeper one has a bottom edge and only the outer ends of the pair are
+    ``left`` and ``right`` -- the second fault's rim silently loses its zero-slip
+    rows and slip runs off it with nothing raised. Pass one integer per node
+    (:func:`node_components`) and each piece is measured against its own extent.
+    A single label reproduces the global test exactly.
     """
     params = np.asarray(params, dtype=float)
     s, z = params[:, 0], params[:, 1]
-    if side == "bottom":
-        return z == z.min()
-    if side == "top":
-        return z == z.max()
-    if side == "left":
-        return s == s.min()
-    if side == "right":
-        return s == s.max()
-    raise ValueError(f"Unknown boundary {side!r}; expected one of {EDGE_SIDES}")
+    if side not in EDGE_SIDES:
+        raise ValueError(f"Unknown boundary {side!r}; expected one of {EDGE_SIDES}")
+    value, extreme = ((z, np.min) if side == "bottom" else
+                      (z, np.max) if side == "top" else
+                      (s, np.min) if side == "left" else (s, np.max))
+    if labels is None:
+        return value == extreme(value)
+
+    labels = np.asarray(labels)
+    if labels.shape != value.shape:
+        raise ValueError(
+            f"labels has {labels.shape} entries against {value.shape} nodes -- "
+            "one component label per node is needed")
+    mask = np.zeros(value.shape, dtype=bool)
+    for label in np.unique(labels):
+        piece = labels == label
+        mask[piece] = value[piece] == extreme(value[piece])
+    return mask
 
 
-def require_boundaries(params, sides=EDGE_SIDES, minimum=2):
+def require_boundaries(params, sides=EDGE_SIDES, minimum=2, labels=None):
     """Refuse a layout whose edges have collapsed to a node or two.
 
     The failure this exists to catch is silent: ``zero_slip_boundary`` selects
     whatever ``boundary_node_mask`` flags, so an edge that resolves to one node
     stops constraining the mesh's rim and slip runs off it with nothing raised.
+
+    With ``labels`` the count is per component and the *thinnest* piece is what
+    is reported, since one unconstrained fault is enough to invalidate the run.
     """
-    thin = {side: int(boundary_node_mask(params, side).sum()) for side in sides}
+    if labels is None:
+        thin = {side: int(boundary_node_mask(params, side).sum()) for side in sides}
+    else:
+        labels = np.asarray(labels)
+        thin = {}
+        for side in sides:
+            mask = boundary_node_mask(params, side, labels)
+            thin[side] = min(int(mask[labels == label].sum())
+                             for label in np.unique(labels))
     bad = {k: v for k, v in thin.items() if v < minimum}
     if bad:
+        pieces = ("" if labels is None
+                  else " (counted on the thinnest of "
+                       f"{len(np.unique(labels))} connected pieces)")
         raise ValueError(
             f"Boundary side(s) {sorted(bad)} hold only {[bad[k] for k in sorted(bad)]} "
-            f"node(s) (at least {minimum} needed). Boundary membership is decided by "
-            "exact equality in (s, z), so nodes meant to sit on an edge must share "
-            "the identical float -- see layout.snap_boundary()."
+            f"node(s){pieces} (at least {minimum} needed). Boundary membership is "
+            "decided by exact equality in (s, z), so nodes meant to sit on an edge "
+            "must share the identical float -- see layout.snap_boundary()."
         )
     return thin
 

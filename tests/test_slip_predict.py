@@ -34,6 +34,7 @@ from slipsolve import (
     model_rms_min,
     predicted_los,
     resample_all,
+    sample_slip,
 )
 
 _LON = np.array([-68.681, -68.300, -67.900, -67.500, -67.100, -66.700, -66.523])
@@ -609,3 +610,108 @@ def test_the_size_clamps_do_not_follow_the_mesh_they_are_bounding(setup):
                            mesh=mesh)
     assert explicit["size_min"] == 123.0
     assert explicit["budget"] == 40
+
+
+# -- sampling a solved model at arbitrary points -------------------------------
+
+@pytest.fixture(scope="module")
+def nodal(setup, coarse):
+    """The same problem on the nodal basis, whose field is not piecewise constant."""
+    _, _, mesh, _, _ = setup
+    obs, _ = coarse
+    return SlipInversion(mesh, obs, basis="node").solve(smoothing=0.3)
+
+
+def test_sample_slip_at_a_node_returns_that_nodes_own_parameter(nodal):
+    """A tent basis is P1 on the mesh's own triangulation, so this is exact.
+
+    Node ``i``'s basis function is 1 there and 0 at every other node, so linear
+    interpolation evaluated at the node must return the parameter itself -- to
+    floating point, not approximately.
+    """
+    params = nodal.mesh.params
+    got = sample_slip(nodal, params[:, 0], params[:, 1], "strike")
+    assert np.isfinite(got).all()
+    assert got == pytest.approx(nodal.strike_slip, abs=1e-12)
+
+
+def test_sample_slip_on_a_nodal_model_averages_to_element_slip(nodal):
+    """At a centroid the P1 field is the mean of the three nodes, which is
+    exactly what ``element_slip`` reports -- so the two must agree there, and
+    only there."""
+    centroids = nodal.mesh.element_params
+    got = sample_slip(nodal, centroids[:, 0], centroids[:, 1], "strike")
+    assert got == pytest.approx(nodal.element_slip[:, 0], abs=1e-12)
+
+
+def test_sample_slip_is_not_the_voronoi_mosaic_probe_slip_returns(nodal):
+    """The bug this function exists for, stated directly.
+
+    ``_probe_slip`` looks slip up by nearest centroid. Under ``basis="node"``
+    that returns a Voronoi mosaic of per-element means and manufactures
+    element-scale facets the model does not have. The two must therefore
+    disagree away from the centroids -- if this test ever passes trivially,
+    something has quietly made the nodal field piecewise constant.
+    """
+    from slipsolve.predict import _probe_lattice, _probe_slip
+
+    probe = _probe_lattice(nodal.mesh, 120, 30)
+    mosaic = np.hypot(*_probe_slip(nodal.mesh, nodal, probe).T)
+    field = sample_slip(nodal, probe[:, 0], probe[:, 1])
+    assert np.isfinite(field).all()
+
+    difference = np.abs(mosaic - field)
+    assert difference.max() > 0.05                 # facets, in metres of slip
+    assert np.median(difference) > 1e-3
+    # Same earthquake either way: the disagreement is discretisation, not signal.
+    assert np.mean(mosaic) == pytest.approx(np.mean(field), rel=0.05)
+
+
+def test_sample_slip_reads_the_containing_element_not_the_nearest_centroid(coarse):
+    """For element-constant slip the field is the value of the triangle a point
+    is *in*. That is the same thing as the nearest centroid only on a mesh of
+    equal elements, so the containing triangle is what is looked up."""
+    _, model = coarse
+    centroids = model.mesh.element_params
+    got = sample_slip(model, centroids[:, 0], centroids[:, 1], "strike")
+    assert got == pytest.approx(model.element_slip[:, 0], abs=1e-12)
+
+
+@pytest.mark.parametrize("which", ["nodal", "element"])
+def test_sample_slip_off_the_mesh_is_nan_and_never_zero(nodal, coarse, which):
+    """⚠️ The silent failure: a unit mismatch must be visible, not read as zero.
+
+    ``LinearTriInterpolator`` returns a *masked* array, and ``np.asarray`` of one
+    is the fill value rather than ``nan`` -- which is how a difference between
+    two models once came back as exactly 0.000 m everywhere and was read as
+    agreement. Both bases fill with ``nan`` instead.
+    """
+    model = nodal if which == "nodal" else coarse[1]
+    s = np.array([-5.0e5, 5.0e5, 0.0])
+    z = np.array([0.0, -1.0e3, 5.0e5])            # the last is above the surface
+    got = sample_slip(model, s, z)
+    assert np.isnan(got).all()
+    assert not (got == 0.0).any()
+
+
+def test_sample_slip_keeps_the_shape_it_was_given(nodal):
+    params = nodal.mesh.params
+    s, z = np.meshgrid(np.linspace(params[:, 0].min(), params[:, 0].max(), 7),
+                       np.linspace(params[:, 1].min(), params[:, 1].max(), 5))
+    assert sample_slip(nodal, s, z).shape == (5, 7)
+
+
+def test_sample_slip_names_its_components_like_plot_slip(nodal):
+    """Magnitude is the hypot of two interpolated components, not the
+    interpolation of a magnitude -- the hypot of two linear functions is not
+    linear, so the order matters."""
+    centroids = nodal.mesh.element_params
+    s, z = centroids[:, 0], centroids[:, 1]
+    strike = sample_slip(nodal, s, z, "strike")
+    dip = sample_slip(nodal, s, z, "dip")
+    assert sample_slip(nodal, s, z, "magnitude") == pytest.approx(np.hypot(strike, dip))
+
+    with pytest.raises(ValueError, match="component must be one of"):
+        sample_slip(nodal, s, z, "Magnitude")
+    with pytest.raises(ValueError, match="same shape"):
+        sample_slip(nodal, np.zeros(3), np.zeros(4))

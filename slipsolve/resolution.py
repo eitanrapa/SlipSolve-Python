@@ -225,6 +225,156 @@ def parameter_params(inversion):
             else mesh.element_params)
 
 
+def parameter_positions(inversion):
+    """Each parameter's ``(x, y, z)`` position in the local frame, metres.
+
+    The 3-D counterpart of :func:`parameter_params`, and the distance Barnhart &
+    Lohman's Gaussian width is fitted against. On a steeply dipping fault it is
+    close to the parameter-plane distance, but only because the surface happens
+    to be nearly developable there -- the two separate on a shallow or strongly
+    curved one, and it is the 3-D chord the published metric uses.
+    """
+    mesh = inversion.mesh
+    return (mesh.nodes if inversion.basis.name != "element" else mesh.centroids)
+
+
+#: Rows whose weight falls below this fraction of the row's own peak are dropped
+#: from the Gaussian fit. Not a tuning knob so much as a floor: entries at or
+#: below rounding noise carry no information about a width and, in the log-space
+#: seed, contribute arbitrarily large negative values.
+GAUSSIAN_FIT_FLOOR = 1e-4
+
+#: Damped Gauss-Newton steps for :func:`gaussian_kernel_width`. Each is a handful
+#: of array reductions over the whole block at once, so this is cheap; 40 is well
+#: past convergence on every kernel measured and the step is rejected once it
+#: stops improving.
+GAUSSIAN_FIT_STEPS = 40
+
+
+def gaussian_kernel_width(weights, distance, floor=GAUSSIAN_FIT_FLOOR,
+                          steps=GAUSSIAN_FIT_STEPS):
+    """One isotropic 1-sigma width per row, by least-squares Gaussian fit.
+
+    **Barnhart & Lohman's own metric**, which :func:`resolution_kernels`'
+    second moments are not: model row ``k`` of ``R`` as
+    ``|R[k, j]| ~ A exp(-d_kj^2 / 2 sigma^2)`` against 3-D distance and report
+    ``sigma``. One scalar per parameter, isotropic by construction -- the
+    anisotropy the second moments report is genuinely there, but it is not what
+    the published criterion measures.
+
+    **Why it differs from the second moment, and by how much.** Second moments
+    weight by ``d^2`` and so are dominated by the far field. Measured on the real
+    six-scene model, 19.4% of a row's ``|R|`` mass sits beyond 3 sigma against
+    the 0.27% a Gaussian would put there -- a 70x excess -- and the moment comes
+    out **3.09x** the fitted sigma along strike (39.3 km against 11.5). Trimming
+    the weakest 10% of each row brings the ratio to 1.05, which identifies the
+    tails as the whole of the difference. A least-squares fit weights by residual
+    in linear space instead, so it follows the core.
+
+    ⚠️ **Fitted properly, not linearised.** Taking logs makes the problem linear
+    in ``d^2``, and that is used as a starting point, but a log-space fit is
+    biased by exactly the tails this metric exists to look past. Measured against
+    ``scipy.optimize.curve_fit`` on a Gaussian of sigma 15 km: with a 2% flat
+    floor added, weighted log fits return 28.2 km (weights ``|R|^2``) and 35.4 km
+    (weights ``|R|``) where the true least-squares answer is 15.4 km. The damped
+    Gauss-Newton below returns 15.43 km, and matches ``curve_fit`` to the
+    reported precision on every kernel shape tried -- clean, noisy, heavy-tailed
+    and floored -- while staying vectorised over every row at once (0.49 s for a
+    900-parameter block).
+
+    Returns ``nan`` for a row no Gaussian describes: fewer than three usable
+    entries, or a fit that does not decay.
+    """
+    weights = np.abs(np.asarray(weights, dtype=float))
+    distance = np.asarray(distance, dtype=float)
+    if weights.ndim != 2 or distance.shape != weights.shape:
+        raise ValueError(
+            f"weights {weights.shape} and distance {distance.shape} must be the "
+            "same 2-D shape -- one row of R against the distances from that "
+            "parameter to every other")
+    x = distance ** 2
+    peak = np.maximum(weights.max(axis=1, keepdims=True), 1e-300)
+    keep = weights >= peak * float(floor)
+    kept = np.where(keep, weights, 0.0)
+
+    amplitude, decay = _log_space_seed(weights, x, keep)
+    # `decay` is 1 / (2 sigma^2), so a positive value is a kernel that falls off.
+    amplitude = np.where(np.isfinite(amplitude), amplitude,
+                         np.log(peak[:, 0]))
+    decay = np.where(np.isfinite(decay) & (decay > 0), decay,
+                     1.0 / np.maximum(x.max(axis=1), 1e-9))
+
+    def residual_cost(a, b):
+        return (np.where(keep, kept - _gaussian(a, b, x), 0.0) ** 2).sum(axis=1)
+
+    damping = np.full(amplitude.shape, 1e-3)
+    cost = residual_cost(amplitude, decay)
+    for _ in range(int(steps)):
+        model = np.where(keep, _gaussian(amplitude, decay, x), 0.0)
+        residual = kept - model
+        squared = model * model
+        # Normal equations for the Jacobian of exp(a - b x) in (a, b), damped
+        # Levenberg-style so a bad step is rejected rather than diverging.
+        h11 = squared.sum(axis=1)
+        h12 = -(x * squared).sum(axis=1)
+        h22 = (x * x * squared).sum(axis=1)
+        g1 = (model * residual).sum(axis=1)
+        g2 = -(x * model * residual).sum(axis=1)
+        det = h11 * (1 + damping) * h22 * (1 + damping) - h12 ** 2
+        with np.errstate(divide="ignore", invalid="ignore"):
+            step_a = (h22 * (1 + damping) * g1 - h12 * g2) / det
+            step_b = (h11 * (1 + damping) * g2 - h12 * g1) / det
+        trial_a = amplitude + np.nan_to_num(step_a)
+        trial_b = decay + np.nan_to_num(step_b)
+        trial = residual_cost(trial_a, trial_b)
+
+        better = np.isfinite(trial) & (trial < cost) & (trial_b > 0)
+        amplitude = np.where(better, trial_a, amplitude)
+        decay = np.where(better, trial_b, decay)
+        cost = np.where(better, trial, cost)
+        damping = np.where(better, np.maximum(damping * 0.3, 1e-9),
+                           np.minimum(damping * 3.0, 1e6))
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sigma = 1.0 / np.sqrt(2.0 * decay)
+    # ⚠️ A row that does not decay is a *fit*, not a failure: the least-squares
+    # answer for a flat row is a Gaussian so wide it is locally constant, and it
+    # came back as 2.4e13 m before this guard. Nothing beyond the largest
+    # distance in the row is evidence, so a width past it is extrapolation and is
+    # reported as no width at all -- a hole a caller can see, rather than a
+    # number that silently swamps a size field.
+    reach = distance.max(axis=1)
+    return np.where((keep.sum(axis=1) >= 3) & (decay > 0) & np.isfinite(sigma)
+                    & (sigma <= reach), sigma, np.nan)
+
+
+def _gaussian(amplitude, decay, x):
+    """``exp(a - b x)`` per row, clipped where it would overflow rather than warn."""
+    return np.exp(np.clip(amplitude[:, None] - decay[:, None] * x, -700.0, 700.0))
+
+
+def _log_space_seed(weights, x, keep):
+    """``(a, b)`` from a weighted straight-line fit of ``log|R|`` against ``d^2``.
+
+    Only a starting point. Weights are ``|R|^2``, which is the first-order
+    correction for the log's variance distortion and the least-bad linearisation
+    -- but it is still biased by heavy tails, which is why it is followed by the
+    real fit rather than returned.
+    """
+    weight = np.where(keep, weights, 0.0) ** 2
+    y = np.log(np.where(keep, weights, 1.0))
+    sw = weight.sum(axis=1)
+    sx = (weight * x).sum(axis=1)
+    sy = (weight * y).sum(axis=1)
+    sxx = (weight * x * x).sum(axis=1)
+    sxy = (weight * x * y).sum(axis=1)
+    det = sw * sxx - sx ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slope = np.where(det > 0, (sw * sxy - sx * sy) / det, np.nan)
+        intercept = (sy - slope * sx) / np.where(sw > 0, sw, 1.0)
+    return intercept, -slope
+
+
 def resolution_kernels(inversion, matrix):
     """Averaging-kernel width and offset per parameter, from the full ``R``.
 
@@ -248,6 +398,12 @@ def resolution_kernels(inversion, matrix):
 
     ``self_weight`` is ``|R[k, k]|`` over the row's total absolute weight: the
     fraction of the kernel that is the parameter itself.
+
+    ``width_gaussian`` is the other convention: one isotropic 1-sigma from a
+    least-squares Gaussian fit against 3-D distance, which is what Barnhart &
+    Lohman report. It is not a smoothed version of the moments and does not
+    bracket them -- on a kernel with heavy tails it is several times smaller. See
+    :func:`gaussian_kernel_width` for which to believe when they disagree.
     """
     matrix = np.asarray(matrix, dtype=float)
     n = inversion.basis.n_basis
@@ -266,6 +422,10 @@ def resolution_kernels(inversion, matrix):
             "positions; resolution_kernels needs the basis the matrix was built in"
         )
     s, z = params[:, 0], params[:, 1]
+    # Barnhart & Lohman fit against 3-D distance, so the Gaussian width needs
+    # positions in space rather than in the parameter plane.
+    xyz = np.asarray(parameter_positions(inversion), dtype=float)
+    distance = np.linalg.norm(xyz[None, :, :] - xyz[:, None, :], axis=-1)
 
     blocks = {}
     for name, start in (("strike_slip", 0), ("dip_slip", n)):
@@ -280,11 +440,12 @@ def resolution_kernels(inversion, matrix):
             offset_along=(block * ds).sum(axis=1) / safe,
             offset_down=(block * dz).sum(axis=1) / safe,
             self_weight=np.abs(np.diag(block)) / safe,
+            width_gaussian=gaussian_kernel_width(block, distance),
         )
 
     data = {}
-    for field in ("width_along", "width_down", "offset_along", "offset_down",
-                  "self_weight"):
+    for field in ("width_along", "width_down", "width_gaussian",
+                  "offset_along", "offset_down", "self_weight"):
         for name in blocks:
             data[f"{name}_{field}"] = ("basis", blocks[name][field])
     # The worse-resolved component is the one that bounds what the mesh may
@@ -293,6 +454,11 @@ def resolution_kernels(inversion, matrix):
         blocks["strike_slip"]["width_along"], blocks["dip_slip"]["width_along"]))
     data["width_down"] = ("basis", np.maximum(
         blocks["strike_slip"]["width_down"], blocks["dip_slip"]["width_down"]))
+    # `fmax`, not `maximum`: a row that does not decay fits no width at all, and
+    # one component failing must not erase the component that succeeded.
+    data["width_gaussian"] = ("basis", np.fmax(
+        blocks["strike_slip"]["width_gaussian"],
+        blocks["dip_slip"]["width_gaussian"]))
     data["self_weight"] = ("basis", np.minimum(
         blocks["strike_slip"]["self_weight"], blocks["dip_slip"]["self_weight"]))
     # Offsets are signed, so "worse" is the larger magnitude, not the larger value.
@@ -800,7 +966,10 @@ def size_field(mesh, size):
 #: have to be reconciled. ``"min"`` keeps the better-resolved direction, which
 #: costs redundancy along strike but never discards structure the data can see;
 #: ``"max"`` does the opposite and is the one that loses information.
-KERNEL_REDUCTIONS = ("min", "geometric", "max")
+#: How :func:`kernel_element_size` turns an anisotropic kernel into one number.
+#: ``"gaussian"`` is the odd one out and the only one that is Barnhart & Lohman's
+#: own metric: it is already a single isotropic width, so nothing is reduced.
+KERNEL_REDUCTIONS = ("min", "geometric", "max", "gaussian")
 
 
 def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="min",
@@ -832,12 +1001,12 @@ def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="min",
     :data:`KERNEL_REDUCTIONS`. ``report`` reuses a
     :func:`resolution_report` you already have, which is the expensive part.
 
-    ⚠️ **This is NOT Barnhart & Lohman's metric, despite being the kernel-width
-    option.** They fit a *Gaussian* to row ``k`` of ``R`` against 3-D distance and
-    take its 1-sigma; :func:`resolution_kernels` takes *second moments*, which
-    weight by distance squared. The averaging kernel here is strongly
-    non-Gaussian -- measured on the real six-scene model, **19.4% of a row's
-    ``|R|`` mass sits beyond 3 sigma of the Gaussian fit against the 0.27% a
+    ⚠️ **The moment reductions are NOT Barnhart & Lohman's metric, despite being
+    the kernel-width option.** They fit a *Gaussian* to row ``k`` of ``R`` against
+    3-D distance and take its 1-sigma; :func:`resolution_kernels`' widths are
+    *second moments*, which weight by distance squared. The averaging kernel here
+    is strongly non-Gaussian -- measured on the real six-scene model, **19.4% of a
+    row's ``|R|`` mass sits beyond 3 sigma of the Gaussian fit against the 0.27% a
     Gaussian would put there**, a 70x excess -- so the second moment reads the
     tails and comes out **3.09x** their sigma along strike (39.3 km against 11.5).
     Trimming the weakest 10% of each row brings the ratio to 1.05, which
@@ -849,11 +1018,15 @@ def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="min",
     The anisotropy is real (2.67x median) but it is not being *reconciled* -- one
     direction is simply always chosen.
 
-    Consequence, measured: a four-round loop sized from this lost to one sized
-    from the resolution diagonal at every effective rank, and to a *fixed* mesh at
-    low rank. That is evidence against **this estimator**, not against Barnhart &
-    Lohman's method, which has never been run here. Fitting a Gaussian instead is
-    the untested alternative.
+    Consequence, measured: a four-round loop sized from ``reduce="min"`` lost to
+    one sized from the resolution diagonal at every effective rank, and to a
+    *fixed* mesh at low rank. That was evidence against **that estimator**, not
+    against Barnhart & Lohman's method.
+
+    ``reduce="gaussian"`` is now their method --
+    :func:`gaussian_kernel_width`, fitted rather than linearised -- and it is the
+    arm that has not been run against the others on real data. It falls back to
+    ``"min"`` on any parameter whose row fits no width.
     """
     if reduce not in KERNEL_REDUCTIONS:
         raise ValueError(
@@ -863,7 +1036,14 @@ def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="min",
 
     along = np.asarray(report["width_along"].values, dtype=float)
     down = np.asarray(report["width_down"].values, dtype=float)
-    if reduce == "min":
+    if reduce == "gaussian":
+        # Already isotropic -- B&L fit one sigma against 3-D distance -- so there
+        # is nothing to reconcile. A row that fitted no width falls back to the
+        # moment reduction the other options use, rather than to a hole in the
+        # size field.
+        width = np.asarray(report["width_gaussian"].values, dtype=float)
+        width = np.where(np.isfinite(width), width, np.minimum(along, down))
+    elif reduce == "min":
         width = np.minimum(along, down)
     elif reduce == "max":
         width = np.maximum(along, down)

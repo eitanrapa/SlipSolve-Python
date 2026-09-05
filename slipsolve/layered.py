@@ -257,6 +257,7 @@ class LayeredPointSource:
         centroids, normals = mesh.centroids, mesh.normals
         cap = int(np.sqrt(self.max_points))
         pairs = capped = 0
+        overshoot = 1.0
         histogram = {}
 
         for index, elements in supports:
@@ -265,9 +266,14 @@ class LayeredPointSource:
                 p1, p2, p3 = vertices[element]
                 normal = normals[element]
                 size = np.sqrt(2.0 * areas[element])
-                orders = self._orders(centroids[element], size, x, y, z)
+                wanted = self._orders(centroids[element], size, x, y, z,
+                                      clip=False)
+                orders = np.clip(wanted, 1, cap).astype(int)
                 pairs += int(orders.size)
-                capped += int((orders >= cap).sum())
+                over = wanted > cap
+                capped += int(over.sum())
+                if over.any():
+                    overshoot = max(overshoot, float((wanted[over] / cap).max()))
                 values, counts = np.unique(orders, return_counts=True)
                 for v, c in zip(values.tolist(), counts.tolist()):
                     histogram[int(v)] = histogram.get(int(v), 0) + int(c)
@@ -296,6 +302,16 @@ class LayeredPointSource:
             "order_histogram": dict(sorted(histogram.items())),
             "tolerance": self.tolerance,
             "max_points": self.max_points,
+            # How far past the cap the worst pair asked to go, and what the error
+            # model makes of that. ⚠️ `implied_error` is that model EXTRAPOLATED
+            # past where it was calibrated -- it was fitted over r/L 1.5-35 and a
+            # capped pair is inside r ~ 2L by construction, where the smooth
+            # 1/(k r) law stops describing the integrand at all. Read it as an
+            # order of magnitude on how much the cap cost, which is strictly more
+            # than the bare count said, and not as an error bar.
+            "worst_capped_ratio": overshoot,
+            "implied_error": (None if self.tolerance is None
+                              else self.tolerance * overshoot ** 2),
         }
         self._warn_if_capped()
     def _warn_if_capped(self):
@@ -314,13 +330,17 @@ class LayeredPointSource:
         warnings.warn(
             f"{fraction:.1%} of {report['pairs']} source-receiver pairs hit the "
             f"quadrature order cap (max_points={self.max_points}), so tolerance="
-            f"{self.tolerance:g} was NOT met on them. The cap binds within about "
-            "twice an element's own size, i.e. on near-fault observations of "
-            "shallow elements. Raise max_points, or use larger exclude_within.",
+            f"{self.tolerance:g} was NOT met on them. The worst asked for "
+            f"{report['worst_capped_ratio']:.1f}x the order it was allowed, which "
+            f"the error model puts at about {report['implied_error']:.1e} there "
+            "(extrapolated past its calibration range, so an order of magnitude "
+            "rather than a bound). The cap binds within about twice an element's "
+            "own size, i.e. on near-fault observations of shallow elements. "
+            "Raise max_points, or use larger exclude_within.",
             RuntimeWarning, stacklevel=3,
         )
 
-    def _orders(self, centroid, size, x, y, z):
+    def _orders(self, centroid, size, x, y, z, clip=True):
         """Quadrature order for each observation, from how far away it is.
 
         Solving the measured error model ``C * (k * r / L) ** -2 = tolerance``
@@ -345,6 +365,11 @@ class LayeredPointSource:
         law stops describing anything once the observation is inside the
         element's own footprint.
 
+        ``clip=False`` returns the order that was *asked for* before the cap,
+        which is the only thing that says how far past the cap a pair sat -- and
+        so the only route to how badly its tolerance was missed. See
+        :meth:`quadrature_report`'s ``implied_error``.
+
         The error constant was calibrated against constant-slip triangular
         dislocations. It carries over to the tented integrand a nodal basis
         produces -- measured at 1.2e-5 relative against the fixed rule -- but it
@@ -360,6 +385,8 @@ class LayeredPointSource:
         # with the safety factor folded in under the root.
         gain = np.sqrt(_QUADRATURE_SAFETY * _QUADRATURE_CONSTANT / self.tolerance)
         wanted = np.ceil(gain * size / r)
+        if not clip:
+            return wanted
         return np.clip(wanted, 1, np.sqrt(self.max_points)).astype(int)
 
     def _sum_sources(self, points, weights, moment, x, y):

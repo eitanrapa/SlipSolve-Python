@@ -518,3 +518,48 @@ def test_saturating_the_cap_is_reported_not_swallowed(uniform_tables, scene):
     with pytest.warns(RuntimeWarning, match="hit the quadrature order cap"):
         engine.displacement(mesh, ox, oy, np.zeros_like(ox))
     assert engine.quadrature_report["capped_fraction"] > CAPPED_PAIR_WARN_FRACTION
+
+
+def test_a_capped_pair_says_how_far_past_the_cap_it_asked_to_go(uniform_tables, scene):
+    """A count of capped pairs does not distinguish "just over" from "hopeless".
+
+    The cap is a known, silent tolerance violation, and until the overshoot is
+    reported there is no way to tell a pair that wanted 1.2x its allowed order
+    from one that wanted 400x. ``implied_error`` is the error model read
+    backwards through that ratio -- extrapolated well past its calibration range,
+    which is why it is documented as an order of magnitude and not a bound.
+    """
+    _, _, mesh, ox, oy = scene
+    tight = LayeredPointSource(uniform_tables, tolerance=1e-12, max_points=9)
+    with pytest.warns(RuntimeWarning):
+        tight.displacement(mesh, ox, oy, np.zeros_like(ox))
+    report = tight.quadrature_report
+
+    assert report["worst_capped_ratio"] > 1.0
+    # err ~ (k r / L)^-2, so missing the order by `ratio` costs `ratio^2`.
+    assert report["implied_error"] == pytest.approx(
+        report["tolerance"] * report["worst_capped_ratio"] ** 2)
+    assert report["implied_error"] > report["tolerance"]
+
+    # An uncapped assembly claims no overshoot at all, rather than a small one.
+    loose = LayeredPointSource(uniform_tables, tolerance=3e-3, max_points=900)
+    loose.displacement(mesh, ox, oy, np.zeros_like(ox))
+    assert loose.quadrature_report["capped"] == 0
+    assert loose.quadrature_report["worst_capped_ratio"] == 1.0
+    assert loose.quadrature_report["implied_error"] == pytest.approx(3e-3)
+
+
+def test_the_orders_the_cap_refused_are_still_recoverable(uniform_tables, scene):
+    """``clip=False`` is what makes the overshoot measurable: the clipped array
+    has thrown the request away by the time anyone could look at it."""
+    _, _, mesh, ox, oy = scene
+    engine = LayeredPointSource(uniform_tables, tolerance=1e-12, max_points=9)
+    centroid = mesh.centroids[0]
+    size = np.sqrt(2.0 * mesh.areas[0])
+    oz = np.zeros_like(ox)
+
+    wanted = engine._orders(centroid, size, ox, oy, oz, clip=False)
+    clipped = engine._orders(centroid, size, ox, oy, oz)
+    assert (wanted >= clipped).all()
+    assert wanted.max() > clipped.max()
+    np.testing.assert_array_equal(clipped, np.clip(wanted, 1, 3).astype(int))

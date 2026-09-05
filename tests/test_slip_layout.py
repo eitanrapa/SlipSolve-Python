@@ -325,3 +325,94 @@ def test_an_unstructured_layout_keeps_a_rectangular_outline():
         assert mask.sum() >= 2
         got = (s if side in ("left", "right") else z)[mask]
         np.testing.assert_array_equal(got, np.full(mask.sum(), expected))
+
+
+# -- more than one fault in one mesh ------------------------------------------
+
+@pytest.fixture
+def two_faults(trace, frame):
+    """One mesh carrying two disconnected faults, of different depths.
+
+    Different depths on purpose: it is what makes the global-extremum test fail
+    in the way that matters, since only the deeper piece can own the mesh's
+    minimum ``z``.
+    """
+    deep = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=10e3)
+    shallow = FaultMesh.vertical(trace, frame, max_depth=12e3, edge_length=10e3)
+    gap = deep.params[:, 0].max() + 40e3
+    return FaultMesh(
+        np.vstack([deep.nodes, shallow.nodes + np.array([0.0, 300e3, 0.0])]),
+        triangles=np.vstack([deep.triangles, shallow.triangles + deep.n_nodes]),
+        params=np.vstack([deep.params, shallow.params + np.array([gap, 0.0])]),
+        frame=frame,
+    )
+
+
+def test_a_single_fault_is_one_component_and_the_mask_does_not_move(trace, frame):
+    """The backward-compatibility gate: every mesh any builder here produces has
+    one component, and there the per-component test *is* the global one."""
+    mesh = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=10e3)
+    assert mesh.node_components.max() == 0
+    for side in L.EDGE_SIDES:
+        np.testing.assert_array_equal(
+            mesh.boundary_nodes(side),
+            L.boundary_node_mask(mesh.params, side))
+
+
+def test_the_global_extremum_test_loses_a_second_faults_edges(two_faults):
+    """⚠️ The bug, stated directly. Do not "simplify" the mask back to a global
+    extremum: on two faults only the deeper one has a bottom, and only the outer
+    ends of the pair are left and right, so three of the second fault's four
+    edges vanish and nothing raises."""
+    labels = two_faults.node_components
+    assert sorted(np.unique(labels)) == [0, 1]
+
+    per_component = {
+        side: [int(two_faults.boundary_nodes(side)[labels == k].sum())
+               for k in (0, 1)]
+        for side in L.EDGE_SIDES
+    }
+    global_only = {
+        side: [int(L.boundary_node_mask(two_faults.params, side)[labels == k].sum())
+               for k in (0, 1)]
+        for side in L.EDGE_SIDES
+    }
+
+    # The shallower fault has no bottom edge at all under the global test.
+    assert global_only["bottom"][1] == 0
+    assert per_component["bottom"][1] > 0
+    # And each fault owns exactly one of left/right, instead of both.
+    assert 0 in (global_only["left"][1], global_only["right"][0])
+    for side in L.EDGE_SIDES:
+        assert all(n >= 2 for n in per_component[side]), side
+
+
+def test_require_boundaries_passes_a_pair_it_should_refuse(two_faults):
+    """The failure is silent, which is the only reason it is worth a test: the
+    global check is satisfied by one fault's edges and never looks at the other."""
+    labels = two_faults.node_components
+    L.require_boundaries(two_faults.params)          # passes, wrongly
+
+    counts = L.require_boundaries(two_faults.params, labels=labels)
+    assert all(n >= 2 for n in counts.values())
+    # It reports the THINNEST piece, since one unconstrained fault invalidates
+    # the run whatever the other one has.
+    assert counts["bottom"] == min(
+        int(L.boundary_node_mask(two_faults.params, "bottom", labels)[labels == k].sum())
+        for k in (0, 1))
+
+
+def test_a_component_with_a_collapsed_edge_is_still_refused(trace, frame):
+    """Per-component counting must not become a way of passing: a piece whose
+    own edge has one node is as unconstrained as it was before."""
+    mesh = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=10e3)
+    params = np.vstack([mesh.params, [[1e6, 0.0], [1e6 + 1.0, -1.0]]])
+    labels = np.concatenate([np.zeros(mesh.n_nodes, int), [1, 1]])
+    with pytest.raises(ValueError, match="connected pieces"):
+        L.require_boundaries(params, labels=labels)
+
+
+def test_the_boundary_mask_checks_its_label_count(trace, frame):
+    mesh = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=10e3)
+    with pytest.raises(ValueError, match="one component label per node"):
+        L.boundary_node_mask(mesh.params, "top", np.zeros(3, int))

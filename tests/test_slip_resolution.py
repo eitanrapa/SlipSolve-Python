@@ -498,3 +498,104 @@ def test_kernel_element_size_scales_with_fraction(setup):
     half = R.kernel_element_size(inv, 1.0, fraction=0.5, **kw)
     quarter = R.kernel_element_size(inv, 1.0, fraction=0.25, **kw)
     np.testing.assert_allclose(quarter, 0.5 * half, rtol=1e-12)
+
+
+# -- the Gaussian kernel width (Barnhart & Lohman's own metric) ---------------
+
+def _distances(n=240, extent=120e3, seed=0):
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.uniform(0.0, extent, n))[None, :]
+
+
+@pytest.mark.parametrize("sigma", [3e3, 12e3, 45e3])
+def test_a_planted_gaussian_is_recovered_exactly(sigma):
+    """The estimator has a closed-form answer on its own model, so anything
+    short of machine precision here is an arithmetic error, not a fit."""
+    distance = _distances()
+    weights = np.exp(-distance ** 2 / (2 * sigma ** 2))
+    got = R.gaussian_kernel_width(weights, distance)
+    assert got[0] == pytest.approx(sigma, rel=1e-9)
+
+
+def test_the_gaussian_width_is_not_biased_by_a_heavy_tail():
+    """⚠️ The whole reason this is fitted rather than linearised.
+
+    A log-space fit is dominated by the tail entries -- which is precisely the
+    behaviour that makes the *second moment* disagree with the published metric
+    by 3x on real data. Against a 15 km Gaussian carrying a 2% flat floor, the
+    weighted log fits return 28 km and 35 km; least squares returns 15.4 km.
+    """
+    distance = _distances()
+    sigma = 15e3
+    clean = np.exp(-distance ** 2 / (2 * sigma ** 2))
+    floored = clean + 0.02
+    tailed = clean + 0.02 * np.exp(-distance / 60e3)
+
+    assert R.gaussian_kernel_width(floored, distance)[0] == pytest.approx(
+        15.43e3, rel=0.02)
+    assert R.gaussian_kernel_width(tailed, distance)[0] == pytest.approx(
+        15.22e3, rel=0.02)
+
+    # The seed on its own is the biased answer, which is why it is only a seed.
+    keep = np.ones_like(floored, dtype=bool)
+    _, decay = R._log_space_seed(floored, distance ** 2, keep)
+    assert 1.0 / np.sqrt(2.0 * decay[0]) > 25e3
+
+
+def test_a_row_that_does_not_decay_has_no_width():
+    """⚠️ Least squares *succeeds* on a flat row -- the best Gaussian is one so
+    wide it is locally constant -- and returned 2.4e13 m before this guard.
+    Nothing past the largest distance in the row is evidence, so a fit out there
+    is reported as no answer rather than as a number that swamps a size field."""
+    distance = _distances()
+    assert np.isnan(R.gaussian_kernel_width(np.ones_like(distance), distance)[0])
+    # Too few entries above the floor to fit a curvature at all.
+    spike = np.zeros_like(distance)
+    spike[0, 0] = 1.0
+    assert np.isnan(R.gaussian_kernel_width(spike, distance)[0])
+
+
+def test_the_gaussian_width_is_smaller_than_the_second_moment(setup):
+    """Both widths describe the same kernel and they are not interchangeable.
+
+    Second moments weight by distance squared and so read the tails; the fit
+    follows the core. On a real kernel the fit is therefore the smaller of the
+    two, and treating them as one number is what the docstrings warn about.
+    """
+    _, _, _, inversion = setup
+    report = R.resolution_report(inversion, 1.0)
+    fitted = report["width_gaussian"].values
+    along = report["width_along"].values
+
+    assert np.isfinite(fitted).mean() > 0.9, "most rows should fit a width"
+    assert np.nanmedian(fitted) < np.median(along)
+    assert np.nanmedian(fitted) > 0.0
+
+
+def test_the_gaussian_width_reaches_the_size_field(setup):
+    """``reduce="gaussian"`` is how the published criterion gets into a mesh."""
+    _, _, mesh, inversion = setup
+    report = R.resolution_report(inversion, 1.0)
+    kw = dict(report=report, size_min=1.0, size_max=1e9)
+    fitted = R.kernel_element_size(inversion, 1.0, reduce="gaussian", **kw)
+    moment = R.kernel_element_size(inversion, 1.0, reduce="min", **kw)
+
+    assert fitted.shape == (mesh.n_elements,)
+    assert np.isfinite(fitted).all(), "a NaN row must fall back, not propagate"
+    assert not np.allclose(fitted, moment), "it is a different criterion"
+
+
+def test_gaussian_kernel_width_checks_its_shapes():
+    with pytest.raises(ValueError, match="same 2-D shape"):
+        R.gaussian_kernel_width(np.ones((4, 4)), np.ones((4, 5)))
+    with pytest.raises(ValueError, match="same 2-D shape"):
+        R.gaussian_kernel_width(np.ones(4), np.ones(4))
+
+
+def test_parameter_positions_are_three_dimensional(setup):
+    """The fit is against 3-D distance, which is what B&L use -- and on a dipping
+    fault that is not the parameter-plane distance."""
+    _, _, mesh, inversion = setup
+    xyz = R.parameter_positions(inversion)
+    assert xyz.shape == (inversion.basis.n_basis, 3)
+    assert xyz.shape[0] == R.parameter_params(inversion).shape[0]

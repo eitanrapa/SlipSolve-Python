@@ -76,7 +76,8 @@ from .layered import LayeredPointSource
 from .layout import MeshLayout, graded_layout, lloyd_layout, triangulate
 from .mesh import FaultMesh
 from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
-from .predict import iterate_sampling, model_rms_min, predicted_los
+from .predict import (iterate_sampling, model_rms_min, predicted_los,
+                      sample_slip)
 from .resolution import (
     adapt_layout,
     element_resolution,
@@ -148,6 +149,7 @@ __all__ = [
     "resolution_matrix",
     "resolution_report",
     "run_edgrn",
+    "sample_slip",
     "scene_covariance",
     "scene_report",
     "size_field",

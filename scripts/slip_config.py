@@ -42,6 +42,7 @@ rebuilds the mesh from this file, and ``load_observations`` checks only the
 mesh than was sampled for, with no error. Export them once per session.
 """
 
+import json
 import os
 import re
 from pathlib import Path
@@ -68,8 +69,9 @@ except ImportError as exc:                                                      
     ) from exc
 from slipsolve import (                                                 # noqa: E402
     EdgrnTables, FaultMesh, FaultSegment, FaultTrace, LayeredPointSource,
-    VelocityModel, run_edgrn, scene_report,
+    VelocityModel, calibrate, run_edgrn, scene_report,
 )
+from slipsolve.covariance import CovarianceModel                        # noqa: E402
 from slipsolve.plot import plot_coverage                                # noqa: E402
 
 
@@ -510,6 +512,107 @@ RAMP_KINDS = tuple((os.environ.get("NISAR_RAMP_KINDS")
 RAMP_TOLERANCE = float(os.environ.get("NISAR_RAMP_TOLERANCE", 0.20))
 
 
+# -- calibration: what wavelength, what rank, what budget --------------------
+#: Checkerboard wavelengths to plant, metres. A ladder, not one size: a single
+#: wavelength cannot tell "the data cannot see this" from "the regulariser threw
+#: it away", since both score low. One rung must fail at every damping and one
+#: must recover, and the crossing between them is the answer -- so bracket the
+#: expected resolving length rather than guessing it.
+CALIBRATION_CELLS = tuple(_floats(os.environ.get("NISAR_CAL_CELLS"))
+                          or calibrate.DEFAULT_CELLS)
+
+#: Element budgets to compare in stage 3. ⚠️ The default drops a rung *below*
+#: ``calibrate.DEFAULT_BUDGETS``, deliberately: measured against recovery error
+#: the interesting end of this ladder is the low one, and an inherited budget is
+#: usually the larger of the two mistakes.
+CALIBRATION_BUDGETS = tuple(int(v) for v in
+                            (_floats(os.environ.get("NISAR_CAL_BUDGETS"))
+                             or (165, 330, 660, 1320)))
+
+CALIBRATION_LAYOUTS = tuple((os.environ.get("NISAR_CAL_LAYOUTS")
+                             or ",".join(calibrate.DEFAULT_LAYOUTS))
+                            .replace(",", " ").split())
+
+#: Effective ranks to score. Spans an L-curve corner at the low end to well past
+#: it, because the corner and the minimum-error rung are **not** the same rank
+#: once truth is known -- measured, the corner sat at 21 while error against
+#: truth was still falling at 79.
+CALIBRATION_RANKS = tuple(_floats(os.environ.get("NISAR_CAL_RANKS"))
+                          or calibrate.DEFAULT_RANKS)
+
+#: Noise realisations in stage 2. One seed cannot separate an optimum from a
+#: realisation; measured seed scatter on the real scenes was sd 0.004-0.011 in
+#: relative error, against a 0.005 gap between the two best rungs.
+CALIBRATION_SEEDS = int(os.environ.get("NISAR_CAL_SEEDS", calibrate.DEFAULT_SEEDS))
+
+#: ⚠️ **Not optional on a real fault, and the default is not a safe one.**
+#: ``target_element_size`` caps element growth at ``current.max() * max_ratio``;
+#: measured on the Venezuela geometry that is 21.6 km, and the loop spent its
+#: whole budget on along-strike detail -- 11 depth levels down to **5**, the
+#: coarsest element out to 19.9 km, and a 20 km checkerboard retaining 0.754 of
+#: its amplitude on the mesh that answered while the starting mesh had said
+#: 0.993. Set an absolute cap and the collapse cannot happen. 5 km buys a 3.45x
+#: down-dip margin at a 20 km cell for the same element count as 10 km, which
+#: only reaches 2.00 -- Nyquist exactly, with no margin.
+CALIBRATION_SIZE_MAX = float(os.environ.get("NISAR_CAL_SIZE_MAX", 5e3))
+
+#: Rounds per loop. ``run_case`` holds the mesh fixed on the last one, so this is
+#: two adaptation rounds -- which is where the model converged when it was
+#: measured (median probe change 0.0330 -> 0.0081 m from round 1 to 2, then only
+#: 0.0081 -> 0.0024 m over the next seven). Six rounds cost 2.9x and moved the
+#: answer by less than the seed scatter.
+CALIBRATION_MAX_ROUNDS = int(os.environ.get("NISAR_CAL_MAX_ROUNDS", 3))
+
+#: Iteration cap for the calibration solves, above ``BOUNDS``' own. A rung that
+#: hits the cap scores its own non-convergence rather than the mesh, and one bad
+#: row invalidates the comparison it sits in, not just itself.
+CALIBRATION_MAX_ITER = int(os.environ.get("NISAR_CAL_MAX_ITER", 300))
+
+#: Keywords for :func:`~slipsolve.covariance.scene_covariance`. ``min_distance``
+#: keeps the fit off the coseismic signal; the default is measured far enough out
+#: that the variogram describes noise rather than the earthquake.
+COVARIANCE = dict(min_distance=float(os.environ.get("NISAR_COV_MIN_DISTANCE", 50e3)))
+
+
+def calibration_covariances(gridded, trace, frame, cache=None):
+    """Per-scene noise models for the synthetic worlds, measured and cached.
+
+    Recovery must be scored under noise. Noiseless, only bias is measured, and
+    error against truth then falls monotonically with rank and never turns over
+    -- so the ladder has no optimum to find. The variance side only bites once
+    the synthetic carries the scenes' own correlated noise.
+
+    ⚠️ Detrended at :data:`~slipsolve.covariance.DEFAULT_DETREND_DEGREE`, which
+    must match the ramp the inversion solves. At degree 1 four of the real NISAR
+    scenes collapsed outright -- sill 0.0 mm against ranges of 363-816 km on a
+    108 km maximum lag.
+
+    ⚠️ The fitted sill is a **lower bound** wherever a variogram is still rising
+    at maximum lag, which on the real scenes it was on all seven. The synthetic
+    noise is then optimistic and the best rank it reports is an upper bound.
+    """
+    from slipsolve import scene_covariance
+
+    cache = OUT_DIR / "covariance.json" if cache is None else Path(cache)
+    if cache.exists():
+        raw = json.loads(cache.read_text())
+        return {k: CovarianceModel(**v) for k, v in raw.items()}
+
+    models = {}
+    for name, stack in gridded.items():
+        model, _ = scene_covariance(stack, trace, frame, **COVARIANCE)
+        models[name] = model
+        print(f"  {name}: sill {1e3 * model.sill:.1f} mm, range "
+              f"{model.range_m / 1e3:.1f} km, nugget {1e3 * model.nugget:.1f} mm",
+              flush=True)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(
+        {k: {"sill": v.sill, "range_m": v.range_m, "nugget": v.nugget,
+             "kind": v.kind} for k, v in models.items()}, indent=2))
+    return models
+
+
+
 # -- shared helpers ----------------------------------------------------------
 def workspace(create=True):
     return Workspace(WORK_DIR, create=create)
@@ -749,6 +852,49 @@ def load_scene(spec, ws):
         )
     box = spec.get("crop", CROP)
     return stack.crop(*box) if box else stack
+
+
+def gridded_scenes(ws, frame):
+    """Every scene on the shared lattice, reusing what stage 1 already wrote.
+
+    ``run_sampling.py`` persists each resampled scene as ``LOS_STAGE``, and
+    resampling them again costs minutes for a byte-identical result. Missing
+    stages are rebuilt from the raw products and persisted, so a first run works
+    with no stage 1 behind it.
+
+    One lattice for every track is not a convenience. A quadtree cell is an
+    integer number of pixels halved at its midpoint, so scenes at different
+    resolutions reach different cell-size ladders -- one ``width_min`` then means
+    two different things and the per-track sample counts diverge for a reason
+    that has nothing to do with the data.
+    """
+    from slipsolve import ARCSEC_10, resample_all
+
+    stages = {name: LOS_STAGE.format(name=name) for name in SCENES}
+    have = {name: stage for name, stage in stages.items()
+            if ws.path(stage).exists()}
+    gridded = {name: LOSStack.from_zarr(ws.path(stage))
+               for name, stage in have.items()}
+    if gridded:
+        print(f"  reusing {len(gridded)} resampled scene(s) from stage 1", flush=True)
+
+    missing = [name for name in SCENES if name not in gridded]
+    if missing:
+        print(f"  resampling {len(missing)} scene(s): {', '.join(missing)}",
+              flush=True)
+        built = resample_all(
+            {name: load_scene(SCENES[name], ws) for name in missing},
+            frame, spacing=ARCSEC_10)
+        for name, stack in built.items():
+            stack.persist(ws, stages[name], overwrite=True)
+            gridded[name] = stack
+
+    # `resample_all` writes the frame into the attrs; a stage read back from an
+    # earlier run in a different frame would invert happily and put the slip
+    # kilometres away.
+    for name, stack in gridded.items():
+        frame.require_match(stack.ds.attrs["frame"], f"Scene {name!r}")
+    return {name: gridded[name] for name in SCENES}
 
 
 def sampling_parameters(gridded, trace, frame, mesh):

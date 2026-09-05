@@ -34,6 +34,7 @@ from .layout import (  # noqa: F401  (_lattice_triangles is re-exported)
     _lattice_triangles,
     boundary_node_mask,
     graded_layout,
+    node_components,
     require_boundaries,
 )
 from .trace import VERTICAL_TOL_DEG, FaultSegment, dip_offset  # noqa: F401
@@ -305,7 +306,11 @@ class FaultMesh:
                    frame=frame, attrs=attrs, centres=centres,
                    centre_params=centre_params)
         mesh._check_winding(trace)
-        require_boundaries(params)
+        # Validated the way `boundary_nodes` will read it, or the check and the
+        # thing it is checking could disagree on a mesh of more than one piece.
+        components = mesh.node_components
+        require_boundaries(params,
+                           labels=None if components.max() == 0 else components)
         return mesh
 
     @classmethod
@@ -452,8 +457,26 @@ class FaultMesh:
         The single implementation of "which nodes are on an edge"; the element
         mask above, ``NodeBasis.boundary`` and ``SlipModel.surface_displacement``
         all read it, so an irregular mesh cannot have three answers.
+
+        Measured per connected piece (:attr:`node_components`), so a mesh
+        carrying two faults gives each its own four edges rather than one
+        rectangle around the pair. On a single fault -- every mesh any builder
+        here produces -- there is one component and this is the global test it
+        has always been.
         """
-        return boundary_node_mask(self.params, side)
+        components = self.node_components
+        labels = None if components.max() == 0 else components
+        return boundary_node_mask(self.params, side, labels)
+
+    @property
+    def node_components(self):
+        """Which connected piece of the mesh each node belongs to.
+
+        All zeros for a single fault. Derived from ``triangles`` rather than
+        stored, because that is what it *is*: two faults in one mesh share a
+        frame and a parameterization and no triangles.
+        """
+        return node_components(self.triangles, self.n_nodes)
 
     # -- identity / persistence -------------------------------------------
     def digest(self):

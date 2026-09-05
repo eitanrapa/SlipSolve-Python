@@ -478,15 +478,90 @@ def _probe_slip(mesh, model, probe):
     continuous tent function over the triangulation and ``element_slip`` is its
     per-triangle mean, so a centroid lookup returns a Voronoi mosaic of those
     means. Harmless for a convergence check and wrong for anything drawn or
-    differenced: it manufactures element-scale facets that neither model has. To
-    sample a nodal model, interpolate linearly over ``mesh.triangles`` in
-    ``mesh.params`` -- that is the P1 basis exactly. See
-    ``venezuela_seven_scene_run/plot_ramp_ab_diff.py``.
+    differenced: it manufactures element-scale facets that neither model has.
+    Use :func:`sample_slip` for that -- it expands each basis the way that basis
+    is defined. This one is kept as it is on purpose: it is the statistic every
+    recorded ``max_change`` was measured with.
     """
     from scipy.spatial import cKDTree
 
     index = cKDTree(mesh.element_params).query(probe)[1]
     return model.element_slip[index]
+
+
+def sample_slip(model, s, z, component="magnitude"):
+    """``model``'s slip at arbitrary ``(s, z)`` points, as its basis defines it.
+
+    The counterpart of :func:`_probe_slip` for anything a person looks at: a
+    figure, or the difference between two models that do not share a mesh. Both
+    coordinates are **metres**, and ``z`` is *elevation* -- negative downwards --
+    because that is what :attr:`~slipsolve.mesh.FaultMesh.params` holds.
+    Points outside the mesh come back ``nan``.
+
+    Each basis is expanded the way it is actually defined, which is the whole
+    point of the function:
+
+    * ``basis="node"`` -- linear interpolation over ``mesh.triangles`` in
+      ``mesh.params``. A tent basis *is* P1 on that triangulation, so this is
+      the field itself and not an approximation of it. The two components are
+      interpolated separately and combined afterwards, because ``magnitude`` is
+      a hypot of two linear functions and is not itself linear.
+    * ``basis="element"`` -- the value of the triangle *containing* the point.
+      Note that is not the nearest centroid: where a large element abuts a small
+      one the two disagree, and only the containing triangle is the field.
+
+    ⚠️ **The unit mismatch this exists to make visible is silent.** A kilometre
+    lattice against a metre mesh either misses the mesh altogether or collapses
+    onto a sliver of it at the origin, and matplotlib's
+    ``LinearTriInterpolator`` reports the miss as a *masked* array whose
+    ``np.asarray`` is the fill value rather than ``nan`` -- so a model difference
+    once came back as exactly 0.000 m everywhere and read as agreement. Every
+    path here fills with ``nan``, so a point off the mesh is visible rather than
+    quietly zero.
+
+    ``component`` takes the same three names as
+    :func:`~slipsolve.plot.plot_slip`, so a sampled field and a drawn one mean
+    the same thing.
+    """
+    from matplotlib.tri import LinearTriInterpolator, Triangulation
+
+    if component not in ("magnitude", "strike", "dip"):
+        raise ValueError(
+            "component must be one of ['dip', 'magnitude', 'strike'], not "
+            f"{component!r}"
+        )
+    s = np.asarray(s, dtype=float)
+    z = np.asarray(z, dtype=float)
+    if s.shape != z.shape:
+        raise ValueError(f"s and z must have the same shape, got {s.shape} and "
+                         f"{z.shape}")
+
+    mesh = model.mesh
+    params = np.asarray(mesh.params, dtype=float)
+    tri = Triangulation(params[:, 0], params[:, 1],
+                        np.asarray(mesh.triangles, dtype=int))
+
+    if getattr(getattr(model, "basis", None), "name", None) == "node":
+        parts = [np.ma.filled(LinearTriInterpolator(tri, np.asarray(v, float))(s, z),
+                              np.nan)
+                 for v in (model.strike_slip, model.dip_slip)]
+    else:
+        # Containing triangle, not nearest centroid: -1 marks a point outside
+        # the hull, which is the same "no answer here" the interpolator gives.
+        index = tri.get_trifinder()(s, z)
+        outside = index < 0
+        element = np.asarray(model.element_slip, dtype=float)
+        parts = []
+        for column in (0, 1):
+            values = element[np.where(outside, 0, index), column]
+            parts.append(np.where(outside, np.nan, values))
+
+    strike, dip = parts
+    if component == "strike":
+        return strike
+    if component == "dip":
+        return dip
+    return np.hypot(strike, dip)
 
 
 def model_rms_min(field, fraction=0.02):
