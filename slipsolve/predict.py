@@ -469,9 +469,19 @@ def _probe_slip(mesh, model, probe):
     component moved more than this" in either mode rather than two different
     things.
 
-    Nearest centroid rather than a barycentric lookup: the slip is piecewise
-    constant per element anyway, so this *is* the field, not an approximation of
-    it.
+    Nearest centroid rather than a barycentric lookup. Under ``basis="element"``
+    the slip is piecewise constant per element, so this *is* the field; the
+    convergence metric compares like with like either way, which is what this
+    function exists for.
+
+    ⚠️ **Under ``basis="node"`` it is NOT the field.** The parameters are a
+    continuous tent function over the triangulation and ``element_slip`` is its
+    per-triangle mean, so a centroid lookup returns a Voronoi mosaic of those
+    means. Harmless for a convergence check and wrong for anything drawn or
+    differenced: it manufactures element-scale facets that neither model has. To
+    sample a nodal model, interpolate linearly over ``mesh.triangles`` in
+    ``mesh.params`` -- that is the P1 basis exactly. See
+    ``venezuela_seven_scene_run/plot_ramp_ab_diff.py``.
     """
     from scipy.spatial import cKDTree
 
