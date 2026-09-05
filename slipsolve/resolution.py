@@ -520,7 +520,12 @@ def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.
     both ends and its minimum is a choice of ``smoothing``.
 
     Returned as a dict: ``gcv``, ``smoothing``, ``effective_rank``,
-    ``effective_parameters``, ``n_ramp``, ``rss``, ``rms`` and ``n_obs``.
+    ``effective_parameters``, ``n_ramp``, ``rss``, ``whitened_rms`` and
+    ``n_obs``. ``whitened_rms`` is **not** metres of line of sight: it is the
+    residual in the space the solver works in, which is per-track rescaled by
+    ``Observations.concat(normalize=)`` when there is no covariance model and
+    divided by sigma when there is. Use :attr:`SlipModel.rms_misfit` for a
+    misfit in metres.
     Minimise ``gcv`` over a sweep; :func:`gcv_curve` does that and is usually
     what you want.
 
@@ -562,7 +567,11 @@ def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.
     data, chol = _factorized(inversion, smoothing, ss_ratio, ds_ratio,
                              boundary_ratio, sides, smooth_weighting)
     design = weighted_design(inversion)
-    observed = inversion.whiten(inversion.d * inversion.w)
+    # ⚠️ `whiten` ALREADY applies the diagonal weights when there is no
+    # covariance model, so `whiten(d * w)` would square them -- and leave the
+    # data in a different space from `weighted_design`, which whitens once. This
+    # is exactly what `solve` passes.
+    observed = inversion.whiten(inversion.d)
 
     # The linear damped solution and its residual, from the factorization that
     # is already paid for.
@@ -596,14 +605,15 @@ def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.
     return {"smoothing": float(smoothing), "gcv": n * rss / slack ** 2,
             "effective_rank": rank, "effective_parameters": parameters,
             "n_ramp": int(inversion.n_ramp), "rss": rss,
-            "rms": float(np.sqrt(rss / n)), "n_obs": n}
+            "whitened_rms": float(np.sqrt(rss / n)), "n_obs": n}
 
 
 def gcv_curve(inversion, weights, **kwargs):
     """:func:`generalized_cross_validation` over a sweep, plus where it minimises.
 
     Returns an :class:`xarray.Dataset` on ``smoothing`` carrying ``gcv``,
-    ``effective_rank``, ``effective_parameters``, ``rss`` and ``rms``, with the
+    ``effective_rank``, ``effective_parameters``, ``rss`` and
+    ``whitened_rms``, with the
     minimising weight and rank in ``attrs`` as ``best_smoothing`` /
     ``best_rank``. ``best_rank`` is the **slip-only** rank, comparable with every
     other rank here; see :func:`generalized_cross_validation` on why that is not
@@ -628,7 +638,7 @@ def gcv_curve(inversion, weights, **kwargs):
     weights = np.asarray(weights)[order]
     fields = {name: ("smoothing", np.array([rows[i][name] for i in order]))
               for name in ("gcv", "effective_rank", "effective_parameters",
-                           "rss", "rms")}
+                           "rss", "whitened_rms")}
     out = xr.Dataset(fields, coords={"smoothing": weights})
     best = int(np.argmin(out["gcv"].values))
     out.attrs.update(

@@ -603,6 +603,27 @@ def test_parameter_positions_are_three_dimensional(setup):
 
 # -- generalized cross-validation ---------------------------------------------
 
+def test_gcv_whitens_the_data_exactly_once(setup):
+    """⚠️ ``whiten`` already applies the diagonal weights when there is no
+    covariance model, so whitening a pre-weighted vector squares them and leaves
+    the data in a different space from ``weighted_design``. The residual must be
+    the one ``solve`` would form."""
+    from scipy.linalg import cho_solve
+
+    _, _, _, inversion = setup
+    data, chol = R._factorized(inversion, 1.0, 1.0, 3.0, 1.0,
+                               ("bottom", "left", "right"), "uniform")
+    design = R.weighted_design(inversion)
+    observed = inversion.whiten(inversion.d)
+    residual = observed - design @ cho_solve(chol, design.T @ observed)
+
+    score = R.generalized_cross_validation(inversion, 1.0)
+    assert score["rss"] == pytest.approx(float(residual @ residual), rel=1e-12)
+    # Squaring the weights would change the answer, so this is a real check.
+    doubled = inversion.whiten(inversion.d * inversion.w)
+    assert not np.allclose(observed, doubled)
+
+
 def test_gcv_charges_for_the_ramp_but_reports_the_slip_rank(setup):
     """⚠️ Two traces, and confusing them shifts every rank comparison here.
 
