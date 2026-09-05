@@ -13,6 +13,8 @@ ran end to end, reported convergence, and returned a mesh of 44 elements with
 0.74% variance reduction.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -688,3 +690,193 @@ def test_a_gcv_curve_needs_something_to_compare(setup):
     _, _, _, inversion = setup
     with pytest.raises(ValueError, match="at least two weights"):
         R.gcv_curve(inversion, [1.0])
+
+
+# -- EPIC: a prior that equalises posterior information -----------------------
+
+@pytest.fixture(scope="module")
+def epic_setup(setup):
+    """The same problem with a real ``Cd``, which EPIC requires.
+
+    ``sigma_target`` is a posterior standard deviation in metres, and that is
+    only a metre when the whitening is by sigma rather than by ``1/sqrt(n)``.
+    """
+    from slipsolve import SlipInversion
+    from slipsolve.covariance import CovarianceModel
+
+    _, _, mesh, inversion = setup
+    obs = Observations(inversion.obs.ds.assign_attrs(normalize="none"))
+    # Range chosen against the fixture's own 56 km cells: much shorter and
+    # `cell_ratio_warning` fires, because a cell-as-a-point covariance overstates
+    # the correlation between adjacent samples.
+    model = CovarianceModel(sill=0.004 ** 2, range_m=120e3, nugget=0.001 ** 2)
+    return SlipInversion(mesh, obs, basis="node", ramp="offset",
+                         covariance=model)
+
+
+def _epic_window(inversion, **kwargs):
+    """The (floor, ceiling) of reachable ``sigma_target``, by bisection on the
+    two errors ``epic_prior`` raises."""
+    lo, hi = 1e-4, 1e6
+    for _ in range(40):
+        mid = np.sqrt(lo * hi)
+        try:
+            # A feasibility probe, not a solve -- one evaluation is enough to
+            # learn which of the two bounds (if either) it lands outside.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                R.epic_prior(inversion, mid, max_iter=1, **kwargs)
+            return mid
+        except ValueError as exc:
+            lo, hi = (mid, hi) if "below what" in str(exc) else (lo, mid)
+    return None
+
+
+def test_epic_delivers_the_uniform_posterior_it_promises(epic_setup):
+    """The defining property, and the only thing that makes it EPIC.
+
+    Tikhonov leaves the posterior variance to the observation geometry; EPIC
+    solves for the prior that flattens it. If this does not hold the weights are
+    just an expensive way of writing a spatially variable lambda.
+    """
+    inversion = epic_setup
+    target = _epic_window(inversion)
+    assert target is not None, "no reachable sigma_target on this fixture"
+
+    weights = R.epic_prior(inversion, target)
+    assert weights.shape == (2 * inversion.basis.n_basis,)
+    assert (weights > 0).all()
+
+    achieved = R.posterior_covariance(inversion, weights,
+                                  kind="posterior")[:2 * inversion.basis.n_basis]
+    spread = np.abs(achieved - target).max() / target
+    assert spread <= R.EPIC_UNIFORMITY_TOLERANCE, spread
+    # And it is genuinely non-uniform prior weight doing it -- a constant would
+    # be Tikhonov, which is the thing being improved on.
+    assert weights.max() / weights.min() > 1.5
+
+
+def test_a_scalar_prior_does_not_equalise_the_posterior(epic_setup):
+    """The control. Tikhonov at the weight that gets the *median* right still
+    leaves the spread the data geometry put there."""
+    inversion = epic_setup
+    target = _epic_window(inversion)
+    weights = R.epic_prior(inversion, target)
+    flat = np.full_like(weights, float(np.exp(np.mean(np.log(weights)))))
+
+    n = 2 * inversion.basis.n_basis
+    epic = R.posterior_covariance(inversion, weights, kind="posterior")[:n]
+    tikhonov = R.posterior_covariance(inversion, flat, kind="posterior")[:n]
+    assert epic.max() / epic.min() < tikhonov.max() / tikhonov.min()
+
+
+def test_the_epic_jacobian_identity_is_exact():
+    """⚠️ Load-bearing for the cost, so pinned where it can be pinned sharply.
+
+    ``d[M^-1]_ii/da_j = -([M^-1 H']_ij)^2`` gives the WHOLE Jacobian from the
+    inverse the residual already formed. With finite differences instead it is
+    one factorization per unknown, and EPIC would not be affordable at
+    production size. On a well-conditioned problem the identity holds to
+    floating point; the fixture test below can only confirm the wiring, because
+    a real normal matrix has a condition number around 3e8 and differencing
+    variances there has no digits left.
+    """
+    rng = np.random.default_rng(0)
+    n = 30
+    design = rng.normal(size=(90, n))
+    fixed = design.T @ design + np.eye(n)
+    operator = (np.diag(np.full(n, -2.0)) + np.diag(np.ones(n - 1), 1)
+                + np.diag(np.ones(n - 1), -1))
+    scale = np.exp(rng.normal(size=n) * 0.3) + 0.5
+
+    def variances(a):
+        return np.diag(np.linalg.inv(fixed + operator.T @ (a[:, None] * operator)))
+
+    inverse = np.linalg.inv(fixed + operator.T @ (scale[:, None] * operator))
+    analytic = -((inverse @ operator.T) ** 2)
+
+    step = 1e-6
+    numeric = np.empty_like(analytic)
+    for j in range(n):
+        bumped = scale.copy()
+        bumped[j] += step
+        numeric[:, j] = (variances(bumped) - variances(scale)) / step
+    error = np.abs(analytic - numeric).max() / np.abs(numeric).max()
+    assert error < 1e-5, error
+
+
+def test_the_epic_jacobian_is_wired_to_the_right_matrices(epic_setup):
+    """The identity above, against the blocks ``epic_prior`` actually builds.
+
+    ⚠️ **A COARSE step, and do not "improve" it by shrinking.** A real normal
+    matrix here has a condition number around 3e8, so ``inv`` loses about eight
+    digits and differencing two nearly-equal variances loses the rest: the
+    measured disagreement *grows* as the step shrinks -- 6e-4 at a 1e-2 relative
+    step, 7e-3 at 1e-3, 3e-1 at 1e-5, 6e0 at 1e-6. That is rounding, not the
+    Jacobian, which the test above pins to 1e-5.
+    """
+    inversion = epic_setup
+    smooth, fixed = R._epic_blocks(inversion, 1.0, 3.0, 1.0,
+                                   ("bottom", "left", "right"))
+    operator = smooth.toarray()
+    n_slip = 2 * inversion.basis.n_basis
+    rng = np.random.default_rng(0)
+    scale = np.exp(rng.normal(size=operator.shape[0]) * 0.2) * 1e-3
+
+    def variances(a):
+        return np.diag(np.linalg.inv(
+            fixed + operator.T @ (a[:, None] * operator)))[:n_slip]
+
+    inverse = np.linalg.inv(fixed + operator.T @ (scale[:, None] * operator))
+    analytic = -((inverse @ operator.T)[:n_slip] ** 2)
+
+    for j in rng.choice(operator.shape[0], size=6, replace=False):
+        step = 1e-2 * scale[j]
+        up, down = scale.copy(), scale.copy()
+        up[j] += step
+        down[j] -= step
+        numeric = (variances(up) - variances(down)) / (2 * step)
+        big = np.abs(analytic[:, j]) > 1e-3 * np.abs(analytic[:, j]).max()
+        assert numeric[big] == pytest.approx(analytic[big, j], rel=0.02)
+
+
+def test_sigma_target_is_bounded_from_both_sides(epic_setup):
+    """⚠️ Both bounds are structural, not solver failures.
+
+    Above: ``H' diag(a) H`` is positive semidefinite, so a prior can only tighten
+    a posterior variance. Below: a curvature operator has a null space -- a slip
+    field varying linearly across the fault has zero second derivative -- so that
+    component is left to the data however strong the prior.
+    """
+    inversion = epic_setup
+    with pytest.raises(ValueError, match="above what a positive prior can reach"):
+        R.epic_prior(inversion, 1e6)
+    with pytest.raises(ValueError, match="below what this smoothing operator"):
+        R.epic_prior(inversion, 1e-6)
+    with pytest.raises(ValueError, match="must be positive"):
+        R.epic_prior(inversion, 0.0)
+
+
+def test_epic_refuses_the_element_basis_by_name(setup):
+    """``neighbor_smoothing`` has one row per undirected edge, so diag(Ch) would
+    be a field on the edges rather than on the fault -- a different quantity from
+    the published one, and not one anybody could plot."""
+    _, _, mesh, inversion = setup
+    from slipsolve import SlipInversion
+
+    element = SlipInversion(mesh, inversion.obs, basis="element", ramp="offset")
+    with pytest.raises(ValueError, match="basis='node'"):
+        R.epic_prior(element, 1.0)
+
+
+def test_epic_weights_drop_straight_into_solve(epic_setup):
+    """The whole point of returning weights rather than a covariance: the prior
+    reaches the solver through the argument that was already there."""
+    inversion = epic_setup
+    target = _epic_window(inversion)
+    weights = R.epic_prior(inversion, target)
+    model = inversion.solve(smoothing=weights, polarity=(-1, 0, 0), max_iter=200)
+
+    assert model.x.shape == (2 * inversion.basis.n_basis + inversion.n_ramp,)
+    assert np.isfinite(model.x).all()
+    assert np.allclose(model.smoothing, weights)

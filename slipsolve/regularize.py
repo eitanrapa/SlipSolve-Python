@@ -180,6 +180,40 @@ def laplace_beltrami(mesh, ss_ratio=1.0, ds_ratio=1.0, form="curvature",
                    format="csr")
 
 
+def scale_smoothing(smooth, smoothing):
+    """Apply ``smoothing`` to a smoothing operator, scalar or per row.
+
+    ``solve`` divides by the row count so one weight means the same thing on a
+    coarse mesh as on a fine one; that normalisation is here so the solver and
+    :func:`~slipsolve.resolution._normal_equations` cannot drift apart.
+
+    A **scalar** multiplies the whole operator, which is Tikhonov: one prior
+    variance for every regularized quantity, wherever it sits on the fault.
+
+    An **array** gives one weight per row, which is what a spatially variable
+    prior needs -- the damping block becomes ``H' diag(w/n)^2 H`` rather than
+    ``(lambda/n)^2 H'H``. See :func:`~slipsolve.resolution.epic_prior` for the
+    one way of choosing those weights that is not arbitrary.
+
+    ⚠️ The scalar path is a plain scalar multiply, bit-identical to what it
+    replaced -- a run configured as before must not move because this grew an
+    option.
+    """
+    n = max(1, smooth.shape[0])
+    weights = np.asarray(smoothing, dtype=float)
+    if weights.ndim == 0:
+        return smooth * (float(weights) / n)
+    if weights.shape != (smooth.shape[0],):
+        raise ValueError(
+            f"per-row smoothing needs one weight per row of the operator: got "
+            f"{weights.shape} against {smooth.shape[0]} rows. A scalar applies "
+            "one weight to all of them."
+        )
+    if np.any(weights < 0):
+        raise ValueError("smoothing weights must be non-negative")
+    return sp.diags(weights / n) @ smooth
+
+
 def _one_rings(triangles, n_nodes):
     """For each node, its neighbours mapped to the third vertices across each edge."""
     rings = [{} for _ in range(n_nodes)]

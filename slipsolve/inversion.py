@@ -42,6 +42,7 @@ from .regularize import (
     neighbor_smoothing,
     ramp_columns,
     ramp_kind_for,
+    scale_smoothing,
     slip_bounds,
     zero_slip_boundary,  # noqa: F401  (public API, and used by callers)
 )
@@ -348,8 +349,7 @@ class SlipInversion:
             lo = np.concatenate([lo, np.full(self.n_ramp, -np.inf)])
             hi = np.concatenate([hi, np.full(self.n_ramp, np.inf)])
 
-        n_smooth = max(1, smooth.shape[0])
-        scaled_smooth = smooth * (float(smoothing) / n_smooth)
+        scaled_smooth = scale_smoothing(smooth, smoothing)
 
         design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
         weighted = self.whiten(design)
@@ -368,7 +368,8 @@ class SlipInversion:
 
         return SlipModel(
             self, result.x, result,
-            smoothing=float(smoothing),
+            smoothing=(float(smoothing) if np.ndim(smoothing) == 0
+                       else np.asarray(smoothing, dtype=float)),
             smooth_matrix=smooth,
             options={
                 "ss_ratio": float(ss_ratio), "ds_ratio": float(ds_ratio),
