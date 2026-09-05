@@ -599,3 +599,71 @@ def test_parameter_positions_are_three_dimensional(setup):
     xyz = R.parameter_positions(inversion)
     assert xyz.shape == (inversion.basis.n_basis, 3)
     assert xyz.shape[0] == R.parameter_params(inversion).shape[0]
+
+
+# -- generalized cross-validation ---------------------------------------------
+
+def test_gcv_charges_for_the_ramp_but_reports_the_slip_rank(setup):
+    """⚠️ Two traces, and confusing them shifts every rank comparison here.
+
+    An unregularised nuisance column costs very nearly a whole degree of freedom,
+    so GCV's denominator must count it. But ``effective_rank`` everywhere else in
+    this package -- ``resolution_diagonal``, the L-curve, the calibration ladder
+    -- is the slip-only trace, and a GCV pick has to be comparable with those.
+    """
+    _, _, _, inversion = setup
+    assert inversion.n_ramp > 0
+    score = R.generalized_cross_validation(inversion, 1.0)
+
+    assert score["n_ramp"] == inversion.n_ramp
+    assert score["effective_parameters"] > score["effective_rank"]
+    # The ramp is unregularised, so it resolves nearly perfectly.
+    gap = score["effective_parameters"] - score["effective_rank"]
+    assert gap == pytest.approx(inversion.n_ramp, rel=0.1)
+    # And the slip-only figure is the one resolution_diagonal reports.
+    assert score["effective_rank"] == pytest.approx(
+        R.resolution_diagonal(inversion, 1.0).attrs["effective_rank"], rel=1e-9)
+
+
+def test_gcvs_denominator_is_the_data_resolution_trace(setup):
+    """``trace(N)`` computed two ways from the same factorization must agree, or
+    GCV is scoring a different problem than ``data_importance`` describes."""
+    _, _, _, inversion = setup
+    score = R.generalized_cross_validation(inversion, 1.0)
+    importance = float(R.data_importance(inversion, 1.0).sum())
+    assert score["effective_parameters"] == pytest.approx(importance, rel=1e-10)
+
+
+def test_the_gcv_curve_turns_over_between_its_ends(setup):
+    """The point of GCV: residual falls with rank, the denominator penalty rises,
+    so the score has an interior minimum rather than running to an end."""
+    _, _, _, inversion = setup
+    curve = R.gcv_curve(inversion, np.logspace(-1, 3, 12))
+
+    assert curve.attrs["interior"], "no interior minimum -- widen the sweep"
+    assert curve["gcv"].values[0] > curve.attrs["best_gcv"]
+    assert curve["gcv"].values[-1] > curve.attrs["best_gcv"]
+    # Rank falls monotonically with the weight, which is what makes the curve
+    # readable in rank rather than in lambda.
+    ranks = curve["effective_rank"].values
+    assert (np.diff(ranks) < 0).all()
+    # `best_rank` must be the rank AT `best_smoothing`, not a nearby one.
+    best = int(np.argmin(curve["gcv"].values))
+    assert curve.attrs["best_smoothing"] == curve["smoothing"].values[best]
+    assert curve.attrs["best_rank"] == ranks[best]
+
+
+def test_gcv_refuses_a_problem_with_no_degrees_of_freedom_left(setup):
+    """The denominator is ``n_obs - trace(N)``; at vanishing damping a mesh with
+    more parameters than data drives it to zero and the score is meaningless."""
+    _, _, mesh, inversion = setup
+    if 2 * inversion.basis.n_basis + inversion.n_ramp <= inversion.d.size:
+        pytest.skip("this fixture has more observations than parameters")
+    with pytest.raises(ValueError, match="denominator is not positive"):
+        R.generalized_cross_validation(inversion, 1e-12)
+
+
+def test_a_gcv_curve_needs_something_to_compare(setup):
+    _, _, _, inversion = setup
+    with pytest.raises(ValueError, match="at least two weights"):
+        R.gcv_curve(inversion, [1.0])

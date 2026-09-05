@@ -633,9 +633,10 @@ def test_the_propagated_sigma_matches_repeated_bounded_solves(signal_setup):
 def test_a_bound_pressed_solution_is_refused(signal_setup):
     """The linear covariance describes the UNBOUNDED problem.
 
-    `resolution.py` warns about exactly this, and the warning was written when the
-    real run had 86% of elements on a bound. Tight bounds must raise rather than
-    return a plausible-looking sigma for a problem nobody solved.
+    `resolution.py` warns about exactly this. Real runs sit at 5.8-18.6% on a
+    bound, which straddles `MAX_BOUND_FRACTION`, so the gate is live rather than
+    theoretical. Tight bounds must raise rather than return a plausible-looking
+    sigma for a problem nobody solved.
     """
     _, _, mesh, _, parts = signal_setup
     obs = Observations.concat(parts, normalize="none")

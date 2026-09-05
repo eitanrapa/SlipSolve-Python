@@ -23,10 +23,11 @@ currencies; driving both from ``R`` is one objective.
 ⚠️ **Two caveats, both real, both in the callers' way if ignored.**
 
 1. :meth:`~slipsolve.inversion.SlipInversion.solve` is **bound
-   constrained**, and the Venezuela run had 86% of elements sitting on a bound.
-   ``R`` describes the *unbounded* damped problem, which is a different problem.
-   Treat these numbers as a discretisation heuristic, never as a statement about
-   uncertainty in the model that was actually solved.
+   constrained**, so ``R`` describes the *unbounded* damped problem, which is a
+   different problem. Treat these numbers as a discretisation heuristic, never
+   as a statement about uncertainty in the model that was actually solved. How
+   far apart the two problems are is a property of the run, and it has moved a
+   long way -- see :data:`MAX_BOUND_FRACTION` for the measured range.
 2. ``R`` depends on the smoothing weight, so it must be evaluated at the weight
    the run uses; a resolution computed at the wrong lambda sizes the mesh for a
    different inversion.
@@ -505,6 +506,139 @@ def data_importance(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
     return np.einsum("ij,ij->j", projected, projected)
 
 
+def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
+                                 boundary_ratio=1.0,
+                                 sides=("bottom", "left", "right"),
+                                 smooth_weighting="uniform"):
+    """Craven & Wahba's GCV score at one smoothing weight, and what it is made of.
+
+    ``GCV = n * ||(I - N) d||^2 / trace(I - N)^2`` in the whitened space, with
+    ``N`` the data resolution matrix :func:`data_importance` takes the diagonal
+    of. It estimates the prediction error at a datum that was left out, without
+    leaving any out -- the numerator is the residual and the denominator charges
+    for every effective parameter spent reaching it, so the score turns up at
+    both ends and its minimum is a choice of ``smoothing``.
+
+    Returned as a dict: ``gcv``, ``smoothing``, ``effective_rank``,
+    ``effective_parameters``, ``n_ramp``, ``rss``, ``rms`` and ``n_obs``.
+    Minimise ``gcv`` over a sweep; :func:`gcv_curve` does that and is usually
+    what you want.
+
+    ⚠️ **``effective_rank`` and ``effective_parameters`` are not the same
+    number.** GCV's own denominator uses ``effective_parameters`` -- the whole
+    ``trace(N)``, ramp columns included, since an unregularised nuisance column
+    costs very nearly a full degree of freedom. ``effective_rank`` is the
+    slip-only trace, which is what every other rank in this package means, and
+    so the one to compare against an L-curve corner or a calibration rung.
+
+    **Why have it when there is already an L-curve.** Because the criteria do not
+    agree, and the size of the disagreement is the point. Measured on the real
+    seven-scene data, the L-curve corner sits at effective rank ~21, recovery
+    against a planted checkerboard minimises at 79-129, and ``chi2/n == 1``
+    arrives at ~173 -- an eight-fold spread in effective rank, and rank 21 scores
+    ``rel_error`` 0.4616 against 0.3012 at the recovery optimum. GCV is a fourth
+    reading, and the one most of the literature standardises on (Ortega-Culaciati
+    et al. 2021 use it for every scheme they compare), so it is worth knowing
+    where it lands rather than inferring it.
+
+    ⚠️ **This describes the UNBOUNDED damped problem**, like everything
+    else built on ``R``: ``N`` is a linear operator and
+    :meth:`SlipInversion.solve` is bound-constrained. The residual here is
+    therefore the *linear* damped solution's, not the solve's -- deliberately,
+    since mixing a bounded residual with a linear trace would score neither
+    problem. Real runs sit at 5.8-18.6% of parameters on a bound (see
+    :data:`MAX_BOUND_FRACTION`), so the two problems are close but not the same.
+
+    ⚠️ **GCV is not an oracle, and its own users say so.**
+    Ortega-Culaciati et al. (2021, section 4) report that GCV "or any other model
+    class selection method" tends to return solutions that are slightly over- or
+    under-regularised, and their response is not a better criterion but an
+    estimator less sensitive to the one they have. Read a GCV minimum as a fourth
+    opinion, not a verdict -- and if it disagrees with the recovery optimum, the
+    recovery test is the one that scored against a known answer.
+    """
+    from scipy.linalg import cho_solve
+
+    data, chol = _factorized(inversion, smoothing, ss_ratio, ds_ratio,
+                             boundary_ratio, sides, smooth_weighting)
+    design = weighted_design(inversion)
+    observed = inversion.whiten(inversion.d * inversion.w)
+
+    # The linear damped solution and its residual, from the factorization that
+    # is already paid for.
+    estimate = cho_solve(chol, design.T @ observed)
+    residual = observed - design @ estimate
+    rss = float(residual @ residual)
+
+    # trace(N) == trace(R), asserted elsewhere to 1e-14, and R is the cheaper of
+    # the two here: one (n_param, n_param) solve against an (n_param, n_obs) one.
+    resolved = np.diag(cho_solve(chol, data))
+    n_slip = 2 * inversion.basis.n_basis
+    # ⚠️ TWO different traces, and confusing them shifts every rank comparison
+    # in the package. GCV's denominator must charge for *every* fitted
+    # parameter, ramp columns included -- they are unregularised, so each costs
+    # very nearly a whole degree of freedom. But `effective_rank` everywhere else
+    # here (`resolution_diagonal`, the L-curve, the calibration ladder) counts
+    # slip parameters ONLY. On a two-track offset ramp the gap is 2; on seven
+    # tracks with a quadratic ramp it is 42, which is larger than the whole
+    # answer at the production operating point.
+    parameters = float(resolved.sum())
+    rank = float(resolved[:n_slip].sum())
+    n = int(observed.size)
+    slack = n - parameters
+    if slack <= 0:
+        raise ValueError(
+            f"trace(N) = {parameters:.1f} against {n} observations, so GCV's "
+            "denominator is not positive -- the model has at least as many "
+            "effective parameters as there are data and the score is undefined. "
+            "Raise smoothing, or use fewer parameters."
+        )
+    return {"smoothing": float(smoothing), "gcv": n * rss / slack ** 2,
+            "effective_rank": rank, "effective_parameters": parameters,
+            "n_ramp": int(inversion.n_ramp), "rss": rss,
+            "rms": float(np.sqrt(rss / n)), "n_obs": n}
+
+
+def gcv_curve(inversion, weights, **kwargs):
+    """:func:`generalized_cross_validation` over a sweep, plus where it minimises.
+
+    Returns an :class:`xarray.Dataset` on ``smoothing`` carrying ``gcv``,
+    ``effective_rank``, ``effective_parameters``, ``rss`` and ``rms``, with the
+    minimising weight and rank in ``attrs`` as ``best_smoothing`` /
+    ``best_rank``. ``best_rank`` is the **slip-only** rank, comparable with every
+    other rank here; see :func:`generalized_cross_validation` on why that is not
+    the number GCV divides by.
+
+    ⚠️ **Check that the minimum is interior before believing it.** A GCV
+    curve that falls monotonically to the end of the sweep has not chosen
+    anything, it has run out of weights -- ``attrs["interior"]`` says which
+    happened. GCV is also known to be flat near its minimum, which is the
+    mechanism behind the over- and under-regularisation its users report, so read
+    the neighbouring rungs rather than the argmin alone.
+
+    One factorization per weight, so this costs a resolution sweep -- seconds per
+    rung at a few hundred parameters, minutes at a couple of thousand.
+    """
+    weights = [float(w) for w in np.atleast_1d(weights)]
+    if len(weights) < 2:
+        raise ValueError("a GCV curve needs at least two weights to compare")
+    rows = [generalized_cross_validation(inversion, w, **kwargs) for w in weights]
+
+    order = np.argsort(weights)
+    weights = np.asarray(weights)[order]
+    fields = {name: ("smoothing", np.array([rows[i][name] for i in order]))
+              for name in ("gcv", "effective_rank", "effective_parameters",
+                           "rss", "rms")}
+    out = xr.Dataset(fields, coords={"smoothing": weights})
+    best = int(np.argmin(out["gcv"].values))
+    out.attrs.update(
+        best_smoothing=float(weights[best]),
+        best_rank=float(out["effective_rank"].values[best]),
+        best_gcv=float(out["gcv"].values[best]),
+        interior=bool(0 < best < len(weights) - 1),
+    )
+    return out
+
 def resolution_report(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
                       boundary_ratio=1.0, sides=("bottom", "left", "right"),
                       smooth_weighting="uniform"):
@@ -592,10 +726,32 @@ def resolution_report(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
 #: different problem and the number would be a plausible-looking lie.
 #:
 #: ⚠️ This is a property of the **model**, not of the code, and it has moved a
-#: long way. The 2026-07 Venezuela run had **86%** of elements on a bound, which
-#: is why this module's own docstring says the resolution matrix is never a
-#: statement about uncertainty. The 2026-08-30 production model has **1.6%**
-#: (6 of 374, all on the polarity constraint). Re-check it per run.
+#: long way. Measured 2026-09-05 over all 20 saved seven-scene models -- four
+#: mesh configurations x five rank rungs -- it runs **5.8% to 18.6%**, rising
+#: monotonically with rank (a looser model has more parameters free to reach a
+#: bound) and with coarseness:
+#:
+#: ===========================  ======  ======  =======
+#: configuration                rank 21 rank 79 rank 130
+#: ===========================  ======  ======  =======
+#: production, not deramped       5.8%    8.6%    10.4%
+#: deramped, budget 330           5.8%    9.1%    10.7%
+#: fixed rows, size_max 10 km     8.4%   11.2%    14.5%
+#: grid unstructured, budget 200 10.2%   13.8%    18.1%
+#: ===========================  ======  ======  =======
+#:
+#: ⚠️ **So this threshold sits inside the operating range, not above it.** The
+#: production choice (rank 79, budget 330) is 8.6% and passes; the same mesh at
+#: rank 130 is 10.4% and does **not**. That is the gate working as intended, but
+#: it means a rank sweep will start refusing covariances part way up and the
+#: refusal is about the model, not a bug.
+#:
+#: ⚠️ **The 86% this used to quote should not be carried forward.** It dates from
+#: 2026-07 on the 1696-element mesh, before the budget was cut to ~330 -- and the
+#: same number and month appear in :data:`slipsolve._geo.PHASE_RANGE_SIGN` as the
+#: signature of the LOS **sign bug**, where a dextral fault recovered sinistral
+#: with everything pinned on the polarity bound. Whether or not those were the
+#: same run, 86% describes a pathological configuration and not this estimator.
 MAX_BOUND_FRACTION = 0.10
 
 #: Which covariance :func:`posterior_covariance` returns. Named apart from
