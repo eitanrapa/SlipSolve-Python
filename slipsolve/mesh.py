@@ -444,10 +444,22 @@ class FaultMesh:
 
         ``side`` is ``"bottom"``, ``"top"``, ``"left"`` or ``"right"``. Resolved
         in ``(s, z)`` parameter space, so "left" and "right" mean the along-strike
-        ends whatever direction the fault happens to run -- the reference picks
-        them by ``argmin``/``argmax`` of the north coordinate, which is nearly
-        degenerate for an east-west fault and would anchor an interior node at
-        any restraining bend that reaches further north than an endpoint.
+        ends whatever direction the fault happens to run. Picking them from a map
+        coordinate instead -- ``argmin``/``argmax`` of northing, say -- is nearly
+        degenerate for an east-west fault and would anchor an interior node at any
+        restraining bend reaching further north than an endpoint;
+        ``test_boundary_elements_are_the_along_strike_ends`` plants exactly that
+        trace.
+
+        ⚠️ **That is not what the reference does, though this docstring used to say
+        so** (corrected 2026-09-07 against the cloned MATLAB). SlipSolve selects
+        boundary patches by index arithmetic on its structured
+        ``(fault, patch, layer)`` numbering -- ``zero_slip_boundary.m`` takes
+        ``patch_this_segment(layer_this_segment == top_layer_no)``, or the first
+        and last patch of each layer for ``'left'``/``'right'`` -- and never reads
+        a coordinate at all. The departure that matters is that exact equality in
+        parameter space still works on an **unstructured** mesh, where there is no
+        index to do arithmetic on.
         """
         return self.boundary_nodes(side)[self.triangles].any(axis=1)
 

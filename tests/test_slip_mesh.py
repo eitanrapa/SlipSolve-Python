@@ -183,8 +183,13 @@ def test_boundary_elements_are_the_along_strike_ends(trace, frame):
     """Resolved in (s, z), so a northward bend cannot masquerade as a fault tip.
 
     The trace here bends so that an interior vertex reaches further north than the
-    eastern endpoint -- which is what defeats picking edges by ``argmax`` of the
-    north coordinate.
+    eastern endpoint -- which is what would defeat picking edges by ``argmax`` of a
+    map coordinate.
+
+    ⚠️ Not a comparison against the reference, though this docstring used to imply
+    one. SlipSolve picks boundary patches by index arithmetic on its structured
+    numbering, never from a coordinate; the hazard here belongs to any
+    coordinate-based rule, and the test pins that our parameter-space one avoids it.
     """
     bent = FaultTrace(
         np.array([-68.6, -68.2, -67.8, -67.4, -67.0]),
