@@ -31,3 +31,6 @@ dist/
 *.out
 *.toc
 .DS_Store
+
+# GMT drops this wherever it is run (grdsample/grdinfo session shelf)
+gmt.history
