@@ -13,10 +13,20 @@ is a systematic bias in exactly the quantity a coseismic inversion is for.
 
 Two departures from the reference, both deliberate:
 
-* **Evaluate at the observations, not on a grid.** SlipSolve precomputes onto a
-  ~190 000-point adaptive grid -- 4.5 GB across its three component matrices --
-  and interpolates from there onto its few thousand observations. Going straight
-  to the observations is less work and has no interpolation error at all.
+* **Evaluate at the observations, not on a grid.** SlipSolve precomputes onto an
+  adaptive grid and interpolates from there onto its few thousand observations:
+  its config stores ``G_e``/``G_n``/``G_u`` with "rows ordered as
+  ``adaptive_meshgrid(X,Y)(:)``" and then interpolates "each component to every
+  sample location". Going straight to the observations is less work and has no
+  interpolation error at all.
+
+  ⚠️ The grid is of order ``1e5`` points and the three component matrices are
+  several GB. This used to read "~190 000-point ... 4.5 GB"; reproducing
+  ``adaptive_meshgrid`` from the shipped config (``xRange`` +/-240 km, ``yRange``
+  -350..290 km, ``D1`` 1.3 km, ``D2`` 2.3 km, ``M`` 9 km) gives **86k-105k**
+  points, so the point count was overstated even though 105k x 1836 columns x 8 B
+  x 3 does land at 4.6 GB. The exact figure depends on their fault trace, which
+  is not in the repo, so it is quoted as an order of magnitude.
 * **Choose the quadrature order per triangle and observation.** The reference uses
   a fixed 91 points per triangle everywhere. A point source is a good
   approximation to a patch once you are a few patch-widths away, and almost every
@@ -498,11 +508,41 @@ def _triangle_quadrature(p1, p2, p3, order):
     Subdividing each edge into ``order`` gives ``order**2`` congruent
     sub-triangles -- ``order*(order+1)/2`` pointing the same way as the parent and
     ``order*(order-1)/2`` inverted -- and their centroids with equal weights is a
-    convergent rule. Taking only the upright ones, which a barycentric lattice of
-    the reference's shape does, is **not**: it is a biased sample of the triangle
-    and its error stops falling however many points are added. Measured, the
-    upright-only rule plateaus around 5e-3 relative while this one keeps
-    converging.
+    **second-order** rule -- and ``-2`` is exactly the exponent
+    :data:`_QUADRATURE_CONSTANT`'s error model assumes. Keeping both orientations
+    is what buys that order.
+
+    ⚠️ **Two claims that used to sit here were WRONG.** Both corrected 2026-09-07
+    by reading the reference and measuring against exact polynomial integrals
+    (``scripts/bench_quadrature_rule.py``).
+
+    *It is not "only the upright sub-triangles".* The reference is
+    ``interpolate_triangle2(v1,v2,v3,15)`` in
+    ``external/legacy_matlab/Inversion/layered_green/``, whose own header reads
+    "points strictly INSIDE a 3D triangle ... Edge/vertex points are excluded",
+    with ``#points = (n-1)(n-2)/2`` -- which is where **91** comes from, as a
+    consequence of ``n = 15`` rather than as a target. Its caller
+    ``comb_green_nodes_xyz.m`` weights them equally (``pmoment = area/npatch``) and
+    applies a tent through ``taperTriangle``.
+
+    *And it does not plateau.* The real defect is that excluding the boundary makes
+    ``(i,j,k)/n``, ``i,j,k >= 1`` a **complete lattice on the triangle shrunk by
+    ``(n-3)/n`` about its centroid**. At ``n = 15`` that is 0.8 linear, so the rule
+    integrates the inner **64% of the area** and never samples the rim. The
+    shrinkage dies only as ``3/n``, capping the rule at first order in ``n`` --
+    ``N**-0.48`` in point count, against this rule's ``N**-1.00``. The old
+    "plateaus around 5e-3" reading came from measuring on the real layered
+    integrand, where EDGRN table interpolation error takes over and hides the
+    continued slow convergence.
+
+    The cost at matched point count: **12.6x** worse at 91 points, 27.8x at 465,
+    120x at 9045 -- widening, because the orders differ. The reference's 91-point
+    accuracy is matched here by **9 points**.
+
+    ⚠️ This is separate from, and additive to, the adaptive-order win. Adapting
+    the order is what makes most pairs cheap (56.7% of real pairs need ``k=1``);
+    the boundary treatment is what makes each order accurate. Do not conflate them
+    when attributing the speed-up.
     """
     p1, p2, p3 = (np.asarray(p, dtype=float) for p in (p1, p2, p3))
     order = max(1, int(order))

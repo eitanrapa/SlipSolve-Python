@@ -35,11 +35,20 @@ import scipy.sparse as sp
 #:
 #: The reference uses ``interpolate_triangle2(..., 15)``, a strictly interior
 #: barycentric lattice of ``(15-1)(15-2)/2 = 91`` points, and
-#: ``build_full_xyz.m`` hard-errors if asked for any other number. We subdivide
-#: into ``13**2 = 169`` sub-triangles instead, which is the same order of work and
-#: a *convergent* rule: an equal-weight sample of only the upright sub-triangles,
-#: which is what a plain barycentric lattice gives, is a biased estimate of the
-#: integral and its error stops falling however many points are added.
+#: ``build_full_xyz.m`` hard-errors if asked for any other number
+#: (``pointSourcesPerTriangle ~= 15`` raises ``SlipSolve:LegacyCompatibility``).
+#: We subdivide into ``13**2 = 169`` sub-triangles instead -- the same order of
+#: work, and **second** order where the reference's rule is only first.
+#:
+#: ⚠️ **Corrected 2026-09-07.** This note used to say the reference takes "only
+#: the upright sub-triangles" and that its "error stops falling however many
+#: points are added". Both were wrong, and both were checked against the cloned
+#: MATLAB. It takes interior *lattice nodes*, dropping the boundary; and those
+#: points are a complete lattice on the triangle **shrunk by ``(n-3)/n``** about
+#: its centroid, so at ``n = 15`` it integrates the inner 64% of the area and
+#: never samples the rim. The shrinkage dies as ``3/n``, which caps the rule at
+#: first order rather than stalling it. See ``_triangle_quadrature`` and
+#: ``scripts/bench_quadrature_rule.py``.
 DEFAULT_SUBDIVISION = 13
 
 
