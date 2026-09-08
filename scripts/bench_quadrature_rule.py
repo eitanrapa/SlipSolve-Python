@@ -11,20 +11,29 @@ SlipSolve-Curve uses ``interpolate_triangle2(v1,v2,v3,15)``, read from source at
 `comb_green_nodes_xyz.m` weights them **equally** (``pmoment = area/npatch``) and
 applies a tent via `taperTriangle`, so the rule reproduced here is faithful.
 
-⚠️ **Excluding the boundary is the defect, and it is not a small one.** The points
-``(i,j,k)/n`` with ``i,j,k >= 1`` are a *complete* lattice on the triangle shrunk
-by ``(n-3)/n`` about its centroid. At ``n = 15`` that is 0.8 linear -- the rule
-integrates over the inner **64% of the area** and never samples the rim. The
-shrinkage dies only as ``3/n``, which caps the rule at first order however many
-points are added.
+⚠️ **The defect is the EQUAL WEIGHTS, not the excluded boundary** -- measured, and
+the distinction matters because the obvious fix does not work. A lattice's nodes
+own unequal areas: an interior node is shared by six sub-triangles, an edge node
+by three, a corner by one. Weighting them equally misrepresents that, and the
+mismatch lives in the ``O(1/n)`` boundary layer.
 
-⚠️ **Two earlier descriptions in this repo were wrong** and this script exists to
-stop them recurring. `_triangle_quadrature`'s docstring said the reference takes
+Putting the boundary back changes nothing --- ``all nodes, equal`` converges at
+``n**-1.03`` against interior-only's ``n**-1.04``, errors within 1% of each other.
+Weighting correctly does: the P1 vertex rule (every sub-triangle giving ``area/3``
+to each of its three vertices, so the weights come out ``6:3:1``) reaches
+``n**-1.99``. So the reference is avoiding a real problem with a fix that does not
+address it.
+
+⚠️ **Three earlier descriptions in this repo were wrong** and this script exists
+to stop them recurring. `_triangle_quadrature`'s docstring said the reference takes
 "only the upright" sub-triangles -- it does not, it takes interior lattice nodes.
-And it said the error "stops falling however many points are added", "plateaus
-around 5e-3" -- it does not plateau, it converges at first order. The apparent
-plateau came from measuring on the real layered integrand, where EDGRN
-table-interpolation error takes over and hides the continued slow convergence.
+It said the error "stops falling however many points are added", "plateaus around
+5e-3" -- it does not plateau, it converges at first order; the apparent plateau
+came from measuring on the real layered integrand, where EDGRN table-interpolation
+error takes over and hides the continued slow convergence. And it then blamed the
+first order on the ``(n-3)/n`` shrinkage of the interior lattice, which the
+``all nodes, equal`` row here refutes: remove the shrinkage entirely and the rule
+is still first order.
 
 Tested against **exact** integrals, so nothing here is circular -- no high-order
 rule stands in for the truth:
@@ -76,6 +85,45 @@ def sub_triangle_centroids(n):
     return points, np.full(len(points), 1.0 / len(points))
 
 
+def all_nodes_equal(n):
+    """Every lattice node, boundary included, equal weights -- the obvious "fix".
+
+    Included to show it is not one. If the shrinkage of the interior lattice were
+    the cause of first-order convergence, restoring the boundary would restore
+    second order. It does not.
+    """
+    points = [(i * _P[0] + j * _P[1] + (n - i - j) * _P[2]) / n
+              for i in range(0, n + 1) for j in range(0, n + 1 - i)]
+    points = np.asarray(points)
+    return points, np.full(len(points), 1.0 / len(points))
+
+
+def all_nodes_weighted(n):
+    """Every lattice node with the area it actually owns -- the P1 vertex rule.
+
+    Each sub-triangle contributes ``area/3`` to each of its three vertices, so an
+    interior node accumulates six such shares, an edge node three and a corner
+    one: weights ``6:3:1``. This is the composite rule the equal-weight lattice is
+    a broken form of, and it recovers second order -- which is what identifies the
+    weights, rather than the boundary, as the defect.
+    """
+    from collections import defaultdict
+
+    weight = defaultdict(float)
+    for a in range(n):
+        for b in range(n - a):
+            c = n - 1 - a - b
+            for key in ((a + 1, b, c), (a, b + 1, c), (a, b, c + 1)):
+                weight[key] += 1.0 / 3.0
+            if c >= 1:
+                for key in ((a + 1, b + 1, c - 1), (a, b + 1, c), (a + 1, b, c)):
+                    weight[key] += 1.0 / 3.0
+    keys = list(weight)
+    points = np.asarray([(i * _P[0] + j * _P[1] + k * _P[2]) / n for i, j, k in keys])
+    w = np.asarray([weight[k] for k in keys])
+    return points, w / w.sum()
+
+
 def reference_interior(n):
     """`interpolate_triangle2`: ``i+j+k=n``, ``i,j,k>=1``, at ``(i,j,k)/n``.
 
@@ -103,46 +151,45 @@ def worst_error(n, rule=sub_triangle_centroids):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--max-n", type=int, default=136)
+    ap.add_argument("--max-n", type=int, default=66)
     args = ap.parse_args()
 
-    # Subdivisions chosen so the reference's point count (n-1)(n-2)/2 roughly
-    # doubles each row, starting at the 91 it actually ships.
-    ns = np.array([n for n in (6, 10, 15, 22, 32, 46, 66, 95, 136) if n <= args.max_n])
-    ref = np.array([worst_error(int(n), reference_interior) for n in ns])
-    npts = np.array([(n - 1) * (n - 2) // 2 for n in ns])
-    # This package's rule at the SAME point budget (its count is n**2).
-    nb = np.maximum(2, np.round(np.sqrt(npts)).astype(int))
-    both = np.array([worst_error(int(n)) for n in nb])
+    ns = np.array([n for n in (6, 10, 15, 22, 32, 46, 66, 95) if n <= args.max_n])
+    rules = [("REF interior, equal", reference_interior),
+             ("all nodes, equal", all_nodes_equal),
+             ("all nodes, 6:3:1", all_nodes_weighted),
+             ("OURS centroids", sub_triangle_centroids)]
+    err = {name: np.array([worst_error(int(n), f) for n in ns]) for name, f in rules}
 
-    print("%5s %9s %14s   %5s %9s %14s %9s"
-          % ("ref n", "ref pts", "REFERENCE", "n", "pts", "this package", "ratio"))
-    for n, p_, e, n2, e2 in zip(ns, npts, ref, nb, both):
-        print("%5d %9d %14.3e   %5d %9d %14.3e %8.1fx"
-              % (n, p_, e, n2, n2 * n2, e2, e / e2))
+    print("%5s" % "n" + "".join("%22s" % name for name, _ in rules))
+    for i, n in enumerate(ns):
+        print("%5d" % n + "".join("%22.3e" % err[name][i] for name, _ in rules))
 
-    print("\nfitted order vs POINT COUNT:  reference N**%.2f   this package N**%.2f"
-          % (np.polyfit(np.log(npts), np.log(ref), 1)[0],
-             np.polyfit(np.log(nb ** 2), np.log(both), 1)[0]))
-    print("             vs subdivision n:  reference n**%.2f"
-          % np.polyfit(np.log(ns), np.log(ref), 1)[0])
-    print("A PLATEAU would fit N**0. The reference converges -- at first order in n,")
-    print("so only as sqrt of the point count. -2 in k is what this package's error")
-    print("model assumes, and only the both-orientation rule delivers it.")
+    print()
+    for name, _ in rules:
+        order = np.polyfit(np.log(ns), np.log(err[name]), 1)[0]
+        print("  order in n:  %-22s n**%.2f" % (name, order))
 
-    # Why: the interior lattice is a complete lattice on a SHRUNKEN triangle.
-    print("\nthe shrinkage that causes it:")
-    print("%6s %12s %14s %14s" % ("n", "scale (n-3)/n", "area sampled", "ref error"))
-    for n, e in zip(ns, ref):
-        s = (n - 3) / n
-        print("%6d %12.3f %13.0f%% %14.3e" % (n, s, 100 * s * s, e))
+    print("""
+Read the middle two rows together. Putting the boundary back changes nothing --
+the shrinkage of the interior lattice is NOT what makes it first order. Giving the
+nodes the area they actually own does: 6:3:1 recovers second order. The defect is
+the equal weights.
 
-    e91 = worst_error(15, reference_interior)
+Centroids avoid the question rather than answering it: a sub-triangle centroid is
+interior to exactly one cell and owns exactly area/k**2, so there is no sharing to
+weight for. That is why -2 -- the exponent the package's error model assumes -- is
+what this rule delivers.""")
+
+    # ⚠️ 91 = (15-1)(15-2)/2, the interior-node count at n=15 -- a lattice number,
+    # not an optimised rule count (Dunavant's go 1,3,4,6,7,12,13,16,19,25,27,33,
+    # 37,42,48,52,61 -- no 91). It falls out of choosing n=15, and is not a target.
+    target = worst_error(15, reference_interior)
     for n in range(2, 40):
-        if worst_error(n) <= e91:
-            print("\nthe reference's 91-point accuracy (%.2e) is matched by this" % e91)
-            print("package's rule at n=%d, i.e. %d points -- %.1fx fewer."
-                  % (n, n * n, 91 / (n * n)))
+        if worst_error(n) <= target:
+            print("\nthe reference's 91-point accuracy %.2e is matched by this rule"
+                  % target)
+            print("at n=%d, i.e. %d points -- %.1fx fewer." % (n, n * n, 91 / (n * n)))
             break
 
 

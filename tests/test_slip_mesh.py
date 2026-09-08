@@ -246,3 +246,73 @@ def test_units_are_guarded():
         FaultMesh(nodes + np.array([0.0, 0.0, 10.0]), tri, params)
     with pytest.raises(ValueError, match="kilometres"):
         FaultMesh(nodes * 1e5, tri, params)
+
+
+def test_join_makes_one_mesh_per_fault_with_its_own_boundaries(trace, frame):
+    """Two faults in one mesh: components are labelled, boundaries are per fault.
+
+    This is the case a *global* boundary test gets silently wrong -- under one, the
+    shallower fault has no bottom edge at all and the pair own one along-strike end
+    each instead of two -- which is why the labelling was fixed before the feature.
+    """
+    shallow = FaultMesh.vertical(trace, frame, max_depth=8e3, edge_length=4e3)
+    deep = FaultMesh.vertical(
+        FaultTrace(np.array([-68.6, -68.2, -67.8]),
+                   np.array([10.90, 10.94, 10.98])),
+        frame, max_depth=20e3, edge_length=4e3)
+    joined = FaultMesh.join([shallow, deep])
+
+    assert joined.n_nodes == shallow.n_nodes + deep.n_nodes
+    assert joined.n_elements == shallow.n_elements + deep.n_elements
+
+    labels = joined.node_components
+    assert labels.max() == 1, "two disjoint faults must be two components"
+    assert np.bincount(labels).tolist() == [shallow.n_nodes, deep.n_nodes]
+
+    # ⚠️ The parameters OVERLAP -- both faults start at s ~ 0 -- so a global
+    # extremum test would be wrong here. That is the point of the fixture.
+    s = joined.params[:, 0]
+    assert s[labels == 0].min() == pytest.approx(s[labels == 1].min(), abs=1.0)
+
+    for side in ("bottom", "left", "right"):
+        mask = joined.boundary_nodes(side)
+        assert mask[labels == 0].any(), f"fault 0 lost its {side} edge"
+        assert mask[labels == 1].any(), f"fault 1 lost its {side} edge"
+
+    # Each fault's bottom edge sits at its own depth, not the deeper one's.
+    bottom = joined.boundary_nodes("bottom")
+    z = joined.params[:, 1]
+    assert z[bottom & (labels == 0)].max() == pytest.approx(-8e3, abs=1.0)
+    assert z[bottom & (labels == 1)].max() == pytest.approx(-20e3, abs=1.0)
+
+
+def test_join_assembles_to_the_two_meshes_side_by_side(trace, frame):
+    """G against a joined mesh is exactly the parts' G, column-blocked.
+
+    The strong check that nothing is silently coupled across the gap: the faults
+    share no node, so each column must be what that fault alone would produce.
+    """
+    a = FaultMesh.vertical(trace, frame, max_depth=8e3, edge_length=5e3)
+    b = FaultMesh.vertical(
+        FaultTrace(np.array([-68.6, -68.2, -67.8]),
+                   np.array([10.90, 10.94, 10.98])),
+        frame, max_depth=8e3, edge_length=5e3)
+    joined = FaultMesh.join([a, b])
+
+    from slipsolve import HalfSpaceTDE
+
+    rng = np.random.default_rng(0)
+    x = rng.uniform(-40e3, 40e3, 24)
+    y = rng.uniform(-40e3, 40e3, 24)
+    look = (np.full(24, 0.6), np.full(24, 0.1), np.full(24, 0.8))
+    engine = HalfSpaceTDE()
+    g_a = engine.los_matrix(a, x, y, *look)
+    g_b = engine.los_matrix(b, x, y, *look)
+    g_joined = engine.los_matrix(joined, x, y, *look)
+
+    # element basis: columns are [strike(all elements), dip(all elements)]
+    na, nb = a.n_elements, b.n_elements
+    assert g_joined.shape == (24, 2 * (na + nb))
+    np.testing.assert_allclose(g_joined[:, :na], g_a[:, :na], rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(g_joined[:, na:na + nb], g_b[:, :nb],
+                               rtol=1e-12, atol=1e-14)

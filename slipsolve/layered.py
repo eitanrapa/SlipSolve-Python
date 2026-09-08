@@ -525,15 +525,26 @@ def _triangle_quadrature(p1, p2, p3, order):
     ``comb_green_nodes_xyz.m`` weights them equally (``pmoment = area/npatch``) and
     applies a tent through ``taperTriangle``.
 
-    *And it does not plateau.* The real defect is that excluding the boundary makes
-    ``(i,j,k)/n``, ``i,j,k >= 1`` a **complete lattice on the triangle shrunk by
-    ``(n-3)/n`` about its centroid**. At ``n = 15`` that is 0.8 linear, so the rule
-    integrates the inner **64% of the area** and never samples the rim. The
-    shrinkage dies only as ``3/n``, capping the rule at first order in ``n`` --
-    ``N**-0.48`` in point count, against this rule's ``N**-1.00``. The old
-    "plateaus around 5e-3" reading came from measuring on the real layered
-    integrand, where EDGRN table interpolation error takes over and hides the
-    continued slow convergence.
+    *And it does not plateau.* It converges at first order in ``n``, i.e.
+    ``N**-0.48`` in point count against this rule's ``N**-1.00``. The old "plateaus
+    around 5e-3" reading came from measuring on the real layered integrand, where
+    EDGRN table interpolation error takes over and hides the continued slow
+    convergence.
+
+    ⚠️ **A third correction, 2026-09-08: the cause is the EQUAL WEIGHTS, not the
+    excluded boundary.** This docstring blamed the ``(n-3)/n`` shrinkage of the
+    interior lattice. Measured, that is wrong: restore the boundary and the rule is
+    *still* first order (``n**-1.03`` against interior-only's ``n**-1.04``, errors
+    within 1%). A lattice's nodes own unequal areas -- an interior node is shared
+    by six sub-triangles, an edge node by three, a corner by one -- and weighting
+    them equally misrepresents that, with the mismatch in the ``O(1/n)`` boundary
+    layer. Give them the area they own (the P1 vertex rule, weights ``6:3:1``) and
+    second order comes back at ``n**-1.99``. So the reference is avoiding a real
+    problem with a fix that does not address it.
+
+    Centroids avoid the question rather than answering it: a sub-triangle centroid
+    is interior to exactly one cell and owns exactly ``area/k**2``, so there is no
+    sharing to weight for.
 
     The cost at matched point count: **12.6x** worse at 91 points, 27.8x at 465,
     120x at 9045 -- widening, because the orders differ. The reference's 91-point

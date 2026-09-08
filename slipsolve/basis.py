@@ -43,11 +43,15 @@ import scipy.sparse as sp
 #: ⚠️ **Corrected 2026-09-07.** This note used to say the reference takes "only
 #: the upright sub-triangles" and that its "error stops falling however many
 #: points are added". Both were wrong, and both were checked against the cloned
-#: MATLAB. It takes interior *lattice nodes*, dropping the boundary; and those
-#: points are a complete lattice on the triangle **shrunk by ``(n-3)/n``** about
-#: its centroid, so at ``n = 15`` it integrates the inner 64% of the area and
-#: never samples the rim. The shrinkage dies as ``3/n``, which caps the rule at
-#: first order rather than stalling it. See ``_triangle_quadrature`` and
+#: MATLAB. It takes interior *lattice nodes*, dropping the boundary, and it
+#: converges at first order rather than stalling.
+#:
+#: ⚠️ Corrected again 2026-09-08: the cause is the **equal weights**, not the
+#: dropped boundary. Lattice nodes own unequal areas (interior shared by six
+#: sub-triangles, edge by three, corner by one); weighting them equally is the
+#: defect, and restoring the boundary does not help (``n**-1.03`` against
+#: ``n**-1.04``). Weighting them ``6:3:1`` does (``n**-1.99``). Centroids are never
+#: shared, so the question does not arise. See ``_triangle_quadrature`` and
 #: ``scripts/bench_quadrature_rule.py``.
 DEFAULT_SUBDIVISION = 13
 

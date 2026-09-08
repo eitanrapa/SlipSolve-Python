@@ -27,6 +27,7 @@ from slipsolve.layered import (
     REFERENCE_QUADRATURE_POINTS,
     LayeredPointSource,
     _moment_components,
+    _tent,
     _triangle_quadrature,
 )
 
@@ -563,3 +564,88 @@ def test_the_orders_the_cap_refused_are_still_recoverable(uniform_tables, scene)
     assert (wanted >= clipped).all()
     assert wanted.max() > clipped.max()
     np.testing.assert_array_equal(clipped, np.clip(wanted, 1, 3).astype(int))
+
+
+# -- no point is ever counted twice ------------------------------------------
+#
+# The reference's `interpolate_triangle2` takes points "strictly INSIDE" the
+# triangle, dropping every edge and vertex. That is not arbitrary: a barycentric
+# lattice's NODES are shared between the sub-triangles of that lattice -- an
+# interior node by up to six, an edge node by up to three -- so equal weights
+# over-weight the boundary relative to the area it represents. It is the
+# composite-rule endpoint problem, the same one that makes the trapezoid rule
+# halve its endpoints. Excluding the boundary avoids having to assign reduced
+# weights there -- and does not work: measured, restoring the boundary leaves the
+# rule first order (n**-1.03 vs n**-1.04), while weighting the nodes 6:3:1 by the
+# area they own restores second order (n**-1.99). See
+# `scripts/bench_quadrature_rule.py`.
+#
+# Sub-triangle CENTROIDS sidestep it instead of paying for it: a centroid is
+# interior to exactly one sub-cell, so it belongs to one cell and represents
+# exactly area/k**2. These three tests pin that there is nothing to double count,
+# within a triangle and across the mesh.
+
+@pytest.mark.parametrize("order", [1, 2, 3, 5, 8, 13, 15])
+def test_quadrature_points_are_never_shared(order):
+    """No point on an edge or vertex, no two coincident, weights summing to one."""
+    p1 = np.array([0.0, 0.0, 0.0])
+    p2 = np.array([1.0, 0.0, 0.0])
+    p3 = np.array([0.0, 1.0, 0.0])
+    points, share = _triangle_quadrature(p1, p2, p3, order)
+
+    assert len(points) == order ** 2
+    np.testing.assert_allclose(share.sum(), 1.0, rtol=0, atol=1e-15)
+
+    # Strictly interior: every barycentric coordinate positive, so no point can
+    # be shared with a neighbouring triangle of the mesh either.
+    l2, l3 = points[:, 0], points[:, 1]
+    bary = np.stack([1.0 - l2 - l3, l2, l3], axis=1)
+    assert bary.min() > 0.0
+
+    if len(points) > 1:
+        d = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=-1)
+        np.fill_diagonal(d, np.inf)
+        assert d.min() > 0.0, "two quadrature points coincide"
+
+
+@pytest.mark.parametrize("order", [1, 2, 5, 13])
+def test_the_tent_integrates_exactly(scene, order):
+    """``int_T N_j dA = A_T / 3`` -- exact, because the rule is centroid symmetric.
+
+    A linear function is integrated exactly by any rule whose points are
+    symmetric about the centroid with equal weights, so this is a machine-precision
+    identity rather than an approximation. It fails immediately if the tent is
+    evaluated at the wrong vertex, or if a point is weighted twice.
+    """
+    _, _, mesh, _, _ = scene
+    worst = 0.0
+    for element in range(mesh.n_elements):
+        triangle = mesh.triangles[element]
+        points, share = _triangle_quadrature(*mesh.vertices[element], order)
+        for node in triangle:
+            weights = share * _tent(mesh.vertices[element], triangle, node, points)
+            worst = max(worst, abs(weights.sum() - 1.0 / 3.0))
+    assert worst < 1e-12
+
+
+def test_nodal_and_element_bases_agree_on_uniform_slip(scene, uniform_tables):
+    """Summing every nodal column equals summing every element column.
+
+    ``sum_j N_j = 1`` identically over the fault, so both sides are the response
+    to **uniform unit slip everywhere** and must agree exactly. This is the strong
+    check that the tented assembly neither double counts a shared edge nor drops
+    one: either would change the total by a sliver of area, and nothing else in
+    the suite would notice.
+    """
+    from slipsolve.basis import make_basis
+
+    _, _, mesh, ox, oy = scene
+    engine = LayeredPointSource(uniform_tables, tolerance=3e-3)
+    look = (np.full(ox.size, 0.6), np.full(ox.size, 0.1), np.full(ox.size, 0.8))
+    g_node = engine.los_matrix(mesh, ox, oy, *look, basis=make_basis(mesh, "node"))
+    g_elem = engine.los_matrix(mesh, ox, oy, *look, basis=make_basis(mesh, "element"))
+
+    n_node, n_elem = mesh.n_nodes, mesh.n_elements
+    for a, b in ((g_node[:, :n_node].sum(1), g_elem[:, :n_elem].sum(1)),
+                 (g_node[:, n_node:].sum(1), g_elem[:, n_elem:].sum(1))):
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-14)

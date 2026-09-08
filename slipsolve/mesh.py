@@ -100,6 +100,56 @@ class FaultMesh:
 
     # -- construction ------------------------------------------------------
     @classmethod
+    def join(cls, meshes):
+        """One mesh holding several **disjoint** faults, for a joint inversion.
+
+        Each input keeps its own nodes, triangles and ``(s, z)``; the pieces are
+        concatenated and the triangle indices offset. Nothing is re-triangulated
+        and no node is merged, so the result has one connected component per input
+        and :attr:`node_components` labels them in the order given.
+
+        ⚠️ **The parameter coordinates deliberately OVERLAP.** Every fault's
+        ``s`` starts near zero, so two faults occupy the same ``(s, z)`` rectangle.
+        That is correct for everything that measures per component --
+        :func:`~slipsolve.layout.boundary_node_mask` and
+        :meth:`boundary_nodes` both take the component labels this provides -- and
+        it is exactly the case a *global* boundary test gets silently wrong: under
+        one, the shallower fault has no bottom edge at all and the pair own one
+        along-strike end each instead of two.
+
+        It does mean the unrolled section view draws the faults on top of one
+        another. Map view is unaffected, since ``nodes`` are real 3-D positions.
+
+        Winding is inherited. Each input was checked against its own trace at
+        construction, and a joint check against one trace would be meaningless
+        here, so none is done -- pass meshes that came from
+        :meth:`vertical` or :meth:`curved`, not hand-built arrays.
+        """
+        meshes = list(meshes)
+        if not meshes:
+            raise ValueError("join needs at least one mesh")
+        first = meshes[0]
+        for other in meshes[1:]:
+            if (first.frame is None) != (other.frame is None):
+                raise ValueError("cannot join meshes with and without a frame")
+            if first.frame is not None:
+                first.frame.require_match(other.frame, "FaultMesh.join")
+
+        nodes, params, triangles, offset = [], [], [], 0
+        for mesh in meshes:
+            nodes.append(np.asarray(mesh.nodes, dtype=float))
+            params.append(np.asarray(mesh.params, dtype=float))
+            triangles.append(np.asarray(mesh.triangles, dtype=int) + offset)
+            offset += mesh.n_nodes
+
+        attrs = dict(first.attrs)
+        attrs.update(layout="joined", n_faults=len(meshes),
+                     joined_nodes=[int(m.n_nodes) for m in meshes],
+                     joined_elements=[int(m.n_elements) for m in meshes])
+        return cls(np.concatenate(nodes), np.concatenate(triangles),
+                   np.concatenate(params), frame=first.frame, attrs=attrs)
+
+    @classmethod
     def vertical(cls, trace, frame=None, max_depth=20e3, edge_length=3e3, top_depth=0.0):
         """Extrude ``trace`` straight down into a vertical fault.
 
