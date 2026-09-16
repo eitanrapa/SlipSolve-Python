@@ -10,11 +10,13 @@ is both, sharing one matrix:
 * **Mesh from resolution** (Barnhart & Lohman 2010): make the elements large
   where resolution is poor and small where it is good, so no parameter is
   either starved or free. :func:`target_element_size` and :func:`adapt_layout`.
-* **Sampling from resolution** (Lohman & Simons 2005): put the observations
-  where they most improve resolution. :func:`resolution_gain` returns a field
-  that :meth:`~slipsolve.sampling.Observations.from_los` already accepts
-  as its ``field=`` argument, so no new sampler is needed -- only a different
-  thing to quadtree.
+* **Sampling from resolution** (after Lohman & Simons 2005): put the
+  observations where they most improve resolution. :func:`resolution_gain`
+  returns a field that :meth:`~slipsolve.sampling.Observations.from_los` already
+  accepts as its ``field=`` argument, so no new sampler is needed -- only a
+  different thing to quadtree. ⚠️ *After*, not *theirs*: they threshold
+  ``diag(N)``, this weights by unresolved model parameters. See
+  :func:`resolution_gain`.
 
 Using one quantity for both is the point. Alternating a resolution-sized mesh
 against a Wang & Fialko predicted-field sampling is two heuristics in different
@@ -44,11 +46,23 @@ trade-off. Nothing is lost by removing it either -- the premise that round zero
 has no smoothing weight to evaluate ``R`` at was wrong, since the loop's own
 ``solve_kwargs`` always carries one.
 
-A third assumption is worth naming rather than leaving implicit: the data
-covariance here is ``sigma**2 I`` modulated by the per-track weights
-:class:`~slipsolve.sampling.Observations` already carries. Lohman & Simons'
-other contribution is a full ``Cd`` estimated from the residual variogram, which
-would enter as ``G' Cd^-1 G`` throughout. That is not built.
+A third ingredient is worth naming rather than leaving implicit: the data
+covariance. Lohman & Simons' other contribution is a full ``Cd`` estimated from
+the residual variogram, and it **is** built --
+:mod:`slipsolve.covariance` fits an exponential, Gaussian or Matern-3/2 model per
+track and :func:`weighted_design` returns ``Cd^-1/2 [G | ramp]``, so every
+quantity in this module runs through it. ``trace(R) == trace(N)`` holds only if
+all three call sites whiten the same ``A``, which is why the whitening lives in
+one function.
+
+⚠️ Whether you actually get it is a property of the *inversion*, not of this
+module: with no covariance model attached, ``whiten`` applies the per-track
+diagonal weights :class:`~slipsolve.sampling.Observations` already carries, which
+is ``sigma**2 I`` modulated per track. That is the default, and it is what the
+recorded Venezuela A/B runs used -- the fitted ``Cd`` was an explicit second arm.
+The distinction matters here because a whitened problem is damped differently:
+whitening rescaled lambda by ~3000x at matched effective rank on the real
+six-scene problem, so a smoothing weight is not comparable across it.
 """
 
 import warnings
@@ -815,6 +829,24 @@ def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.
     problem. Real runs sit at 5.8-18.6% of parameters on a bound (see
     :data:`MAX_BOUND_FRACTION`), so the two problems are close but not the same.
 
+    **``jri`` comes along for free, and it is Barnhart \& Lohman's criterion.**
+    Their Appendix A splits the total error into a regularisation part (fit of the
+    smoothed model to noise-free data) and a perturbation part (how much of one
+    noise realisation the model absorbs), and minimises the sum. Written with
+    ``M = [I, -N]`` acting on stacked pairs, their approximation for real data is
+    ``jRi = (1/k)||r||^2 - (1/k)tr(C2) + (1/k)tr(Cr)`` with
+    ``Cr = M diag(Cd, Cd) M'`` and ``C2 = M [[Cd, Cd], [Cd, Cd]] M'``. In the
+    whitened space ``Cd = I``, so ``Cr = I + N^2`` and ``C2 = (I - N)^2``, the
+    ``tr(N^2)`` terms cancel and the whole thing collapses to
+
+        ``jRi = (||r||^2 + 2 trace(N)) / n`` ,
+
+    which is Mallows' Cp (equivalently UPRE at unit variance). It uses the same
+    residual and the same ``trace(N)`` GCV already has, so it is one extra add.
+    ⚠️ The reduction is ours, not theirs -- they present the general form. It
+    holds only because the problem is whitened; against an unwhitened ``Cd`` the
+    two trace terms do not cancel.
+
     ⚠️ **GCV is not an oracle, and its own users say so.**
     Ortega-Culaciati et al. (2021, section 4) report that GCV "or any other model
     class selection method" tends to return solutions that are slightly over- or
@@ -865,6 +897,9 @@ def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.
         )
     return {"smoothing": _smoothing_label(smoothing),
             "gcv": n * rss / slack ** 2,
+            # Barnhart & Lohman's jRi, which costs nothing extra here -- see
+            # the note in this function's docstring for the reduction.
+            "jri": (rss + 2.0 * parameters) / n,
             "effective_rank": rank, "effective_parameters": parameters,
             "n_ramp": int(inversion.n_ramp), "rss": rss,
             "whitened_rms": float(np.sqrt(rss / n)), "n_obs": n}
@@ -899,17 +934,543 @@ def gcv_curve(inversion, weights, **kwargs):
     order = np.argsort(weights)
     weights = np.asarray(weights)[order]
     fields = {name: ("smoothing", np.array([rows[i][name] for i in order]))
-              for name in ("gcv", "effective_rank", "effective_parameters",
-                           "rss", "whitened_rms")}
+              for name in ("gcv", "jri", "effective_rank",
+                           "effective_parameters", "rss", "whitened_rms")}
     out = xr.Dataset(fields, coords={"smoothing": weights})
     best = int(np.argmin(out["gcv"].values))
+    # jRi is a different criterion on the same sweep, so it gets its own
+    # minimum rather than being read off GCV's.
+    best_jri = int(np.argmin(out["jri"].values))
     out.attrs.update(
         best_smoothing=float(weights[best]),
         best_rank=float(out["effective_rank"].values[best]),
         best_gcv=float(out["gcv"].values[best]),
         interior=bool(0 < best < len(weights) - 1),
+        jri_smoothing=float(weights[best_jri]),
+        jri_rank=float(out["effective_rank"].values[best_jri]),
+        jri_interior=bool(0 < best_jri < len(weights) - 1),
     )
     return out
+
+
+def blocked_folds(obs, n_folds=8, direction="auto"):
+    """Contiguous spatial blocks along one direction -- the fold map for
+    :func:`blocked_cross_validation`.
+
+    Returns an :class:`xarray.DataArray` of fold index on the ``obs``
+    dimension, carrying the projection direction, the block width and the
+    per-fold counts in ``attrs``.
+
+    **Why blocks rather than single points.** Leave-one-out cross-validation --
+    which is what :func:`generalized_cross_validation` estimates in closed form
+    -- assumes the held-out datum is independent of the ones kept. InSAR noise
+    is spatially correlated over kilometres, so a held-out *point* is predicted
+    by its own correlated neighbours; the criterion reads that correlation as
+    signal and rewards a model rough enough to follow it. That is the standard
+    account of GCV under-smoothing on correlated data, and it matches what was
+    measured on the real seven-scene set: GCV lands at effective rank 257-345
+    of 394 parameters, against an L-curve corner at 21 and a checkerboard
+    recovery optimum at 79-129.
+
+    Holding out a *block* wider than the correlation length restores the
+    independence the criterion assumes, and restores it **geometrically**,
+    without needing ``Cd`` to be right. That is the whole reason to prefer it
+    here: every criterion tried so far -- GCV, and the discrepancy principle
+    ``chi2/n == 1`` -- takes the fitted covariance as truth, and the fitted
+    covariance is a lower bound. All seven variograms are still rising at the
+    largest lag measured, which :mod:`slipsolve.covariance` warns about
+    directly.
+
+    ``direction="auto"`` projects onto the principal axis of the sample
+    coordinates, which is the axis to block along: an **across**-strike block
+    would hold out one side of the fault, making it a coverage experiment rather
+    than a noise one -- and on this dataset, where only ~19% of samples lie
+    north of the trace, one with a foregone conclusion.
+
+    ⚠️ **The principal axis is the long axis of the SAMPLES, not of the fault,
+    and on the real seven-scene set they differ by 15 degrees** -- bearing 99.3
+    against the trace's 84, because the samples fill the scene footprints rather
+    than following the trace. Harmless at that size (the blocks are full-width
+    slabs either way, so ``cos 15 = 0.97`` of the cut is still along strike) but
+    not automatically harmless: pass an explicit ``(dx, dy)`` -- the trace
+    tangent -- wherever the two diverge further.
+
+    ⚠️ **Equal width, not equal count.** The validity condition is a width --
+    the block has to outrun the correlation -- so the blocks are cut at equal
+    intervals along the projection and the counts come out however the sampling
+    density says.
+
+    ⚠️ **And it does come out unbalanced.** Measured on the real seven-scene set
+    at eight folds: 133, 373, 1208, 1189, 1014, 1332, 760, 174 -- the end blocks
+    hold about a tenth of what the middle ones do, because the seven scenes
+    overlap across the middle of the cloud and not at its ends.
+    ``attrs["counts"]`` is there so that is visible rather than silent. The
+    pooled score is unaffected (it is an rms over observations, not a mean over
+    folds), but ``cv_rms_spread`` is dominated by the thin end blocks and should
+    be read as a spread over unequal samples.
+    """
+    x = np.asarray(obs.ds["x"].values, dtype=float)
+    y = np.asarray(obs.ds["y"].values, dtype=float)
+    n_folds = int(n_folds)
+    if n_folds < 2:
+        raise ValueError(f"blocked CV needs at least two folds, got {n_folds}")
+    if x.size < n_folds:
+        raise ValueError(
+            f"{x.size} observations cannot be cut into {n_folds} folds")
+
+    if isinstance(direction, str):
+        if direction != "auto":
+            raise ValueError(
+                f"Unknown direction {direction!r}; expected 'auto' or a (dx, dy)")
+        points = np.column_stack([x - x.mean(), y - y.mean()])
+        # Principal axis: the right singular vector of the largest value. For a
+        # sample set that follows a long fault this is along strike.
+        axis = np.linalg.svd(points, full_matrices=False)[2][0]
+    else:
+        axis = np.asarray(direction, dtype=float).ravel()
+        if axis.shape != (2,) or not np.any(axis):
+            raise ValueError(
+                f"direction must be 'auto' or a non-zero (dx, dy), got {direction!r}")
+    axis = axis / np.linalg.norm(axis)
+
+    t = x * axis[0] + y * axis[1]
+    lo, hi = float(t.min()), float(t.max())
+    width = (hi - lo) / n_folds
+    edges = np.linspace(lo, hi, n_folds + 1)
+    fold = np.clip(np.digitize(t, edges[1:-1]), 0, n_folds - 1)
+    counts = np.bincount(fold, minlength=n_folds)
+
+    if np.any(counts == 0):
+        raise ValueError(
+            f"fold(s) {list(np.flatnonzero(counts == 0))} are empty at "
+            f"n_folds={n_folds}; the samples do not fill the projection evenly. "
+            "Use fewer folds, or pass an explicit direction.")
+
+    out = xr.DataArray(fold, dims="obs", name="fold")
+    out.attrs.update(direction=[float(axis[0]), float(axis[1])],
+                     block_width=float(width), n_folds=n_folds,
+                     counts=[int(c) for c in counts])
+    return out
+
+
+def _held_in(inversion, keep):
+    """The same inversion restricted to rows ``keep``, sharing nothing writable.
+
+    ⚠️ **The ramp block is row-sliced, never rebuilt.**
+    :func:`~slipsolve.regularize.ramp_columns` builds monomials in
+    *centred, span-scaled* coordinates, so rebuilding it on a subset would
+    recentre and rescale against that subset's extent -- giving the training fit
+    a different set of nuisance columns from the ones the held-out rows are then
+    predicted with. Slicing the matrix the parent already built keeps the column
+    space identical on both sides, which is the only way the prediction means
+    anything.
+
+    ``G`` is sliced for the same reason and for one more: it costs tens of
+    seconds to assemble and nothing to index.
+    """
+    import copy
+
+    from .covariance import whitening_factors
+    from .sampling import Observations
+
+    keep = np.asarray(keep)
+    out = copy.copy(inversion)
+    out.obs = Observations(inversion.obs.ds.isel(obs=keep))
+    out.d = inversion.d[keep]
+    out.w = inversion.w[keep]
+    out.g = inversion.g[keep]
+    out.ramp = inversion.ramp[keep]
+
+    if inversion.covariance is not None:
+        # Refactorised on the retained rows: chol(Cd)[keep, keep] is not
+        # chol(Cd[keep, keep]), so the parent's factors cannot be sliced. Built
+        # here rather than through `_build_whitening` deliberately -- that path
+        # re-runs the `normalize` check and `cell_ratio_warning`, both of which
+        # the parent has already answered, and would raise the same warning once
+        # per fold per weight.
+        out._chol = whitening_factors(out.obs, inversion.covariance)
+        track = np.asarray(out.obs.ds["track"].values, dtype=object)
+        out._track_rows = {name: np.flatnonzero(track == name)
+                           for name in out._chol}
+    return out
+
+
+def _fold_problems(inversion, folds):
+    """``[(held_in_inversion, test_rows), ...]``, built once for a whole sweep.
+
+    The per-fold whitening is a Cholesky per track and the subset is a copy of
+    two matrices; doing that once and reusing it across every smoothing weight
+    is what keeps a sweep to about the cost of a rank ladder.
+    """
+    fold = np.asarray(getattr(folds, "values", folds)).ravel()
+    if fold.size != inversion.obs.n:
+        raise ValueError(
+            f"fold map has {fold.size} entries against {inversion.obs.n} "
+            "observations")
+
+    labels = np.unique(fold)
+    track = np.asarray(inversion.obs.ds["track"].values, dtype=object)
+    per_track_ramp = inversion.n_ramp / max(len(np.unique(track)), 1)
+
+    problems = []
+    for label in labels:
+        test = np.flatnonzero(fold == label)
+        keep = np.flatnonzero(fold != label)
+        # ⚠️ A track with no training rows has unconstrained ramp columns, so
+        # its held-out rows cannot be predicted at all -- the fit would put an
+        # arbitrary constant there and the score would be noise. This is the
+        # reason the folds are cut along strike rather than by track: an
+        # along-strike block leaves every track most of its own samples.
+        for name in np.unique(track):
+            left = int(np.sum(track[keep] == name))
+            if left <= per_track_ramp:
+                raise ValueError(
+                    f"fold {int(label)} leaves track {name!r} with {left} "
+                    f"training rows against ~{per_track_ramp:.0f} ramp columns "
+                    "of its own, so its nuisance columns are unconstrained and "
+                    "its held-out rows are unpredictable. Use fewer folds, or "
+                    "a lower ramp degree.")
+        problems.append((_held_in(inversion, keep), test))
+    return problems
+
+
+def _score_folds(inversion, problems, smoothing, **solve_kwargs):
+    """Pooled held-out prediction error at one smoothing weight."""
+    n = inversion.obs.n
+    predicted = np.full(n, np.nan)
+    profiled = np.full(n, np.nan)
+    converged = True
+    for held_in, test in problems:
+        model = held_in.solve(smoothing=smoothing, **solve_kwargs)
+        converged &= bool(model.converged)
+        slip, ramp = model.x[:inversion.n_slip], model.x[inversion.n_slip:]
+        fault = inversion.g[test] @ slip
+        predicted[test] = fault
+        profiled[test] = fault
+        if inversion.n_ramp:
+            predicted[test] = fault + inversion.ramp[test] @ ramp
+            # Least squares against the held-out block's OWN ramp columns, whose
+            # residual is the projection onto the orthogonal complement of the
+            # ramp subspace. See `cv_rms_profiled` below for why that is the
+            # score to read on this data.
+            design = inversion.ramp[test]
+            coef, *_ = np.linalg.lstsq(design, inversion.d[test] - fault,
+                                       rcond=None)
+            profiled[test] = fault + design @ coef
+
+    residual = inversion.d - predicted
+    per_fold = np.array([
+        float(np.sqrt(np.mean(residual[test] ** 2))) for _, test in problems])
+    out = {"smoothing": _smoothing_label(smoothing),
+           # Every observation is held out exactly once, so the pooled figure is
+           # an rms over the whole data set -- directly comparable with
+           # `SlipModel.rms_misfit`, which is the *fitted* residual on the same
+           # rows. Prediction error above fit is the gap regularisation is for.
+           "cv_rms": float(np.sqrt(np.mean(residual ** 2))),
+           "cv_rms_spread": float(np.std(per_fold)),
+           "cv_rms_worst": float(per_fold.max()),
+           "converged": converged, "n_folds": len(problems), "n_obs": int(n)}
+
+    # ⚠️ Secondary, and deliberately not the criterion. Whitening the held-out
+    # residual by `Cd` would put the fitted covariance back into the score and
+    # give up the one property this criterion has that GCV does not. It is
+    # reported because a reader who trusts `Cd` will want it, and because the
+    # two disagreeing is itself informative about the noise model.
+    if inversion.covariance is not None:
+        whitened = inversion.whiten(residual)
+        out["cv_whitened_rms"] = float(np.sqrt(np.mean(whitened ** 2)))
+
+    # ⚠️ **What it removes is exact; which score is sharper is not settled.** By
+    # construction the two scores differ by the held-out residual's component in
+    # the block's ramp subspace, i.e. the error of extrapolating the training
+    # ramp across the gap -- and here that ramp is not arbitrary: the joint
+    # quadratic has been measured to BE the ionosphere (0.93-1.00 against
+    # NISAR's dual-frequency screens). Measured at eight folds it is 48-79% of
+    # the `cv_rms` error variance. On the 09-11 production model this score
+    # minimised sharply (rank 49.8) where `cv_rms` sat in a basin flat across
+    # rank 26-37; on the 09-14 reprocessed model the reverse held -- this one
+    # was a shallow, non-monotone floor spanning rank 15.6-61.4 within 5%, and
+    # `cv_rms` was the sharper. Read both.
+    #
+    # (Corrected 2026-09-14: this comment used to call 3.81 cm "the gap between
+    # them" and match it to the 3.0-3.9 cm nuisance disagreement. 3.81 cm is
+    # `cv_rms`'s LEVEL, not a gap, and that 3.0-3.9 cm is the disagreement
+    # between two estimates of the ionospheric surface on three tracks -- a
+    # different quantity. The numbers matching was coincidence.)
+    #
+    # The projector does not depend on `smoothing`, so it biases every rung
+    # identically and leaves the ranking intact -- which is what makes this a
+    # criterion rather than a rescaling.
+    #
+    # ⚠️ But it is NOT a prediction error, and must not be quoted as one: it
+    # fits `n_ramp` coefficients per fold to the test block (42 against ~770
+    # rows on that run, ~5% of its degrees of freedom), so it comes out BELOW
+    # the in-sample fit -- 19.88 mm against a fitted 20.43 mm. Read it for where
+    # it minimises, never for its level.
+    if inversion.n_ramp:
+        out["cv_rms_profiled"] = float(
+            np.sqrt(np.mean((inversion.d - profiled) ** 2)))
+    return out
+
+
+def blocked_cross_validation(inversion, smoothing, folds=None, n_folds=8,
+                             direction="auto", **solve_kwargs):
+    """Held-out prediction error on contiguous spatial blocks, at one weight.
+
+    Fits on everything outside each block in turn and predicts the block,
+    pooling the residuals over all folds -- so every observation is predicted
+    exactly once by a model that never saw it, nor saw anything within a block
+    width of it. Returns a dict: ``cv_rms`` (metres of line of sight),
+    ``cv_rms_spread`` and ``cv_rms_worst`` across folds, ``converged``,
+    ``n_folds``, ``n_obs``, ``cv_whitened_rms`` when a covariance model is
+    present, and ``cv_rms_profiled`` when there are ramp columns.
+
+    ⚠️ **``cv_rms_profiled`` is the one to read where the nuisance columns carry
+    physical signal, which on this data they do** -- the joint quadratic has
+    been measured to be the ionosphere. See :func:`_score_folds` for the
+    measurement and for why its *level* must not be quoted.
+
+    ``smoothing`` and ``solve_kwargs`` go straight to
+    :meth:`~slipsolve.inversion.SlipInversion.solve`, which means this
+    scores the **bound-constrained** problem. That is the substantive difference
+    from :func:`generalized_cross_validation`, and it is not a detail: GCV, the
+    resolution matrix, EPIC and the posterior covariance are all built on the
+    *linear* damped solution, while real runs sit at 5.8-18.6% of parameters on
+    a bound and the polarity bound is doing much of the work of removing the
+    null space. This criterion sees the problem that is actually solved, so
+    ``polarity=`` and the slip bounds belong in ``solve_kwargs``.
+
+    **Cost** is ``n_folds`` solves per weight, against one for GCV. The Green's
+    matrix is assembled once by the caller and only row-sliced here, so a sweep
+    is bounded by the solves: at the seven-scene production size (314 elements,
+    197 nodes, 6183 observations) a solve is ~9 s, so eight folds over fifteen
+    weights is ~20 minutes -- the order of a rank ladder, and far under the
+    8-10 h calibration suite it is meant to stand in for.
+
+    ⚠️ **Whether it over-smooths relative to recovery depends on the setup, and
+    both outcomes have been measured.** Each fold trains on
+    ``(n_folds - 1) / n_folds`` of the data and the held-out block sits at the
+    *edge* of what is left, so both the ramp and the slip are extrapolated into
+    it; both effects push the score smooth. On the 2026-09-11 seven-scene
+    production model (314 elements, 6183 observations, eight folds) that bias
+    showed -- both scorings had an interior minimum, turned up steeply at either
+    end, and landed below the recovery estimate of the day:
+
+        criterion                      effective rank
+        L-curve corner                             21
+        blocked CV, cv_rms (1% basin)           26-37
+        blocked CV, cv_rms_profiled              49.8
+        checkerboard recovery                  79-129
+        chi2/n == 1                               173
+        GCV, whitened / plain               257 / 345
+
+    ⚠️ **On the final ionosphere-removed model the two agreed (2026-09-15).** On
+    its 933-element mesh and 6324 samples, swept in 1.155x steps, both scorings
+    minimised at rank 61.9, with a block-bootstrap argmin of 50-66 (``cv_rms``)
+    and 58-71 (profiled). Recovery on the same mesh, samples and look vectors --
+    truth planted on an independent 2 km mesh, noise drawn from the fitted
+    ``Cd`` scaled up to the residual level -- was best at rank 60-70 for 40 and
+    60 km checkerboards and for rupture-like targets, and at 85 for 30 km. Four
+    things changed between the two comparisons (truth off the inversion mesh,
+    noise 1.2-2.4x the fitted ``Cd``, targets tapered to zero at the
+    constrained edges, new data and tables) and which of them moved recovery is
+    not separated, so read neither outcome as general.
+
+    What stands either way is the explanation for GCV's failure: removing the
+    noise correlation *geometrically* rather than through ``Cd`` moved the answer
+    5-13x in the predicted direction. ⚠️ Neither result displaces a recovery
+    test on the problem actually being solved, which asks the question one cares
+    about -- can this geometry and this sampling recover a field like this. Where
+    the two agree, this criterion is a defensible choice that needs no planted
+    truth and no trusted ``Cd``.
+
+    ⚠️ **Sweep finely before comparing the two scorings.** On a 1.78x grid they
+    once appeared to disagree -- ranks 52.3 and 69.7 -- and the fine sweep on the
+    final mesh, read at those two ranks, reproduces exactly that split from a
+    single minimum between them.
+    """
+    if folds is None:
+        folds = blocked_folds(inversion.obs, n_folds=n_folds, direction=direction)
+    _warn_narrow_blocks(inversion, folds)
+    problems = _fold_problems(inversion, folds)
+    return _score_folds(inversion, problems, smoothing, **solve_kwargs)
+
+
+def _warn_narrow_blocks(inversion, folds):
+    """Warn when a block is not wider than the correlation it has to outrun."""
+    width = float(getattr(folds, "attrs", {}).get("block_width", 0.0))
+    covariance = getattr(inversion, "covariance", None)
+    if width <= 0 or covariance is None:
+        return
+    models = (covariance.values() if isinstance(covariance, dict)
+              else [covariance])
+    longest = max(float(m.range_m) for m in models)
+    if width < longest:
+        warnings.warn(
+            f"block width {width / 1e3:.0f} km is below the longest fitted "
+            f"correlation range {longest / 1e3:.0f} km, so a held-out block is "
+            "still correlated with the data that predicted it -- which is the "
+            "leave-one-out failure this is meant to avoid. Use fewer folds. "
+            "Note the fitted range is itself a lower bound where the variogram "
+            "never plateaued, so clearing it is necessary and not sufficient.",
+            RuntimeWarning, stacklevel=3)
+
+
+def blocked_cv_curve(inversion, weights, n_folds=8, direction="auto",
+                     rank=True, **solve_kwargs):
+    """:func:`blocked_cross_validation` over a sweep, plus where it minimises.
+
+    Returns an :class:`xarray.Dataset` on ``smoothing`` carrying ``cv_rms``,
+    ``cv_rms_spread``, ``cv_rms_worst``, ``converged`` and (with a covariance
+    model) ``cv_whitened_rms``, with ``best_smoothing``, ``best_rank`` and
+    ``interior`` in ``attrs``.
+
+    ``rank=True`` also evaluates the slip-only effective rank of the **full**
+    data set at each weight -- one factorization per rung on top of the folds --
+    because rank, not lambda, is the unit every other criterion here is quoted
+    in. Lambda's meaning has already moved twice (the smoothing-units fix made
+    the operator ~2400x stronger on 13.7% of edges, and whitening rescales it by
+    ~3000x), so a bare weight cannot be compared against the L-curve's 21 or the
+    recovery plateau's 79-129 and a rank can.
+
+    ⚠️ **Check ``interior`` before believing the minimum**, exactly as with
+    :func:`gcv_curve`: a curve that falls to the end of the sweep has run out of
+    weights rather than chosen one. The first GCV sweep here did precisely that
+    and only ``interior=False`` caught it.
+
+    ⚠️ **A fold that failed to converge poisons its weight.** ``converged`` is
+    the AND over the folds at that weight; a False there means the rung's score
+    is a solver artefact, not a prediction error, and it should be dropped
+    rather than read -- the same rule :meth:`~slipsolve.inversion.SlipInversion.l_curve`
+    documents for its own roughest end.
+    """
+    weights = [float(w) for w in np.atleast_1d(weights)]
+    if len(weights) < 2:
+        raise ValueError("a cross-validation curve needs at least two weights")
+
+    folds = blocked_folds(inversion.obs, n_folds=n_folds, direction=direction)
+    _warn_narrow_blocks(inversion, folds)
+    problems = _fold_problems(inversion, folds)
+
+    order = np.argsort(weights)
+    weights = np.asarray(weights)[order]
+    # Swept large to small for the reason `l_curve` gives: a smoother problem is
+    # better conditioned and converges in fewer iterations, and the sweep's cost
+    # is dominated by its roughest end.
+    rows = [_score_folds(inversion, problems, w, **solve_kwargs)
+            for w in weights[::-1]][::-1]
+
+    names = ["cv_rms", "cv_rms_spread", "cv_rms_worst"]
+    if "cv_whitened_rms" in rows[0]:
+        names.append("cv_whitened_rms")
+    if "cv_rms_profiled" in rows[0]:
+        names.append("cv_rms_profiled")
+    fields = {name: ("smoothing", np.array([r[name] for r in rows]))
+              for name in names}
+    fields["converged"] = ("smoothing",
+                           np.array([r["converged"] for r in rows], dtype=bool))
+    if rank:
+        resolution_kwargs = {k: v for k, v in solve_kwargs.items()
+                             if k in ("ss_ratio", "ds_ratio", "boundary_ratio",
+                                      "sides", "smooth_weighting")}
+        # `resolution_diagonal`'s own attr, which is the SLIP-ONLY trace -- the
+        # unit the L-curve corner and the calibration ladder are quoted in, and
+        # deliberately not GCV's denominator, which charges for the ramp too.
+        fields["effective_rank"] = ("smoothing", np.array([
+            float(resolution_diagonal(inversion, w,
+                                      **resolution_kwargs).attrs["effective_rank"])
+            for w in weights]))
+
+    out = xr.Dataset(fields, coords={"smoothing": weights})
+    out.attrs.update(
+        n_folds=int(folds.attrs["n_folds"]),
+        block_width=float(folds.attrs["block_width"]),
+        direction=folds.attrs["direction"],
+        counts=folds.attrs["counts"],
+        n_obs=int(inversion.obs.n),
+    )
+    # ⚠️ The ramp-profiled score is a DIFFERENT criterion on the same sweep, so
+    # it gets its own minimum rather than being read off `cv_rms`'s -- the same
+    # arrangement `gcv_curve` uses for jRi. On the 09-11 seven-scene model the two
+    # disagreed, 49.8 against 26-37 in effective rank, and the disagreement is
+    # the ionospheric extrapolation term; see `_score_folds`. (On the final
+    # 933-element mesh, swept in 1.155x steps, both minimised at 61.9 -- they can
+    # agree, which is no reason to stop scoring them separately.)
+    if "cv_rms_profiled" in out:
+        prof = int(np.argmin(out["cv_rms_profiled"].values))
+        out.attrs.update(
+            profiled_smoothing=float(weights[prof]),
+            profiled_cv_rms=float(out["cv_rms_profiled"].values[prof]),
+            profiled_interior=bool(0 < prof < len(weights) - 1),
+        )
+        if rank:
+            out.attrs["profiled_rank"] = float(
+                out["effective_rank"].values[prof])
+
+    best = int(np.argmin(out["cv_rms"].values))
+    out.attrs.update(
+        best_smoothing=float(weights[best]),
+        best_cv_rms=float(out["cv_rms"].values[best]),
+        interior=bool(0 < best < len(weights) - 1),
+        all_converged=bool(np.all(fields["converged"][1])),
+    )
+    if rank:
+        out.attrs["best_rank"] = float(out["effective_rank"].values[best])
+    return out
+
+
+def condition_number(inversion, smoothing=None, ss_ratio=1.0, ds_ratio=3.0,
+                     boundary_ratio=1.0, sides=("bottom", "left", "right"),
+                     smooth_weighting="uniform"):
+    """``sigma_1 / sigma_n`` of the design -- Magen et al.\ (2021)'s criterion.
+
+    They discretise by minimising the condition number rather than by reading
+    resolution, alternating a model-space refinement against a data-space one,
+    and argue the point directly: an inverse problem can have a resolution matrix
+    close to unity and still map small data errors into large model errors, since
+    ``m_err = A^-g d_err = V S^-1 U' d_err`` is governed by the *smallest*
+    singular value. It is a **stability** criterion, not a resolution one, and
+    they say so.
+
+    ``smoothing=None`` scores the whitened design ``Cd^-1/2 [G | ramp]`` alone,
+    which is what their discretisation algorithm operates on. Passing a weight
+    scores the full stacked operator that :meth:`SlipInversion.solve` builds,
+    smoothing and boundary rows included.
+
+    ⚠️ **Only the first is a discretisation criterion.** Regularisation exists to
+    bound the smallest singular value, so the conditioning of the stacked operator
+    falls monotonically as the weight rises and has no interior minimum -- it
+    cannot choose a weight. Magen et al.\ vary the *discretisation* at fixed
+    regularisation, and that is the comparison this reproduces.
+    """
+    from .regularize import (laplace_beltrami, neighbor_smoothing,
+                             scale_smoothing)
+
+    design = weighted_design(inversion)
+    if smoothing is not None:
+        # The same blocks `_normal_equations` assembles, kept as rows rather
+        # than squared up, so the singular values are the operator's own.
+        if inversion.basis.name == "element":
+            smooth = neighbor_smoothing(inversion.mesh.neighbors, ss_ratio,
+                                        ds_ratio, weighting=smooth_weighting,
+                                        mesh=inversion.mesh)
+        else:
+            smooth = laplace_beltrami(inversion.mesh, ss_ratio, ds_ratio)
+        boundary = _boundary_rows(inversion.basis, sides, boundary_ratio)
+        if inversion.n_ramp:
+            pad = sp.csr_matrix((smooth.shape[0], inversion.n_ramp))
+            smooth = sp.hstack([smooth, pad], format="csr")
+            boundary = sp.hstack(
+                [boundary,
+                 sp.csr_matrix((boundary.shape[0], inversion.n_ramp))], format="csr")
+        smooth = scale_smoothing(smooth, smoothing)
+        design = np.vstack([design, smooth.toarray(), boundary.toarray()])
+    values = np.linalg.svd(design, compute_uv=False)
+    smallest = float(values[-1])
+    return {"condition_number": float(values[0] / max(smallest, 1e-300)),
+            "sigma_max": float(values[0]), "sigma_min": smallest,
+            "n_rows": int(design.shape[0]), "n_columns": int(design.shape[1]),
+            "regularized": smoothing is not None}
 
 def resolution_report(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
                       boundary_ratio=1.0, sides=("bottom", "left", "right"),
@@ -1388,19 +1949,23 @@ def size_field(mesh, size):
     return at
 
 
-#: How element size is read off an anisotropic averaging kernel. The kernels here
-#: are far wider along strike than down dip (26-41 km against 10-16 km on the
-#: Venezuela data), and an element carries **one** size, so the two directions
-#: have to be reconciled. ``"min"`` keeps the better-resolved direction, which
-#: costs redundancy along strike but never discards structure the data can see;
-#: ``"max"`` does the opposite and is the one that loses information.
-#: How :func:`kernel_element_size` turns an anisotropic kernel into one number.
-#: ``"gaussian"`` is the odd one out and the only one that is Barnhart & Lohman's
-#: own metric: it is already a single isotropic width, so nothing is reduced.
-KERNEL_REDUCTIONS = ("min", "geometric", "max", "gaussian")
+#: How :func:`kernel_element_size` reads one element size off an anisotropic
+#: averaging kernel. The kernels here are far wider along strike than down dip
+#: (26-41 km against 10-16 km on the Venezuela data) and an element carries
+#: **one** size, so the two directions have to be reconciled.
+#:
+#: ``"gaussian"`` is the odd one out and the default: it is Barnhart & Lohman's
+#: own metric, already a single isotropic width, so nothing is reduced and it is
+#: the only option that does not lean on an axis. The moment reductions all do:
+#: ``"min"`` keeps the better-resolved direction, which costs redundancy along
+#: strike but never discards structure the data can see -- measured, that means
+#: it selects down-dip on **100%** of parameters; ``"max"`` does the opposite and
+#: is the one that loses information. See :func:`kernel_element_size` for the
+#: anisotropy measurement behind the default.
+KERNEL_REDUCTIONS = ("gaussian", "min", "geometric", "max")
 
 
-def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="min",
+def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="gaussian",
                         size_min=None, size_max=None, rounds=3, report=None,
                         **kwargs):
     """Target element size from the averaging-kernel **width**, not the diagonal.
@@ -1451,10 +2016,58 @@ def kernel_element_size(inversion, smoothing, fraction=0.5, reduce="min",
     *fixed* mesh at low rank. That was evidence against **that estimator**, not
     against Barnhart & Lohman's method.
 
-    ``reduce="gaussian"`` is now their method --
-    :func:`gaussian_kernel_width`, fitted rather than linearised -- and it is the
-    arm that has not been run against the others on real data. It falls back to
-    ``"min"`` on any parameter whose row fits no width.
+    ``reduce="gaussian"`` is their method -- :func:`gaussian_kernel_width`, fitted
+    rather than linearised -- and it is **the default since 2026-09-10**. It falls
+    back to ``"min"`` on any parameter whose row fits no width.
+
+    Why it is the default, measured on the real seven-scene model (684 elements,
+    kernels 24.6 km along / 11.8 km down, anisotropy 2.23x): it is the **only**
+    reduction that reconciles the two directions rather than picking one. Scoring
+    each size field by its partial correlation against the along/down *ratio* with
+    the overall width level regressed out -- a field blind to direction scores 0,
+    and ``"max"``/``"min"`` bracket the scale at +-0.95 because each *is* one width
+    -- gives ``"min"`` **-0.952**, ``"gaussian"`` **-0.027**, ``"max"`` **+0.955**.
+    ⚠️ The separate along/down correlations do **not** show this: a single scalar
+    level co-varies with both, and on this mesh ``corr(log along, log down)`` is
+    only +0.582.
+
+    ⚠️ **This is not a claim that it recovers better.** Run as a four-arm loop
+    (`run_kernel_arms.py`, 3 seeds), ``"gaussian"`` beat ``"min"`` 17/18 and a
+    fixed mesh 18/18, but lost to sizing from the resolution diagonal by 0.9%
+    (15/18) -- inside that comparison's own mesh-dependent-probe caveat. The two
+    are a tie on recovery; this default is chosen on the anisotropy result.
+
+    ⚠️ **It is also the only reduction that cannot collapse a mesh** on this
+    problem: max element 8.75 km against the diagonal's 17.62 km. And it is **not**
+    the field to reach for if the goal is small elements where the data is dense --
+    the diagonal correlates 0.959 with proximity to the nearest observation against
+    this one's 0.864.
+
+    ⚠️ **Every ``size_from="kernel"`` result recorded before 2026-09-10 used
+    ``"min"``**, which is a different field -- once rescaled to a common median
+    only 22% of elements agree within 10%. Do not compare meshes across that line.
+
+    ⚠️⚠️ **``size_max`` behaves completely differently here than it does in
+    :func:`target_element_size`, and carrying a value across cost a run.** That
+    one is *relative* -- ``size = current * smooth(ratio)`` -- so its field sits
+    wherever the current mesh sits (median 4.7 km on the production problem,
+    near-independent of ``smoothing``) and a cap trims a real tail. This one is
+    *absolute*: ``size = fraction * width``, and kernel width scales with the
+    damping, so the whole field slides. Measured on one real mesh, the fitted
+    field's median goes **8.72 km at smoothing 100 to 3.97 km at smoothing 6**
+    while the diagonal's moves 4\%.
+
+    The failure that follows is silent. A cap below the field's own minimum makes
+    :func:`numpy.clip` return a **constant**, :func:`adapt_layout` then rescales a
+    constant to hit its budget, and the result is a perfectly uniform mesh from a
+    loop that reports healthy variance reduction. Observed: at smoothing 100 the
+    fitted field was 5.43--17.32 km, a 5 km cap clipped **100%** of it, and a
+    1320-element adaptive run returned 11 identical depth levels at 4.11 km
+    spacing top to bottom. Set ``size_max`` from the *field* -- 10 km clips 0% at
+    the operating damping on this problem, so the guard is inert until something
+    goes wrong -- never from the element budget. Note also that ``"gaussian"``
+    largely retires the risk the cap exists for: its field maxes at 8.75 km where
+    the diagonal's reaches 17.6 km.
     """
     if reduce not in KERNEL_REDUCTIONS:
         raise ValueError(
@@ -1743,11 +2356,27 @@ def resolution_gain(model, los_stack, resolution, frame=None, spacing=GAIN_SPACI
                     exponent=1.0):
     """Where another observation would most improve model resolution.
 
-    Lohman & Simons 2005's criterion, evaluated as a field rather than by
-    recursing on candidate cells: a sample at ``(x, y)`` helps in proportion to
-    how strongly it sees the parameters that are *currently unresolved*,
+    A sample at ``(x, y)`` helps in proportion to how strongly it sees the
+    parameters that are *currently unresolved*,
 
     ``w(x, y) = sum_k G(x, y; k)**2 * (1 - r_k)``.
+
+    ⚠️ **This is in the spirit of Lohman & Simons 2005 and is NOT their
+    criterion** -- an earlier docstring here said it was theirs "evaluated as a
+    field rather than by recursing", which overstates the relationship. Their
+    algorithm computes the **data** resolution matrix ``N = G G^-g`` and
+    subdivides any cell whose ``diag(N)`` exceeds a threshold, i.e. wherever a
+    datum is doing work no neighbour can do. What is computed here is a **model**
+    resolution gain projected through ``G**2``. The two are different quantities
+    that happen to want the same thing.
+
+    Their statistic is available and is one call away --
+    :func:`data_importance` returns ``diag(N)`` off the same factorization, and
+    ``trace(R) == trace(N)`` is asserted against it -- so using it instead is a
+    choice nobody has made rather than a capability that is missing. It has never
+    been run as an A/B arm. Given that the sampling field measures second-order
+    against the smoothing weight, that is a low-priority open item and not a
+    suspected error.
 
     Returns an ``(ny, nx)`` array on ``los_stack``'s own grid, normalised to unit
     standard deviation over its finite samples, ready to hand to

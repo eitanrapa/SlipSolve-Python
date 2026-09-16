@@ -880,3 +880,310 @@ def test_epic_weights_drop_straight_into_solve(epic_setup):
     assert model.x.shape == (2 * inversion.basis.n_basis + inversion.n_ramp,)
     assert np.isfinite(model.x).all()
     assert np.allclose(model.smoothing, weights)
+
+
+def test_jri_is_the_residual_plus_twice_the_data_resolution_trace(setup):
+    """Barnhart & Lohman's jRi, reduced.
+
+    Their Appendix A form is ``(1/k)||r||^2 - (1/k)tr(C2) + (1/k)tr(Cr)`` with
+    ``Cr = M diag(Cd, Cd) M'`` and ``C2 = M [[Cd, Cd], [Cd, Cd]] M'`` for
+    ``M = [I, -N]``. Whitened, ``Cd = I`` makes those ``I + N^2`` and
+    ``(I - N)^2``, the ``tr(N^2)`` cancels, and what is left is Mallows' Cp.
+    This pins the reduction against the pieces it is built from.
+    """
+    _, _, _, inversion = setup
+    score = R.generalized_cross_validation(inversion, 1.0)
+    expected = (score["rss"] + 2.0 * score["effective_parameters"]) / score["n_obs"]
+    assert score["jri"] == pytest.approx(expected, rel=1e-12)
+    # It charges for the ramp, as GCV's denominator does -- the perturbation
+    # term is a trace over every fitted parameter, not the slip-only rank.
+    assert score["effective_parameters"] >= score["effective_rank"]
+
+
+def test_the_gcv_curve_reports_jri_and_its_own_minimum(setup):
+    """jRi is a different criterion on the same sweep, so it gets its own argmin."""
+    _, _, _, inversion = setup
+    curve = R.gcv_curve(inversion, np.logspace(-2, 3, 12))
+    assert "jri" in curve
+    best = int(np.argmin(curve["jri"].values))
+    assert curve.attrs["jri_smoothing"] == pytest.approx(
+        float(curve["smoothing"].values[best]))
+    assert curve.attrs["jri_rank"] == pytest.approx(
+        float(curve["effective_rank"].values[best]))
+
+
+def test_condition_number_falls_when_the_problem_is_regularized(setup):
+    """Regularisation exists to bound the smallest singular value."""
+    _, _, _, inversion = setup
+    raw = R.condition_number(inversion)
+    damped = R.condition_number(inversion, 1.0)
+    assert raw["condition_number"] > damped["condition_number"]
+    assert raw["regularized"] is False and damped["regularized"] is True
+    # The stacked operator has the smoothing and boundary rows on top.
+    assert damped["n_rows"] > raw["n_rows"]
+    assert damped["n_columns"] == raw["n_columns"]
+
+
+def test_condition_number_matches_a_direct_svd(setup):
+    """No shortcut: it is sigma_1 / sigma_n of the design the solver sees."""
+    _, _, _, inversion = setup
+    got = R.condition_number(inversion)
+    values = np.linalg.svd(R.weighted_design(inversion), compute_uv=False)
+    assert got["sigma_max"] == pytest.approx(float(values[0]), rel=1e-12)
+    assert got["sigma_min"] == pytest.approx(float(values[-1]), rel=1e-12)
+    assert got["condition_number"] == pytest.approx(
+        float(values[0] / values[-1]), rel=1e-12)
+
+
+# -- blocked cross-validation ----------------------------------------------
+def test_blocked_folds_partition_the_data_into_equal_width_blocks(setup):
+    """Every observation in exactly one fold, and the cuts are equal *width*.
+
+    Equal width rather than equal count is the whole design: the validity
+    condition is that a block outruns the correlation length, which is a
+    distance, so the counts have to come out however the sampling density says.
+    """
+    _, _, _, inversion = setup
+    folds = R.blocked_folds(inversion.obs, n_folds=4)
+
+    assert folds.size == inversion.obs.n
+    assert sorted(np.unique(folds.values)) == [0, 1, 2, 3]
+    assert sum(folds.attrs["counts"]) == inversion.obs.n
+
+    axis = np.array(folds.attrs["direction"])
+    t = (inversion.obs.ds["x"].values * axis[0]
+         + inversion.obs.ds["y"].values * axis[1])
+    # Contiguous: every fold's projected extent is disjoint from the next one's.
+    spans = [(t[folds.values == k].min(), t[folds.values == k].max())
+             for k in range(4)]
+    for (_, hi), (lo, _) in zip(spans, spans[1:]):
+        assert hi <= lo + 1e-9, spans
+    width = folds.attrs["block_width"]
+    assert width == pytest.approx((t.max() - t.min()) / 4)
+
+
+def test_blocked_folds_pick_the_long_axis_of_the_sample_cloud(setup):
+    """``direction="auto"`` must find along-strike, not across.
+
+    An across-strike block holds out one side of the fault, which makes it a
+    coverage experiment rather than a noise one -- and on the real data, where
+    only ~19% of samples lie north of the trace, one with a foregone conclusion.
+    """
+    _, _, mesh, inversion = setup
+    folds = R.blocked_folds(inversion.obs, n_folds=4)
+    axis = np.array(folds.attrs["direction"])
+
+    points = mesh.nodes[:, :2] - mesh.nodes[:, :2].mean(axis=0)
+    strike = np.linalg.svd(points, full_matrices=False)[2][0]
+    assert abs(float(axis @ strike)) > 0.95, (axis, strike)
+
+
+def test_held_in_slices_the_ramp_columns_instead_of_rebuilding_them(setup):
+    """⚠️ The trap that would make the whole criterion meaningless.
+
+    ``ramp_columns`` builds monomials in *centred, span-scaled* coordinates, so
+    rebuilding it on a training subset recentres against that subset's extent --
+    giving the fit a different set of nuisance columns from the ones the held-out
+    rows are predicted with. The column space has to be identical on both sides.
+    """
+    from slipsolve.regularize import ramp_columns
+    from slipsolve.sampling import Observations
+
+    _, _, _, inversion = setup
+    linear = inversion.with_ramp("linear")          # gradients, so centring bites
+    keep = np.flatnonzero(np.arange(linear.obs.n) % 4 != 0)
+    held = R._held_in(linear, keep)
+
+    assert np.array_equal(held.ramp, linear.ramp[keep])
+    rebuilt, _ = ramp_columns(Observations(linear.obs.ds.isel(obs=keep)), "linear")
+    # Real difference, so the assertion above is a real check and not a tautology.
+    assert not np.allclose(held.ramp, rebuilt)
+
+
+def test_held_in_refactorises_the_covariance_rather_than_slicing_it(setup):
+    """``chol(Cd)[keep, keep]`` is not ``chol(Cd[keep, keep])``.
+
+    The parent's Cholesky factors cannot be sliced -- a triangular factor of a
+    submatrix is not the submatrix of the factor -- so the training problem has
+    to refactorise on the rows it kept, or it is whitened by the wrong matrix.
+    """
+    from slipsolve.covariance import CovarianceModel
+
+    _, _, _, inversion = setup
+    model = CovarianceModel(sill=4e-4, range_m=22e3, nugget=1e-6)
+    obs = inversion.obs.ds.copy()
+    obs.attrs["normalize"] = "none"
+    whitened = SlipInversion(inversion.mesh, Observations(obs), ramp="offset",
+                             covariance=model)
+
+    keep = np.flatnonzero(np.arange(whitened.obs.n) % 4 != 0)
+    held = R._held_in(whitened, keep)
+    name = whitened.obs.tracks[0]
+    parent_rows = whitened._track_rows[name]
+    sliced = whitened._chol[name][np.ix_(
+        np.isin(parent_rows, keep), np.isin(parent_rows, keep))]
+
+    assert held._chol[name].shape == sliced.shape
+    assert not np.allclose(held._chol[name], sliced)
+    # And it is a genuine factor of the retained block.
+    from slipsolve.covariance import observation_covariance
+    sub = observation_covariance(held.obs, model, track=name)
+    got = held._chol[name] @ held._chol[name].T
+    assert np.allclose(got, sub, rtol=1e-6, atol=1e-9)
+
+
+def test_every_observation_is_predicted_by_a_model_that_never_saw_it(setup):
+    """The property the criterion rests on, asserted directly.
+
+    Each fold's training set is the complement of its test set, and the test
+    sets tile the data -- so the pooled residual is one out-of-sample prediction
+    per observation, never a fitted one.
+    """
+    _, _, _, inversion = setup
+    folds = R.blocked_folds(inversion.obs, n_folds=4)
+    problems = R._fold_problems(inversion, folds)
+
+    seen = np.zeros(inversion.obs.n, dtype=int)
+    for held_in, test in problems:
+        seen[test] += 1
+        assert held_in.obs.n == inversion.obs.n - test.size
+        # The training rows really are the complement, by value not just count.
+        assert np.allclose(np.sort(held_in.d), np.sort(np.delete(inversion.d, test)))
+    assert np.array_equal(seen, np.ones(inversion.obs.n, dtype=int))
+
+
+def test_prediction_error_exceeds_the_fitted_residual(setup):
+    """Out-of-sample must be worse than in-sample, or nothing was held out.
+
+    This is the one-line check that the folds are wired the right way round: a
+    score that matched ``rms_misfit`` would mean the model had seen its own test
+    data, which is precisely the leave-one-out failure being designed against.
+    """
+    _, _, _, inversion = setup
+    score = R.blocked_cross_validation(inversion, 1.0, n_folds=4)
+    fitted = inversion.solve(smoothing=1.0).rms_misfit
+
+    assert score["cv_rms"] > fitted
+    assert score["n_folds"] == 4 and score["n_obs"] == inversion.obs.n
+    assert score["cv_rms_worst"] >= score["cv_rms"] - 1e-12
+
+
+def test_the_curve_turns_up_at_both_ends(setup):
+    """A criterion that only falls has not chosen anything.
+
+    Under-smoothing fits the noise in the training block and predicts the
+    held-out one badly; over-smoothing cannot predict either. The minimum
+    between them is the choice, and ``interior`` is what says it exists.
+    """
+    _, _, _, inversion = setup
+    curve = R.blocked_cv_curve(inversion, np.logspace(-2, 3, 6), n_folds=4)
+
+    assert curve.attrs["interior"], curve["cv_rms"].values
+    best = curve.attrs["best_smoothing"]
+    assert curve["cv_rms"].sel(smoothing=best) < curve["cv_rms"].values[0]
+    assert curve["cv_rms"].sel(smoothing=best) < curve["cv_rms"].values[-1]
+    # Rank is the unit every other criterion here is quoted in.
+    assert 0 < curve.attrs["best_rank"] < 2 * inversion.basis.n_basis
+
+
+def test_a_fold_that_starves_a_tracks_ramp_is_refused(setup):
+    """⚠️ Unconstrained nuisance columns make a held-out block unpredictable.
+
+    Hold out a whole track and its own ramp columns have nothing to fit against,
+    so the training solve puts an arbitrary constant there and the score is
+    noise. That is the reason the blocks are cut along strike and not by track.
+    """
+    _, _, _, inversion = setup
+    track = np.asarray(inversion.obs.ds["track"].values, dtype=object)
+    by_track = (track == inversion.obs.tracks[0]).astype(int)
+
+    with pytest.raises(ValueError, match="unconstrained"):
+        R._fold_problems(inversion, by_track)
+
+
+def test_narrow_blocks_warn_against_the_fitted_range(setup):
+    """The block width IS the validity condition, so it is checked."""
+    from slipsolve.covariance import CovarianceModel
+    from slipsolve.sampling import Observations
+
+    _, _, _, inversion = setup
+    obs = inversion.obs.ds.copy()
+    obs.attrs["normalize"] = "none"
+    wide = CovarianceModel(sill=4e-4, range_m=400e3, nugget=1e-6)
+    whitened = SlipInversion(inversion.mesh, Observations(obs), ramp="offset",
+                             covariance=wide)
+
+    folds = R.blocked_folds(whitened.obs, n_folds=4)
+    assert folds.attrs["block_width"] < wide.range_m
+    with pytest.warns(RuntimeWarning, match="below the longest fitted"):
+        R._warn_narrow_blocks(whitened, folds)
+
+
+def test_blocked_folds_refuse_a_cut_they_cannot_make(setup):
+    _, _, _, inversion = setup
+    with pytest.raises(ValueError, match="at least two folds"):
+        R.blocked_folds(inversion.obs, n_folds=1)
+    with pytest.raises(ValueError, match="non-zero"):
+        R.blocked_folds(inversion.obs, n_folds=4, direction=(0.0, 0.0))
+    with pytest.raises(ValueError, match="at least two weights"):
+        R.blocked_cv_curve(inversion, [1.0])
+
+
+def test_profiled_score_is_the_projection_onto_the_ramps_complement(setup):
+    """⚠️ The identity that makes ``cv_rms_profiled`` a criterion and not a fudge.
+
+    Re-fitting the held-out block's ramp columns by least squares and keeping the
+    residual IS the projection onto the orthogonal complement of the ramp
+    subspace. Because that projector does not depend on ``smoothing``, it biases
+    every rung of a sweep identically and leaves the ranking intact.
+    """
+    _, _, _, inversion = setup
+    assert inversion.n_ramp > 0
+    folds = R.blocked_folds(inversion.obs, n_folds=4)
+    problems = R._fold_problems(inversion, folds)
+    score = R._score_folds(inversion, problems, 1.0)
+
+    # Rebuild it as an explicit orthogonal projection, from a QR of each block's
+    # ramp columns -- a different route to the same number.
+    total = 0.0
+    for held_in, test in problems:
+        model = held_in.solve(smoothing=1.0)
+        fault = inversion.g[test] @ model.x[:inversion.n_slip]
+        r = inversion.d[test] - fault
+        q, _ = np.linalg.qr(inversion.ramp[test])
+        total += float(np.sum((r - q @ (q.T @ r)) ** 2))
+    assert score["cv_rms_profiled"] == pytest.approx(
+        np.sqrt(total / inversion.obs.n), rel=1e-8)
+
+
+def test_profiled_score_is_below_the_raw_one_and_absent_without_a_ramp(setup):
+    """It removes a subspace, so it can only shrink the residual -- and it is
+    meaningless when there is no ramp to remove, so it is not reported."""
+    _, _, _, inversion = setup
+    folds = R.blocked_folds(inversion.obs, n_folds=4)
+
+    with_ramp = R._score_folds(inversion, R._fold_problems(inversion, folds), 1.0)
+    assert with_ramp["cv_rms_profiled"] < with_ramp["cv_rms"]
+
+    bare = inversion.with_ramp("none")
+    assert bare.n_ramp == 0
+    plain = R._score_folds(bare, R._fold_problems(bare, folds), 1.0)
+    assert "cv_rms_profiled" not in plain
+
+
+def test_the_curve_scores_the_profiled_minimum_separately(setup):
+    """⚠️ A different criterion on the same sweep gets its own minimum.
+
+    The two disagreed on the real data -- rank 49.8 against 26-37 -- so reading
+    the profiled score off ``best_smoothing`` would quote the wrong weight.
+    """
+    _, _, _, inversion = setup
+    curve = R.blocked_cv_curve(inversion, np.logspace(-1, 2, 5), n_folds=4)
+
+    assert "cv_rms_profiled" in curve
+    assert "profiled_smoothing" in curve.attrs
+    assert "profiled_rank" in curve.attrs
+    best = float(curve["cv_rms_profiled"].sel(
+        smoothing=curve.attrs["profiled_smoothing"]))
+    assert best == pytest.approx(curve.attrs["profiled_cv_rms"])
+    assert best == curve["cv_rms_profiled"].values.min()
