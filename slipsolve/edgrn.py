@@ -107,6 +107,16 @@ class VelocityModel:
         return cls(*table.T, name=path.stem)
 
     @property
+    def interfaces(self):
+        """Depths where a property steps, in metres: two rows at one depth that differ.
+
+        A gradient -- two rows at different depths with different values -- is
+        continuous and is not an interface. These are the depths across which
+        :meth:`EdgrnTables.interpolate` must not interpolate.
+        """
+        return _step_depths(self.depth, self.vp, self.vs, self.rho)
+
+    @property
     def mu(self):
         """Shear modulus per row, ``rho * vs**2``, in pascals."""
         return self.rho * self.vs ** 2
@@ -159,9 +169,18 @@ class EdgrnTables:
     unit source area times slip, with the azimuthal factor removed. ``cl``'s
     ``ut`` is identically zero: an axisymmetric source drives no transverse
     motion.
+
+    ``interfaces`` are the depths where the crust's properties step (read from the
+    input file's layer block by :meth:`from_input_file`). Per unit area times slip a
+    table value **jumps** there by about the rigidity ratio, because the moment is
+    ``mu`` times the potency and ``mu`` is the source layer's -- measured on the
+    Venezuela crust, strike-slip values just below / above 2 km differ by 3.6-3.8x
+    against ``mu`` 33.7 / 9.0 GPa = 3.74. :meth:`interpolate` therefore never
+    interpolates across one; see there.
     """
 
-    def __init__(self, r, z, tables, zrec=0.0, lam=None, mu=None, attrs=None):
+    def __init__(self, r, z, tables, zrec=0.0, lam=None, mu=None, attrs=None,
+                 interfaces=None):
         self.r = np.asarray(r, dtype=float).ravel()
         self.z = np.asarray(z, dtype=float).ravel()
         self.tables = {k: {c: np.asarray(v[c], dtype=float) for c in _DISPLACEMENT_COLUMNS}
@@ -181,6 +200,33 @@ class EdgrnTables:
         self.lam = lam
         self.mu = mu
         self.attrs = dict(attrs or {})
+        self.interfaces = np.unique(np.asarray(
+            [] if interfaces is None else interfaces, dtype=float).ravel())
+        if self.interfaces.size:
+            self.attrs.setdefault("interfaces", self.interfaces.tolist())
+        self._layers = self._layer_stencils()
+
+    def _layer_stencils(self):
+        """The depth intervals that straddle an interface, and each layer's nodes.
+
+        ``None`` when no interface falls strictly inside the depth grid, which keeps
+        :meth:`interpolate` on its plain path. A node lying ON an interface is
+        usable by neither layer: EDGRN assigns it to one side (the stiff one, on the
+        production Venezuela grid's node at exactly 2 km), and which side is not
+        something to rely on.
+        """
+        z = self.z
+        if z.size < 2:
+            return None
+        cuts = self.interfaces[(self.interfaces > z[0]) & (self.interfaces < z[-1])]
+        if cuts.size == 0:
+            return None
+        dz = (z[-1] - z[0]) / (z.size - 1)
+        on = (np.abs(z[:, None] - cuts[None, :]) <= 1e-6 * dz).any(axis=1)
+        layer = np.searchsorted(cuts, z, side="right")
+        straddles = on[:-1] | on[1:] | (layer[:-1] != layer[1:])
+        nodes = [np.nonzero((layer == k) & ~on)[0] for k in range(cuts.size + 1)]
+        return cuts, straddles, nodes
 
     # -- reading -----------------------------------------------------------
     @classmethod
@@ -208,11 +254,17 @@ class EdgrnTables:
             )
         directory = (path.parent / quoted[0]).resolve()
         return cls.from_files({k: directory / name
-                               for k, name in zip(SOURCE_TYPES, quoted[1:4])})
+                               for k, name in zip(SOURCE_TYPES, quoted[1:4])},
+                              interfaces=_input_file_interfaces(lines))
 
     @classmethod
-    def from_files(cls, paths):
-        """Read three already-located database files, keyed ``ss``/``ds``/``cl``."""
+    def from_files(cls, paths, interfaces=None):
+        """Read three already-located database files, keyed ``ss``/``ds``/``cl``.
+
+        The database files do not carry the layer model, so ``interfaces`` has to be
+        given here to keep :meth:`interpolate` inside layers; :meth:`from_input_file`
+        reads them from the input file's layer block.
+        """
         header, tables = None, {}
         for kind in SOURCE_TYPES:
             head, columns = _read_table(Path(paths[kind]).expanduser(), kind)
@@ -228,7 +280,7 @@ class EdgrnTables:
         nr, r1, r2, nz, z1, z2, zrec, lam, mu = header
         return cls(np.linspace(r1, r2, int(nr)), np.linspace(z1, z2, int(nz)),
                    tables, zrec=zrec, lam=lam, mu=mu,
-                   attrs={"source": "edgrn"})
+                   attrs={"source": "edgrn"}, interfaces=interfaces)
 
     # -- synthesis ---------------------------------------------------------
     @classmethod
@@ -307,12 +359,27 @@ class EdgrnTables:
 
     # -- use ---------------------------------------------------------------
     def interpolate(self, kind, component, distance, depth):
-        """Bilinear lookup in ``(r, z_source)``, EDCMP's own stencil.
+        """Bilinear lookup in ``(r, z_source)``, EDCMP's own stencil, within layers.
 
         Outside the tabulated range the value is taken from the edge cell rather
         than extrapolated -- EDCMP clamps the distance index below ``r1`` and the
         table is padded with zeros beyond ``r2``, so a source outside the table
         contributes nothing rather than something arbitrary.
+
+        ⚠️ **Never across an interface.** A table value steps by about the rigidity
+        ratio where the source crosses one (see the class docstring), so the plain
+        stencil hands every source within one depth spacing of an interface a blend
+        of both layers. On the production Venezuela grid (500 m depth spacing, a
+        node exactly at the 2 km interface that EDGRN puts on the stiff side) the
+        whole 1.5-2 km band of the 9 GPa layer interpolated toward 33.7 GPa values;
+        re-solving the real problem with and without that blend moved the slip by up
+        to **4.1% of peak** (0.41% on a 100 m depth grid).
+        So a query whose depth interval straddles an interface -- or ends on one --
+        takes its two depth nodes from its own layer instead, extrapolating linearly
+        from the nearest two when it sits between the last node and the interface;
+        a query exactly at an interface depth belongs to the layer below it. Every
+        other query is untouched, bit for bit, and a table with no interfaces takes
+        the plain path.
         """
         table = self.tables[kind][component]
         nr, nz = table.shape
@@ -339,17 +406,82 @@ class EdgrnTables:
         tj = fj - j0
         i1 = np.minimum(i0 + 1, nr - 1)
         j1 = np.minimum(j0 + 1, nz - 1)
+        if self._layers is not None:
+            j0, j1, tj = self._within_layers(fj, dz, j0, j1, tj)
 
         return ((1 - ti) * (1 - tj) * table[i0, j0]
                 + ti * (1 - tj) * table[i1, j0]
                 + (1 - ti) * tj * table[i0, j1]
                 + ti * tj * table[i1, j1])
 
+    def _within_layers(self, fj, dz, j0, j1, tj):
+        """Replace the depth stencil of the queries that straddle an interface.
+
+        Works on the few such queries only: one gather over ``j0`` finds them, and
+        the rest of the arrays are returned as they came.
+        """
+        cuts, straddles, nodes = self._layers
+        k = np.flatnonzero(straddles[j0])
+        if k.size == 0:
+            return j0, j1, tj
+        shape = np.shape(tj)
+        j0, j1, tj = (np.array(a, ndmin=1).reshape(-1) for a in (j0, j1, tj))
+        z = self.z
+        d = z[0] + np.ravel(fj)[k] * dz                  # the clamped query depth
+        layer = np.searchsorted(cuts, d, side="right")
+        for which in np.unique(layer):
+            usable = nodes[which]
+            if usable.size == 0:
+                continue
+            m = layer == which
+            if usable.size == 1:
+                j0[k[m]] = j1[k[m]] = usable[0]
+                tj[k[m]] = 0.0
+                continue
+            pos = np.clip(np.searchsorted(z[usable], d[m]), 1, usable.size - 1)
+            lo, hi = usable[pos - 1], usable[pos]
+            j0[k[m]], j1[k[m]] = lo, hi
+            tj[k[m]] = (d[m] - z[lo]) / (z[hi] - z[lo])
+        return j0.reshape(shape), j1.reshape(shape), tj.reshape(shape)
+
     def __repr__(self):
+        layers = f" interfaces={self.interfaces.size}" if self.interfaces.size else ""
         return (f"<EdgrnTables nr={self.r.size} r={self.r[0] / 1e3:.0f}-"
                 f"{self.r[-1] / 1e3:.0f}km nz={self.z.size} "
-                f"z={self.z[0] / 1e3:.1f}-{self.z[-1] / 1e3:.0f}km "
+                f"z={self.z[0] / 1e3:.1f}-{self.z[-1] / 1e3:.0f}km{layers} "
                 f"{self.attrs.get('source', '?')}>")
+
+
+def _step_depths(depth, vp, vs, rho):
+    """Depths of the steps in a layer block: consecutive rows at one depth that differ."""
+    depth = np.asarray(depth, dtype=float).ravel()
+    if depth.size < 2:
+        return []
+    props = np.column_stack([np.ravel(vp), np.ravel(vs), np.ravel(rho)]).astype(float)
+    same_depth = np.isclose(depth[1:], depth[:-1], rtol=0.0, atol=1e-6)
+    differ = ~np.all(np.isclose(props[1:], props[:-1], rtol=1e-9, atol=0.0), axis=1)
+    return [float(d) for d in depth[1:][same_depth & differ & (depth[1:] > 0)]]
+
+
+def _input_file_interfaces(lines):
+    """The interfaces of an ``edgrn.inp``'s layer block; ``[]`` if it has none.
+
+    ``lines`` are the input's comment-free lines: the sixth holds the row count and
+    each row after it is ``index depth vp vs rho``.
+    """
+    def numbers(line):
+        return [float(v) for v in _fortran_floats(line).split()]
+
+    try:
+        n = int(numbers(lines[5])[0])
+        rows = [numbers(line) for line in lines[6:6 + n]]
+    except (IndexError, ValueError):
+        return []
+    rows = [row for row in rows if len(row) >= 5]
+    if len(rows) < 2:
+        return []
+    table = np.asarray(rows, dtype=float)[:, 1:5]
+    return _step_depths(*table.T)
 
 
 # Dislocation geometry for each canonical source, in ENU. `normal` is the fault

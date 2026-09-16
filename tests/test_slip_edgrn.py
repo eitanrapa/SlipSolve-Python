@@ -179,6 +179,93 @@ def test_bilinear_interpolation_is_exact_on_a_ramp():
     )
 
 
+def test_interfaces_come_from_the_layer_block(tmp_path):
+    """A step is two rows at one depth that differ; a gradient is not a step.
+
+    The database files carry no layer model, so the input file is the only place
+    `EdgrnTables` can learn where not to interpolate.
+    """
+    model = VelocityModel(depth=[0.0, 2e3, 2e3, 10e3, 15e3, 15e3],
+                          vp=[3750.0, 3750.0, 6000.0, 6500.0, 6500.0, 8000.0],
+                          vs=[1950.0, 1950.0, 3450.0, 3700.0, 3700.0, 4600.0],
+                          rho=[2370.0, 2370.0, 2700.0, 2800.0, 2800.0, 3300.0])
+    assert model.interfaces == [2e3, 15e3]
+
+    nr, nz = 4, 5
+    inp = write_edgrn_input(tmp_path / "edgrn.inp", model, nr=nr, r_max=30e3,
+                            nz=nz, z_min=1e3, z_max=20e3)
+    for kind in SOURCE_TYPES:
+        _write_table(tmp_path / "edgrnfcts" / f"edgrn.{kind}", nr, nz, (0.0, 30e3),
+                     (1e3, 20e3), _ramp(nr, nz), n_columns=7 if kind == "cl" else 10)
+    tables = EdgrnTables.from_input_file(inp)
+    np.testing.assert_allclose(tables.interfaces, [2e3, 15e3])
+    assert tables.attrs["interfaces"] == [2e3, 15e3]
+
+
+def test_interpolation_never_blends_layers():
+    """Per unit potency a table steps by the rigidity ratio at an interface.
+
+    On the Venezuela crust strike-slip values just below / above 2 km differ by
+    3.6-3.8x (mu 33.7 / 9.0 GPa = 3.74), and the plain stencil blended the two
+    layers for every source within a depth spacing of the step -- the whole 1.5-2 km
+    band on the production grid, whose node at exactly 2 km EDGRN puts on the stiff
+    side. Re-solving the real problem with and without the blend moved the slip by
+    up to 4.1% of peak.
+
+    A depth profile linear within each layer must come back exactly, both for an
+    interface between two nodes and for one lying on a node (which belongs to
+    neither layer's stencil; a query at an interface depth belongs to the layer
+    below). The plain stencil must not manage it, or this test tests nothing.
+    """
+    r = np.linspace(0.0, 10e3, 3)
+    z = np.linspace(500.0, 5000.0, 10)                  # nodes every 500 m
+    cuts = (2250.0, 3500.0)                             # between nodes; on a node
+
+    def exact(depth):
+        depth = np.asarray(depth, float)
+        return np.where(depth < cuts[0], 1.0 + 1e-4 * depth,
+                        np.where(depth < cuts[1], 5.0 + 2e-4 * depth, 20.0 - 1e-4 * depth))
+
+    values = np.broadcast_to(exact(z)[None, :], (r.size, z.size)).copy()
+    columns = {k: {c: values for c in ("uz", "ur", "ut")} for k in SOURCE_TYPES}
+    layered = EdgrnTables(r, z, columns, interfaces=cuts)
+    plain = EdgrnTables(r, z, columns)
+
+    depth = np.array([2100.0, 2240.0, 2250.0, 2400.0, 3400.0, 3499.0, 3500.0, 3700.0])
+    distance = np.full(depth.size, 5e3)
+    np.testing.assert_allclose(layered.interpolate("ds", "ut", distance, depth),
+                               exact(depth), rtol=1e-12)
+    blended = plain.interpolate("ds", "ut", distance, depth)
+    assert np.max(np.abs(blended - exact(depth)) / exact(depth)) > 0.1
+
+
+def test_interfaces_leave_every_other_query_bit_identical():
+    """Only a query whose depth interval straddles an interface is re-stencilled.
+
+    `interpolate` is the layered engine's hot path, so everything else must come
+    out bit for bit what the plain stencil gives -- and a table with no interfaces
+    inside its depth range, like the synthetic homogeneous one, takes the plain path.
+    """
+    r = np.linspace(0.0, 100e3, 21)
+    z = np.linspace(500.0, 20e3, 40)
+    source = EdgrnTables.homogeneous(nu=0.25, r=r, z=z, n_azimuth=8)
+    assert source.interfaces.size == 0 and source._layers is None
+
+    cuts = np.array([2000.0, 10580.0])
+    layered = EdgrnTables(r, z, source.tables, interfaces=cuts)
+    rng = np.random.default_rng(3)
+    distance = rng.uniform(-5e3, 120e3, 20000)
+    depth = rng.uniform(0.0, 25e3, 20000)
+    spacing = z[1] - z[0]
+    away = (np.abs(depth[:, None] - cuts[None, :]) > 1.01 * spacing).all(axis=1)
+    for kind in SOURCE_TYPES:
+        for component in ("uz", "ur", "ut"):
+            assert np.array_equal(
+                layered.interpolate(kind, component, distance[away], depth[away]),
+                source.interpolate(kind, component, distance[away], depth[away]))
+    assert np.ndim(layered.interpolate("ss", "uz", 5e3, 1990.0)) == 0
+
+
 def test_interpolation_clamps_outside_the_table():
     """Outside the grid EDCMP clamps rather than extrapolating."""
     r, z = np.linspace(0.0, 10e3, 3), np.linspace(1e3, 3e3, 3)
