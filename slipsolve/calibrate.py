@@ -487,17 +487,37 @@ def add_noise(scenes, covariances, seed=0):
     return out
 
 
-def truth_on_probe(mesh, target, probe):
+def truth_on_probe(mesh, target, probe, tent=False):
     """The planted field at the probe points, by the same rule the estimate uses.
 
     :func:`~slipsolve.predict._probe_slip` reads the recovered field by
     nearest node, so truth must be read the same way or the comparison charges
     the inversion for an interpolation difference.
+
+    ``tent=True`` reads it by linear interpolation on the mesh's own
+    triangulation instead -- the P1 basis itself -- which is what pairs with
+    :func:`~slipsolve.predict.sample_slip` on the estimate side. The pairing is
+    the point: mixing the two rules is not a stricter test, it is a different
+    and mesh-dependent one.
     """
     from scipy.spatial import cKDTree
 
     strike = target.strike if isinstance(target, CheckerboardTarget) else target
-    return np.asarray(strike, float)[cKDTree(mesh.params).query(probe)[1]]
+    strike = np.asarray(strike, float)
+    if not tent:
+        return strike[cKDTree(mesh.params).query(probe)[1]]
+
+    from matplotlib.tri import LinearTriInterpolator, Triangulation
+
+    tri = Triangulation(mesh.params[:, 0], mesh.params[:, 1],
+                        np.asarray(mesh.triangles, dtype=int))
+    got = np.ma.filled(
+        LinearTriInterpolator(tri, strike[:mesh.n_nodes])(probe[:, 0], probe[:, 1]),
+        np.nan)
+    outside = ~np.isfinite(got)
+    if outside.any():           # same fallback the estimate side uses
+        got = np.where(outside, strike[cKDTree(mesh.params).query(probe)[1]], got)
+    return got
 
 
 def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
@@ -534,6 +554,34 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
     from .inversion import SlipInversion
     from .predict import _probe_lattice, _probe_slip, iterate_sampling
     from . import resolution as R
+
+    def _tent_probe(mesh, solved, points):
+        """Slip magnitude at the probe points as the model's basis defines it.
+
+        Linear interpolation over the mesh's own triangulation in ``(s, z)`` IS
+        the P1 tent basis, so this is the field rather than an approximation of
+        it. Falls back to the centroid lookup for an element basis, where the
+        field really is piecewise constant and the two agree by construction.
+        """
+        from .predict import sample_slip
+
+        if getattr(getattr(solved, "basis", None), "name", None) != "node":
+            return _probe_slip(mesh, solved, points)[:, 0]
+        # ⚠️ `component="strike"`, to match `_probe_slip(...)[:, 0]` and the
+        # planted target, which is strike-slip. `sample_slip` defaults to
+        # MAGNITUDE, and on a right-lateral target (strike-slip negative under
+        # `polarity=(-1,0,0)`) that compares |slip| against a signed field and
+        # scores ~2.0 -- worse than returning the mean, from a model that is fine.
+        tent = sample_slip(solved, points[:, 0], points[:, 1], component="strike")
+        # ⚠️ The probe lattice comes from `mesh0`; an ADAPTED mesh need not cover
+        # it, and `sample_slip` returns NaN outside the hull. Falling back to the
+        # centroid lookup there keeps the two scores on the same points -- a NaN
+        # would otherwise poison `recovery_score` for the whole case, silently
+        # turning a comparison into nothing.
+        outside = ~np.isfinite(tent)
+        if outside.any():
+            tent = np.where(outside, _probe_slip(mesh, solved, points)[:, 0], tent)
+        return tent
 
     started = time.time()
     bounds = {k: v for k, v in solve_kwargs.items()
@@ -573,6 +621,7 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
     achieved = [R.resolution_diagonal(inversion, float(w)).attrs["effective_rank"]
                 for w in grid]
     want = truth_on_probe(mesh0, target, probe)
+    want_tent = truth_on_probe(mesh0, target, probe, tent=True)
 
     rows = []
     for rung in case.ranks:
@@ -587,6 +636,15 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
                                   900 if rung > 100 else 300)
         solved = inversion.solve(smoothing=lam, **options)
         got = _probe_slip(model.mesh, solved, probe)[:, 0]
+        # ⚠️ `_probe_slip` looks slip up by nearest element centroid. That is the
+        # field under `basis="element"` and NOT under `basis="node"`, where it
+        # returns a Voronoi mosaic of per-element means instead of the continuous
+        # tent. The error it makes is **mesh-dependent**, which matters exactly
+        # when two arms with different meshes are being compared and land close
+        # together. `sample_slip` interpolates on the mesh's own triangulation,
+        # which IS the P1 basis, so it recovers the field rather than
+        # approximating it. Both are reported: `rel_error` stays comparable with
+        # every calibration already on record, `rel_error_tent` is the correct one.
         row = dict(stage=case.stage, cell=case.cell, budget=int(case.budget),
                    layout=case.layout, seed=case.seed, rank=float(
                        R.resolution_diagonal(inversion, lam).attrs["effective_rank"]),
@@ -599,6 +657,15 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
                    if solved.ramp.size else 0.0,
                    seconds=round(time.time() - started, 1),
                    **recovery_score(got, want))
+        # ⚠️ BOTH sides tent-interpolated, or neither. Scoring a tent-sampled
+        # estimate against the nearest-node truth charges the inversion for an
+        # interpolation difference -- see `truth_on_probe` -- and because that
+        # difference is mesh-dependent it does not cancel between arms. Done
+        # wrong on 2026-09-07 it appeared to REORDER the arms, which was the
+        # artefact and not a result.
+        row.update({"%s_tent" % k: v for k, v in
+                    recovery_score(_tent_probe(model.mesh, solved, probe),
+                                   want_tent).items()})
         rows.append(row)
         if verbose:
             print("  %-28s rank %6.1f  corr %.4f  rel err %.4f%s"

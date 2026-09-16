@@ -62,6 +62,29 @@ from slip_config import (
 TABLE = OUT_DIR / "calibration.csv"
 
 
+def _append_csv(frame, path):
+    """Append rows to ``path``, reconciling the header if the schema has moved.
+
+    ⚠️ ``to_csv(path, mode="a", header=not path.exists())`` writes a header only
+    for a new file, so a run whose columns have CHANGED appends wide rows under a
+    narrow header and the file stops parsing --- ``Expected 21 fields, saw 27``.
+    That happened on 2026-09-08 when ``run_case`` gained six ``*_tent`` scoring
+    columns and this driver appended to a table written in September. The rows
+    were fine; only the header was wrong, and the failure surfaced an hour later
+    in ``report()`` rather than at the append.
+
+    Reconciling costs one read of a file that is a few tens of kB.
+    """
+    import pandas as pd
+
+    if path.exists():
+        old = pd.read_csv(path)
+        if list(old.columns) != list(frame.columns):
+            pd.concat([old, frame], ignore_index=True).to_csv(path, index=False)
+            return
+    frame.to_csv(path, mode="a", header=not path.exists(), index=False)
+
+
 def main():
     only = int(sys.argv[1]) if len(sys.argv) > 1 else None
     started = time.time()
@@ -156,7 +179,7 @@ def _done():
 
 def _append(rows):
     frame = pd.DataFrame(rows)
-    frame.to_csv(TABLE, mode="a", header=not TABLE.exists(), index=False)
+    _append_csv(frame, TABLE)
 
 
 def best_cell():
