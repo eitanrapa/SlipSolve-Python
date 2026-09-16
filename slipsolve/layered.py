@@ -57,6 +57,21 @@ Two departures from the reference, both deliberate:
   nodal basis (240 elements, 400 observations, 6.5 km elements), the default
   tolerance departs by **1.2e-5 relative**.
 
+  ⚠️ **The tolerance bounds the QUADRATURE, and with EDGRN tables that is not
+  what limits the assembly.** Two tolerances sample the tables at different
+  points -- 3.8 against 77 points per pair at 3e-3 against 1e-4 -- so each
+  averages the tables' own grid-scale interpolation error differently, and their
+  difference is dominated by that rather than by the rule. Measured on the real
+  problem (764 elements, 6393 observations, 1601 x 401 tables, 2026-09-16): the
+  two assemblies differ by **0.68%** through the tables and by **0.086%** with
+  the same mesh, receivers, rule and orders but the closed-form half-space point
+  source in their place -- a factor of 7.9, and the smaller figure is the
+  quadrature's own. Stripping the tables' layer interfaces changes it by 12%, so
+  the steps at interfaces are not the cause either. ⇒ Comparing two tolerances on
+  tables measures *sensitivity to how the tables are sampled*, which is an upper
+  bound on quadrature error; refining the order converges to the table's answer,
+  not to the true layered Green's function.
+
 The moment tensor of an element is built from the element's **own** orthonormal
 basis rather than from a strike/dip/rake triple. ``edcdisc.m`` goes through
 angles because its input is a rectangular patch described that way; ours is a
