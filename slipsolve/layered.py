@@ -385,6 +385,31 @@ class LayeredPointSource:
         produces -- measured at 1.2e-5 relative against the fixed rule -- but it
         was an extrapolation until that was checked, so re-measure before
         trusting it on a basis with a different variation across the triangle.
+
+        ⚠️ **AND THE TOLERANCE IS STRUCTURALLY BLIND TO ONE THING, WHICH IS
+        MEASURED AND TURNS OUT NOT TO MATTER.** At ``k = 1``
+        :func:`_triangle_quadrature` returns the parent centroid, where every
+        barycentric coordinate is exactly ``1/3`` -- so under a nodal basis the
+        tent weight is ``1/3`` for all three nodes and **the triangle's three
+        design columns come out identical** for that observation. Such a pair
+        carries the element's *mean* slip and nothing about the linear variation
+        across it, and ``k = 1`` is **56.7%** of real pairs.
+
+        The calibration cannot see this and neither can the row-sum check that
+        verified it: both use the response to *uniform* slip, where
+        ``sum_j phi_j == 1`` identically, the tents cancel, and the error is the
+        constant-slip one at every order. Measured directly on one element, the
+        three columns genuinely differ by 8-13% of that element's own
+        contribution at the distances where ``k = 1`` is chosen, and the
+        one-point rule reproduces **none** of it (spread 1e-15).
+
+        What it costs the answer, measured end to end on the real seven-scene
+        problem by flooring the order at 2 and re-solving: **dMw 0.0000, dpeak
+        0.0001 m, slip field different by 0.04% of peak at rank 40 and 0.21% at
+        rank 79**, variance reduction identical to three decimals. The floor costs
+        4.19 -> 5.89 points per pair. ⇒ **Not worth paying**, and the reason is
+        that ``k = 1`` is selected exactly where the element's contribution is
+        small. Recorded because nothing else bounds it, not because it is a bug.
         """
         if self.tolerance is None:
             return np.full(x.size, int(np.sqrt(self.max_points)))
