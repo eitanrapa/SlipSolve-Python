@@ -441,9 +441,10 @@ class EdgrnTables:
         """Bilinear lookup in ``(r, z_source)``, EDCMP's own stencil, within layers.
 
         Outside the tabulated range the value is taken from the edge cell rather
-        than extrapolated -- EDCMP clamps the distance index below ``r1`` and the
-        table is padded with zeros beyond ``r2``, so a source outside the table
-        contributes nothing rather than something arbitrary.
+        than extrapolated, at every edge: below ``r1`` (as EDCMP does), beyond
+        ``r2`` (where EDCMP pads with zeros instead) and above or below the
+        tabulated source depths. A source outside the table therefore takes the
+        edge row's value, not zero, so the table must cover the mesh.
 
         ⚠️ **Never across an interface.** A table value steps by about the rigidity
         ratio where the source crosses one (see the class docstring), so the plain
@@ -673,8 +674,8 @@ def _fortran_floats(line):
     return re.sub(r"([0-9])[dD]([+-]?[0-9])", r"\1e\2", line)
 
 
-def write_edgrn_input(path, model, obs_depth=0.0, nr=201, r_max=400e3,
-                      nz=100, z_min=500.0, z_max=50e3, srate=12.0,
+def write_edgrn_input(path, model, obs_depth=0.0, nr=1601, r_max=400e3,
+                      nz=401, z_min=50.0, z_max=50050.0, srate=12.0,
                       directory="edgrnfcts/", names=("edgrn.ss", "edgrn.ds", "edgrn.cl")):
     """Write an ``edgrn.inp`` for ``model`` on the given ``(r, z)`` grid.
 
@@ -682,6 +683,29 @@ def write_edgrn_input(path, model, obs_depth=0.0, nr=201, r_max=400e3,
     :meth:`EdgrnTables.interpolate` is bilinear, so it wants to be fine enough
     that the response is nearly linear across a cell near the fault. ``z_min``
     is not zero because a source exactly at the free surface radiates nothing.
+
+    ⚠️ **The grid sets EDGRN's own accuracy, not just the interpolation's.**
+    EDGRN resolves the field only down to its grid spacing, and its error follows
+    the *coarser* of the radial and depth spacings. Measured against the exact
+    point source on a homogeneous crust, worst over source types and components
+    for receivers 2-5 km out, at source depths 0.5 / 2 / 5 / 10 km:
+
+    ====================================  ===============================  ======
+    grid (``nr x nz``, spacing, depths)   node error                       EDGRN
+    ====================================  ===============================  ======
+    201 x 100, 2 km / 500 m, 0.5-50 km    61 / 78 / 44 / 16 %              4 s
+    1601 x 401, 250 m / 100 m, to 40 km   1.3 / 5.0 / 1.4 / 1.0 %          163 s
+    1601 x 401, 250 m / 125 m, to 50 km   1.8 / 4.9 / 1.4 / 1.0 %          146 s
+    ====================================  ===============================  ======
+
+    The first row was the default until 2026-10-08. On a real inversion it put
+    16.8% into ``G`` and moved the slip by up to 13.9% of peak, against 0.07% on
+    1601 x 401. The default is now the last row: the same accuracy as the
+    validated production grid, kept to 50 km depth so that sources between 40
+    and 50 km stay inside the table. :meth:`EdgrnTables.interpolate` clamps at
+    the table edge rather than failing, so make sure the table covers the mesh.
+    ``nz`` cannot exceed 401 (EDGRN's compiled ``nzsmax``), so a deeper table
+    means coarser depth spacing. Times are for an x86_64 Mac.
     """
     path = Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
