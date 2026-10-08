@@ -104,6 +104,25 @@ def test_quadrature_weights_and_centroid():
                                    (p1 + p2 + p3) / 3.0, atol=1e-12)
 
 
+def test_sub_triangles_are_the_quadrature_lattice():
+    """``_sub_triangles`` is ``_triangle_quadrature`` with the pieces' extents kept.
+
+    Same lattice, same order: its centroids ARE the quadrature points, and the
+    pieces tile the parent in equal areas.
+    """
+    from slipsolve.layered import _sub_triangles
+
+    for order in (1, 2, 5):
+        pieces = _sub_triangles(order)
+        points, _ = _triangle_quadrature(*np.eye(3), order)
+        assert pieces.shape == (order ** 2, 3, 3)
+        np.testing.assert_allclose(pieces.mean(axis=1), points, atol=1e-15)
+        np.testing.assert_allclose(pieces.sum(axis=2), 1.0, atol=1e-15)
+        edges = pieces[:, 1:, :2] - pieces[:, :1, :2]
+        area = 0.5 * np.abs(np.linalg.det(edges))
+        np.testing.assert_allclose(area, 0.5 / order ** 2, atol=1e-15)
+
+
 def test_quadrature_uses_both_sub_triangle_orientations():
     """Taking only the upright sub-triangles is a biased sample, not a rule.
 

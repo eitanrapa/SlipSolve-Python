@@ -610,3 +610,24 @@ def _triangle_quadrature(p1, p2, p3, order):
                                + (c - 1 / 3) * p3) / order)
     points = np.array(points)
     return points, np.full(points.shape[0], 1.0 / points.shape[0])
+
+
+def _sub_triangles(order):
+    """The ``order**2`` sub-triangles of :func:`_triangle_quadrature`, as vertices.
+
+    ``(order**2, 3, 3)`` barycentric coordinates: sub-triangle, its vertex, parent
+    vertex. Same lattice and same order as ``_triangle_quadrature``, whose points
+    are exactly these triangles' centroids -- so a caller that needs a piece's
+    extent as well as its centroid (``SlipModel.moment``, which averages the
+    rigidity over each piece's depth range) stays on the rule the rest of the
+    package uses.
+    """
+    order = max(1, int(order))
+    pieces = []
+    for a in range(order):
+        for b in range(order - a):
+            c = order - 1 - a - b
+            pieces.append([[a + 1, b, c], [a, b + 1, c], [a, b, c + 1]])
+            if c >= 1:
+                pieces.append([[a + 1, b + 1, c - 1], [a + 1, b, c], [a, b + 1, c]])
+    return np.array(pieces, dtype=float) / order

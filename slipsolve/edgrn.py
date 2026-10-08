@@ -52,6 +52,16 @@ SOURCE_TYPES = ("ss", "ds", "cl")
 #: Displacement columns of a table row, in file order.
 _DISPLACEMENT_COLUMNS = ("uz", "ur", "ut")
 
+#: Two vertex depths closer than this, in metres, take the divided difference's
+#: confluent limit in :meth:`VelocityModel.triangle_mean` -- a rows mesh has a
+#: horizontal edge on every element. The limit is off by ``p' (y - x)**2 / 24``.
+_CONFLUENT_DEPTH = 1e-3
+
+#: A triangle whose depths span less than this, in metres, is flat: its mean is the
+#: property at its mean depth. The second divided difference would otherwise divide
+#: a rounding-limited numerator by a vanishing span.
+_FLAT_DEPTH = 1.0
+
 
 class VelocityModel:
     """A layered elastic Earth: depth, P and S velocity, density.
@@ -141,6 +151,75 @@ class VelocityModel:
         depth = np.abs(np.asarray(depth, dtype=float))
         # np.interp already clamps outside the range at both ends.
         return np.interp(depth, self.depth, values)
+
+    def triangle_mean(self, depths, field="mu"):
+        """The exact mean of a property over planar triangles, from their vertex depths.
+
+        Depth is affine across a planar triangle and area is uniform in its
+        barycentric coordinates, so by the Hermite-Genocchi formula the mean of
+        ``p(z)`` over the triangle is ``2 P[z1, z2, z3]``: twice the second divided
+        difference of ``P``, the second antiderivative of ``p``. :meth:`at` is
+        piecewise linear in depth, with a step wherever two rows share a depth, so
+        ``P`` is piecewise cubic and the mean is exact -- a triangle cut by an
+        interface gets the area-weighted mean of the two layers.
+
+        Sampling :meth:`at` at points inside the triangle cannot do that: which side
+        of a step a point falls on decides its whole cell, so the error is first
+        order with an erratic constant. Measured on the Venezuela r84 moment,
+        sampling at ``13**2`` sub-triangle centroids per element was 2.6e-3 off and
+        ``8**2`` was 5.4e-4 off; this is exact.
+
+        ``depths`` is ``(..., 3)``, sign ignored like :meth:`at`; returns ``(...)``.
+        """
+        z = np.sort(np.abs(np.asarray(depths, dtype=float)), axis=-1)
+        if z.shape[-1] != 3:
+            raise ValueError(
+                f"depths must end in an axis of 3 vertex depths, got {z.shape}")
+        knots, values, slope, first, second = self._antiderivatives(field)
+
+        def integral(x, order):
+            k = np.clip(np.searchsorted(knots, x, side="right") - 1, 0, knots.size - 1)
+            h = x - knots[k]
+            if order == 1:
+                return first[k] + values[k] * h + 0.5 * slope[k] * h ** 2
+            return (second[k] + first[k] * h + 0.5 * values[k] * h ** 2
+                    + slope[k] * h ** 3 / 6.0)
+
+        def divided(x, y):
+            """``P[x, y]`` for ``x <= y``; the confluent limit ``P'`` where they meet."""
+            close = (y - x) <= _CONFLUENT_DEPTH
+            return np.where(close, integral(0.5 * (x + y), 1),
+                            (integral(y, 2) - integral(x, 2))
+                            / np.where(close, 1.0, y - x))
+
+        a, b, c = z[..., 0], z[..., 1], z[..., 2]
+        flat = (c - a) <= _FLAT_DEPTH
+        mean = 2.0 * (divided(b, c) - divided(a, b)) / np.where(flat, 1.0, c - a)
+        return np.where(flat, self.at((a + b + c) / 3.0, field), mean)
+
+    def _antiderivatives(self, field):
+        """Knots from depth 0, the property and its slope there, and ``P'`` and ``P``.
+
+        The knots are the rows at or below the surface -- duplicates kept, so a step
+        is a zero-width interval that adds nothing -- with depth 0 prepended at
+        :meth:`at`'s own value when no row sits there. ``slope[k]`` is the gradient
+        from knot ``k`` to the next, 0 past the last (the half-space).
+        """
+        values = np.asarray(getattr(self, field), dtype=float)
+        keep = self.depth >= 0.0
+        knots, values = self.depth[keep], values[keep]
+        if knots.size == 0 or knots[0] > 0.0:
+            knots = np.concatenate([[0.0], knots])
+            values = np.concatenate([[float(self.at(0.0, field))], values])
+        width = np.diff(knots)
+        gradient = np.divide(np.diff(values), width, out=np.zeros_like(width),
+                             where=width > 0)
+        first = np.concatenate([[0.0], np.cumsum(
+            values[:-1] * width + 0.5 * gradient * width ** 2)])
+        second = np.concatenate([[0.0], np.cumsum(
+            first[:-1] * width + 0.5 * values[:-1] * width ** 2
+            + gradient * width ** 3 / 6.0)])
+        return knots, values, np.append(gradient, 0.0), first, second
 
     def to_dict(self):
         """A JSON-serialisable form, so a model can carry its own rigidity."""

@@ -108,6 +108,23 @@ def _boundary_rows(basis, sides, ratio):
 #: Crustal shear modulus used for moment when no velocity model is supplied.
 DEFAULT_SHEAR_MODULUS = 30e9
 
+#: Sub-triangles per element edge in the integrated moment, ``order**2`` per element.
+#:
+#: The rigidity is averaged exactly over each piece; what the order resolves is the
+#: slip magnitude, and its covariance with the rigidity inside a piece that
+#: straddles a step. Measured against order 48-128, relative error in moment:
+#:
+#: * Venezuela r84 (2-4 km elements): 2.2e-3 at 1, 4.1e-4 at 2, 1.4e-4 at 4,
+#:   **9.7e-6 at 8** (Mw 3e-6), 3.0e-6 at 16.
+#: * the test fixture (6.7 km rows with the 2 km lid step inside the top one, dip
+#:   slip changing sign in 88 of 240 elements): 4.6e-2 at 1, 1.8e-3 at 4,
+#:   **6.3e-4 at 8** (Mw 2e-4), 8.2e-5 at 16, 2.8e-6 at 64.
+#:
+#: Sampling the rigidity at the centroids instead gave 5.4e-4 at 8 and 2.6e-3 at
+#: 13 on r84 -- first order and erratic, set by where the lattice falls against
+#: each interface.
+MOMENT_ORDER = 8
+
 #: Default cap on trust-region iterations.
 #:
 #: Generous on purpose. Iteration count tracks *conditioning*, not problem size,
@@ -631,42 +648,103 @@ class SlipModel:
     def max_slip(self):
         return float(self.slip_magnitude.max())
 
-    def moment(self, shear_modulus=None):
-        """Scalar seismic moment, ``sum(mu * area * slip)``, in newton-metres.
+    def moment(self, shear_modulus=None, rule="integrated", order=MOMENT_ORDER):
+        """Scalar seismic moment, ``integral(mu * |slip|) dA``, in newton-metres.
 
         ``shear_modulus`` may be a scalar, one value per parameter, or a
-        :class:`~slipsolve.edgrn.VelocityModel`, in which case the rigidity
-        is sampled at each parameter's own depth. That is the point of a layered
-        inversion reaching this far: a uniform 30 GPa overstates the rigidity of
-        the shallow crust, so it overstates the moment of shallow slip.
+        :class:`~slipsolve.edgrn.VelocityModel`; ``None`` takes the inversion's own
+        velocity model, else 30 GPa. That is the point of a layered inversion
+        reaching this far: a uniform 30 GPa overstates the rigidity of the shallow
+        crust, so it overstates the moment of shallow slip.
 
-        The area each parameter carries comes from the basis -- a triangle's own
-        area for element-constant slip, a third of the node's 1-ring for a tent --
-        so the moment means the same thing in either parameterization.
+        ``rule`` says how the integral is taken:
+
+        * ``"integrated"`` (default) -- over the slip field the model holds. A
+          velocity model's rigidity is averaged **exactly** over each piece
+          (:meth:`~slipsolve.edgrn.VelocityModel.triangle_mean`, steps included);
+          the slip magnitude, which a tent field makes nonlinear inside an element,
+          is taken at the centroids of ``order**2`` sub-triangles per element. For
+          element-constant slip that is exact and ``order`` is ignored. One value per
+          parameter is interpolated with the basis.
+        * ``"lumped"`` -- ``sum(mu_i * A_i * |s_i|)``, rigidity at each parameter's
+          own depth over its lumped area (a third of a node's 1-ring). What this
+          method returned before 2026-09-25, kept because the export node tables
+          partition it exactly (:meth:`to_vertex_text`).
+
+        ⚠️ **The lumped rule reads HIGH on a layered crust, by an amount that is not
+        a constant.** A node's third of its 1-ring reaches an element height above
+        and below it, all at the rigidity of the node's own depth -- across the
+        9 -> 34 GPa step at 2 km, for one. Measured on the Venezuela r84 model:
+        +1.9% in moment, Mw +0.0054; across rank-84 arms +0.0048...+0.0064, and
+        +0.0085 / +0.0111 at rank 240 / 340, where a rougher field makes the node
+        values less representative of the ground they stand for.
         """
-        areas = self.basis.lumped_areas()
-        if shear_modulus is None:
-            shear_modulus = self._default_shear_modulus()
-        elif hasattr(shear_modulus, "at"):
-            shear_modulus = shear_modulus.at(self._parameter_depths(), "mu")
-        mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float), areas.shape)
-        return float(np.sum(mu * areas * self.slip_magnitude))
+        if rule == "lumped":
+            areas = self.basis.lumped_areas()
+            if shear_modulus is None:
+                shear_modulus = self._default_shear_modulus()
+            elif hasattr(shear_modulus, "at"):
+                shear_modulus = shear_modulus.at(self._parameter_depths(), "mu")
+            mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float), areas.shape)
+            return float(np.sum(mu * areas * self.slip_magnitude))
+        if rule != "integrated":
+            raise ValueError(f"rule must be 'integrated' or 'lumped', got {rule!r}")
+
+        rigidity = self._rigidity() if shear_modulus is None else shear_modulus
+        layered = hasattr(rigidity, "triangle_mean")
+        mu = None if layered else np.asarray(rigidity, dtype=float)
+        if mu is not None and mu.ndim and mu.shape != (self.basis.n_basis,):
+            raise ValueError(f"shear_modulus has {mu.size} values for "
+                             f"{self.basis.n_basis} parameters")
+        triangles, areas = self.mesh.triangles, self.mesh.areas
+        corner_z = self.mesh.nodes[:, 2][triangles]
+
+        if self.basis.name == "element":
+            if layered:
+                mu = rigidity.triangle_mean(corner_z)
+            return float(np.sum(mu * areas * np.hypot(*self.element_slip.T)))
+
+        from .layered import _sub_triangles
+
+        pieces = _sub_triangles(order)
+        centroid = pieces.mean(axis=1)
+        magnitude = np.hypot(self.strike_slip[triangles] @ centroid.T,
+                             self.dip_slip[triangles] @ centroid.T)
+        if layered:
+            mu = rigidity.triangle_mean(np.einsum("ej,kvj->ekv", corner_z, pieces))
+        elif mu.ndim:
+            # Linear across each element, so a piece's mean is its centroid value.
+            mu = mu[triangles] @ centroid.T
+        return float(np.sum(mu * magnitude * (areas[:, None] / pieces.shape[0])))
+
+    def _rigidity(self):
+        """The inversion's own velocity model, else ``DEFAULT_SHEAR_MODULUS``."""
+        model = getattr(self._inversion, "velocity_model", None) or \
+            self.options.get("velocity_model")
+        if model is None:
+            return DEFAULT_SHEAR_MODULUS
+        if hasattr(model, "at"):
+            return model
+        from .edgrn import VelocityModel
+
+        return VelocityModel.from_dict(model)
 
     def _default_shear_modulus(self):
-        """The inversion's own velocity model if it had one, else 30 GPa."""
-        model = getattr(self._inversion, "velocity_model", None)
-        if model is None:
-            stored = self.options.get("velocity_model")
-            if stored is None:
-                return DEFAULT_SHEAR_MODULUS
-            from .edgrn import VelocityModel
-
-            model = VelocityModel.from_dict(stored)
-        return model.at(self._parameter_depths(), "mu")
+        """The rigidity at each parameter's own depth, or the flat default."""
+        rigidity = self._rigidity()
+        if hasattr(rigidity, "at"):
+            return rigidity.at(self._parameter_depths(), "mu")
+        return rigidity
 
     @property
     def shear_modulus(self):
-        """The rigidity this model's statistics actually use, per parameter."""
+        """The rigidity at each parameter's own depth.
+
+        What ``moment(rule="lumped")`` weights each parameter with, and what the
+        export tables print. The default integrated moment averages the rigidity
+        over each element's depth range instead, which differs wherever an element
+        straddles a layer interface.
+        """
         return np.broadcast_to(np.asarray(self._default_shear_modulus(), dtype=float),
                                self.basis.lumped_areas().shape)
 
@@ -986,9 +1064,11 @@ class SlipModel:
         ``simple_triangular_model.txt``, so downstream GMT scripts work unchanged.
 
         Column 10 is the rigidity the inversion's own velocity model gives at each
-        element's depth, or 30 GPa if it had none -- so the file records what the
-        moment in it was actually computed with rather than a constant that may not
-        be the one used.
+        element's centroid depth, or 30 GPa if it had none -- the rigidity actually
+        used rather than a constant that may not be. ⚠️ It is the value
+        ``moment(rule="lumped")`` weights an element with; the default integrated
+        :meth:`moment` averages the rigidity over the element's depth range, which
+        differs wherever an element straddles a layer interface.
         """
         self._refuse_if_unconverged()
         lon, lat = self._lonlat(self.mesh.centroids)
@@ -1031,7 +1111,9 @@ class SlipModel:
         ``area_m2`` is the node's **lumped** area -- a third of its 1-ring -- not an
         element area, so the rows are a partition of the fault and
         ``sum(shear_modulus * area * hypot(strike_slip, dip_slip))`` over this file
-        reproduces :meth:`moment` exactly for a nodal model. It does not agree with
+        reproduces ``moment(rule="lumped")`` exactly for a nodal model. ⚠️ Not the
+        default :meth:`moment`, which integrates over the tent field and reads
+        0.5-2% lower on a layered crust (see its docstring). Nor does it agree with
         the same sum over ``slip_model.txt`` to better than about a percent; see
         :meth:`nodal_slip` for why that is expected rather than an inconsistency.
 

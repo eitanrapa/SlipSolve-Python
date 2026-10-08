@@ -320,13 +320,14 @@ def test_to_text_records_the_rigidity_it_used(scene, tmp_path):
 
 
 def test_a_thin_shallow_layer_needs_thin_elements_to_be_seen(mesh):
-    """Rigidity is sampled at element centroids, so the mesh has to resolve the lid.
+    """Rigidity SAMPLED at element centroids needs the mesh to resolve the lid.
 
     The Venezuela profile's 9 GPa sedimentary layer is only 2 km thick. A mesh with
     6 km levels puts its shallowest centroid *below* it and never sees 9 GPa at all
-    -- the softest rigidity it samples is the 33.7 GPa upper crust. Grading the top
-    row down to ~1 km is what makes the layer enter the moment, which is a reason to
-    grade beyond resolving slip.
+    -- the softest rigidity it samples is the 33.7 GPa upper crust. That is what
+    ``to_text``'s rigidity column and ``moment(rule="lumped")`` see. ⚠️ Since
+    2026-09-25 the default moment averages the rigidity over each element exactly,
+    so the lid enters it on any mesh (next test); grading for it is no longer needed.
     """
     trace = FaultTrace(_LON, _LAT, name="test_fault")
     frame = trace.local_frame()
@@ -340,6 +341,93 @@ def test_a_thin_shallow_layer_needs_thin_elements_to_be_seen(mesh):
 
     assert coarse.min() > 30e9, "6 km levels straddle the 2 km lid entirely"
     assert fine.min() < 15e9, "a ~1 km top row samples it"
+
+
+def _uniform_slip(model, strike=-1.5, dip=0.5):
+    """The model with every parameter set to one slip vector: a constant field."""
+    model.strike_slip = np.full(model.basis.n_basis, strike)
+    model.dip_slip = np.full(model.basis.n_basis, dip)
+    return model, float(np.hypot(strike, dip))
+
+
+@pytest.mark.parametrize("basis", ["node", "element"])
+def test_integrated_moment_is_exact_for_uniform_slip(scene, basis):
+    """Constant slip leaves only the rigidity to integrate, which is done exactly.
+
+    So the answer is ``|s| * sum(area * element-mean rigidity)`` at ANY order, and
+    with a flat rigidity it is ``mu * |s| * total area`` -- which the lumped rule
+    gets right too, because there is nothing for the lumping to misplace.
+    """
+    mesh, _, obs = scene
+    crust = _crust()
+    model, s = _uniform_slip(SlipInversion(mesh, obs, basis=basis, velocity_model=crust)
+                             .solve(smoothing=0.3, polarity=(-1, 0, 0)))
+    exact = s * np.sum(mesh.areas * crust.triangle_mean(mesh.nodes[:, 2][mesh.triangles]))
+    for order in (1, 3, 8):
+        assert model.moment(order=order) == pytest.approx(exact, rel=1e-12)
+    assert model.moment(30e9) == pytest.approx(30e9 * s * mesh.areas.sum(), rel=1e-12)
+    assert model.moment(30e9, rule="lumped") == pytest.approx(model.moment(30e9), rel=1e-12)
+
+
+def test_integrated_moment_sees_a_lid_the_mesh_does_not_resolve(mesh, scene):
+    """The 2 km, 9 GPa lid enters the moment of a 6 km mesh, where sampling misses it.
+
+    The fixture's top row is ~6 km tall. Its lumped moment weights every top-row
+    node with the rigidity AT the node -- 9 GPa at the surface, applied to a third
+    of a 1-ring that is mostly 33.7 GPa crust -- while the integrated moment takes
+    the exact area share of each layer.
+    """
+    _, _, obs = scene
+    crust = _crust()
+    model, s = _uniform_slip(SlipInversion(mesh, obs, basis="node", velocity_model=crust)
+                             .solve(smoothing=0.3, polarity=(-1, 0, 0)))
+    corner = mesh.nodes[:, 2][mesh.triangles]
+    top = np.isclose(corner, 0.0).any(axis=1)
+    assert np.abs(mesh.nodes[:, 2][mesh.triangles[top]]).max() > 4e3, "fixture rows are thick"
+    in_lid = crust.triangle_mean(corner[top]) < crust.at(3e3, "mu")
+    assert in_lid.all(), "every top-row element must average some of the 9 GPa lid in"
+    lumped, integrated = model.moment(rule="lumped"), model.moment()
+    assert abs(lumped / integrated - 1.0) > 1e-3, "the two rules must disagree here"
+
+
+def test_integrated_moment_converges_and_matches_brute_force(scene):
+    """A real (non-uniform) tent field: the order resolves the slip magnitude.
+
+    This fixture is the hard case -- 6.7 km rows with the 2 km lid step inside the
+    top one, and dip slip changing sign in a third of the elements -- so the
+    default order is 6.3e-4 off here against ~1e-5 on production meshes
+    (``MOMENT_ORDER``). Brute force samples BOTH the slip and the rigidity at
+    200**2 centroids per element: first order in the rigidity steps, so it is the
+    loose, independent reference.
+    """
+    from slipsolve.layered import _triangle_quadrature
+
+    mesh, _, obs = scene
+    crust = _crust()
+    model = SlipInversion(mesh, obs, basis="node", velocity_model=crust).solve(
+        smoothing=0.3, polarity=(-1, 0, 0))
+    m64 = model.moment(order=64)
+    assert model.moment() == pytest.approx(m64, rel=1e-3)
+    assert model.moment(order=16) == pytest.approx(m64, rel=2e-4)
+
+    lattice, _ = _triangle_quadrature(*np.eye(3), 200)
+    tri = mesh.triangles
+    magnitude = np.hypot(model.strike_slip[tri] @ lattice.T, model.dip_slip[tri] @ lattice.T)
+    mu = crust.at(mesh.nodes[:, 2][tri] @ lattice.T, "mu")
+    brute = np.sum(mu * magnitude * (mesh.areas[:, None] / lattice.shape[0]))
+    assert m64 == pytest.approx(brute, rel=2e-3)
+
+
+def test_moment_takes_one_rigidity_per_parameter(scene):
+    """A per-node rigidity is interpolated with the basis; the wrong length is refused."""
+    mesh, _, obs = scene
+    model = SlipInversion(mesh, obs, basis="node").solve(smoothing=0.3, polarity=(-1, 0, 0))
+    flat = np.full(mesh.n_nodes, 30e9)
+    assert model.moment(flat) == pytest.approx(model.moment(30e9), rel=1e-12)
+    with pytest.raises(ValueError, match="parameters"):
+        model.moment(np.full(mesh.n_elements, 30e9))
+    with pytest.raises(ValueError, match="rule"):
+        model.moment(rule="centroid")
 
 
 def test_layered_engine_ignores_nu(scene):

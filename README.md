@@ -93,6 +93,13 @@ against synthetic targets with known truth:
   0.069, five seeds out of five). GLS is minimum-variance only among *unbiased*
   estimators, and this one is bound-constrained and ~97% regulariser. It is kept
   for honest error bars and a meaningful χ², not for the estimate.
+- **The moment integrates the rigidity exactly.** `SlipModel.moment()` averages a
+  layered crust's rigidity over each element (steps included) and samples only
+  the slip magnitude. The node-lumped rule it replaced on 2026-09-25, still
+  available as `moment(rule="lumped")`, read Mw **0.002–0.006 high** at
+  production smoothing on the Venezuela meshes and **0.011** at effective rank
+  340, by an amount that varies with the mesh and the slip — so Mw values
+  recorded before then are not corrected by a constant.
 
 The full write-up, with the mathematics, is in `docs/`.
 

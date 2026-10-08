@@ -454,6 +454,11 @@ def test_vertex_tables_rebuild_the_element_table(recovery, tmp_path):
     assert -180.0 < nodes[:, 1].min() and nodes[:, 1].max() < 180.0
     assert nodes[:, 3].max() == 0.0 and nodes[:, 3].min() < 0.0
 
+    # The rows partition the LUMPED moment exactly -- the rule the file's columns
+    # are. The default moment integrates over the tent field instead.
+    table_moment = np.sum(nodes[:, 8] * nodes[:, 7] * np.hypot(nodes[:, 5], nodes[:, 6]))
+    assert table_moment == pytest.approx(model.moment(rule="lumped"), rel=1e-9)
+
 
 def test_nodal_slip_conserves_the_slip_integral_componentwise(setup, recovery):
     """The element -> node scatter is area-weighted, so it conserves each component.
