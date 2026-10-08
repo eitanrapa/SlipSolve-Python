@@ -119,6 +119,52 @@ for row in discretisation_ceiling(mesh, cells=(20e3, 40e3, 60e3)):
 That tells you which wavelengths your mesh can carry *at all*, so you never
 mistake a parameterisation failure for a resolution limit.
 
+## Sweeping the dip, segment by segment
+
+`slipsolve.DipSweep` asks the data which dip each stretch of the fault wants. It
+cuts the trace into along-strike segments, gives each a planar dip from a grid,
+and scores every combination by its misfit. Every combination uses the same
+samples, the same regularisation and the same effective rank, so the geometry is
+the only thing that changes:
+
+```python
+sweep = DipSweep(trace, obs, segments=6, dips=range(60, 121, 10), engine=engine,
+                 ramp="cubic", polarity=(-1, 0, 0), max_depth=40e3, edge_length=8e3)
+result = sweep.run(rank=62)
+result.profiles()      # each segment's misfit against its dip, the others at the best
+```
+
+What to know before reading a result:
+
+- **It costs one Green's-function assembly per dip value**, not one per
+  combination. Every engine builds a node's column from the elements around it,
+  and a node column on each segment boundary keeps elements from straddling one,
+  so any combination's design matrix is a sum of per-segment blocks. Measured at
+  Venezuela scale (16,130 samples, 720 elements, layered tables), each assembly
+  took 2.5–3.6 min and each combination 3 s. Memory is about one design matrix
+  per dip.
+- **Dips follow `FaultMesh.curved(uniform_dip=)`**: below 90 the fault dips
+  toward the trace's left-hand side, above 90 toward its right. Check
+  `mesh.dip_direction` on your trace.
+- **The geometry steps but the slip does not.** Segments meet on the trace and
+  step apart at depth (3.5 km at 20 km depth for 80° against 90°), while the
+  boundary nodes are shared, so the slip stays continuous. Rebuild a chosen
+  combination as one smooth surface before reporting a model on it.
+- **Compare at a fixed rank** (`rank=`): one smoothing weight resolves a
+  different number of parameters on a different geometry. The smoothing operator
+  is built once, on `reference_dip`, and used for every combination.
+- **Read the profile, not the winner.** Dip preferences are often shallow. The
+  Venezuela sweeps rejected one dip direction clearly and barely ranked the
+  angles within the other.
+- **Test the coverage first.** With one-sided data a dip preference can be an
+  artefact. `predict(dips, x)` and `run(data=...)` re-run the sweep on a planted
+  geometry through the same samples; if it does not recover what was planted,
+  the real result means little.
+- `method="coordinate"` (automatic above 1000 combinations) re-chooses one
+  segment at a time. It can stop at a combination that no single segment can
+  improve but that is not the global best, so check it against an exhaustive run
+  on a coarser grid when segments trade off.
+
 ## License
 
 MIT. See `LICENSE`, which retains Xiaoyu Zou's original copyright as that

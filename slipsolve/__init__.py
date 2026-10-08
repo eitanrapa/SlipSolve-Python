@@ -102,11 +102,13 @@ from .resolution import (
 )
 from .sampling import Observations
 from .surface import FaultSurface, gridfit
+from .sweep import DipSweep, SweepResult, segment_breaks
 from .trace import FaultSegment, FaultTrace
 
 __all__ = [
     "ARCSEC_10",
     "CovarianceModel",
+    "DipSweep",
     "EdgrnTables",
     "ElementBasis",
     "FaultMesh",
@@ -122,6 +124,7 @@ __all__ = [
     "Observations",
     "SlipInversion",
     "SlipModel",
+    "SweepResult",
     "VelocityModel",
     "adapt_layout",
     "bound_fraction",
@@ -164,6 +167,7 @@ __all__ = [
     "sample_slip",
     "scene_covariance",
     "scene_report",
+    "segment_breaks",
     "size_field",
     "target_element_size",
     "triangulate",
