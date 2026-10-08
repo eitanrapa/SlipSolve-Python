@@ -6,6 +6,7 @@
 # should not be lost -- but never pushed.
 venezuela_six_scene_run/
 venezuela_seven_scene_run/
+venezuela_seven_scene_run_production/
 unstructured_session/
 scratchpad_vz/
 scratchpad/
@@ -30,7 +31,14 @@ dist/
 *.log
 *.out
 *.toc
+*.fdb_latexmk
+*.fls
 .DS_Store
+
+# The methods paper builds on Overleaf; the upload zip and local preview are
+# regenerated from docs/methods_paper/ and not tracked.
+docs/methods_paper.zip
+docs/methods_paper/draft_preview.pdf
 
 # GMT drops this wherever it is run (grdsample/grdinfo session shelf)
 gmt.history

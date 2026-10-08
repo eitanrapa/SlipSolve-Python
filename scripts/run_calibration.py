@@ -1,6 +1,6 @@
 """Stage 0: what wavelength can this data resolve, and at what rank and budget?
 
-    cd ~/Documents/GitHub/slipsolve-python
+    cd ~/Documents/slipsolve-python
     KMP_DUPLICATE_LIB_OK=TRUE \
     nohup ~/miniforge3/envs/remote_sensing/bin/python -u scripts/run_calibration.py \
           > workdir/calibration.log 2>&1 &

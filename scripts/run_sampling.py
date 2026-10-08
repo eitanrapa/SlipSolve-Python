@@ -1,6 +1,6 @@
 """Stage 1: put every scene on one lattice, then sample from the model.
 
-    cd ~/Documents/GitHub/slipsolve-python
+    cd ~/Documents/slipsolve-python
     KMP_DUPLICATE_LIB_OK=TRUE \
     nohup ~/miniforge3/envs/remote_sensing/bin/python -u scripts/run_sampling.py \
           > workdir/sampling.log 2>&1 &
