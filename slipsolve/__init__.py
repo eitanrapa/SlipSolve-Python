@@ -56,6 +56,7 @@ from .covariance import (
     CovarianceModel,
     empirical_variogram,
     fit_covariance,
+    fit_reml,
     observation_covariance,
     scene_covariance,
     whitening_factors,
@@ -69,6 +70,7 @@ from .diagnostics import (
     scene_report,
 )
 from .edgrn import EdgrnTables, VelocityModel, run_edgrn, write_edgrn_input
+from .evidence import GeometryEvidence, smoothing_precision
 from .frame import LocalFrame
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel
@@ -102,11 +104,13 @@ from .resolution import (
 )
 from .sampling import Observations
 from .surface import FaultSurface, gridfit
-from .sweep import DipSweep, SweepResult, segment_breaks
+from .sweep import (BootstrapResult, DipSweep, SweepResult, dip_profile_offsets,
+                    geometry_key, segment_breaks)
 from .trace import FaultSegment, FaultTrace
 
 __all__ = [
     "ARCSEC_10",
+    "BootstrapResult",
     "CovarianceModel",
     "DipSweep",
     "EdgrnTables",
@@ -115,6 +119,7 @@ __all__ = [
     "FaultSegment",
     "FaultSurface",
     "FaultTrace",
+    "GeometryEvidence",
     "HalfSpaceTDE",
     "LayeredPointSource",
     "LocalFrame",
@@ -132,6 +137,7 @@ __all__ = [
     "cell_size_ladder",
     "correlated_field",
     "data_importance",
+    "dip_profile_offsets",
     "element_resolution",
     "blocked_cross_validation",
     "blocked_cv_curve",
@@ -139,7 +145,9 @@ __all__ = [
     "empirical_variogram",
     "epic_prior",
     "fit_covariance",
+    "fit_reml",
     "frame_lattice",
+    "geometry_key",
     "gcv_curve",
     "generalized_cross_validation",
     "graded_layout",
@@ -169,6 +177,7 @@ __all__ = [
     "scene_report",
     "segment_breaks",
     "size_field",
+    "smoothing_precision",
     "target_element_size",
     "triangulate",
     "weighted_design",

@@ -30,7 +30,11 @@ fault surface:
 - **resolution analysis** — the model resolution matrix, effective rank,
   anisotropic averaging kernels, posterior covariance and regularisation bias;
 - **measured data covariance** — an exponential variogram fitted per track from
-  the far-field residual, with block-diagonal whitening.
+  the far-field residual, or a REML fit on the samples themselves
+  (`fit_reml`), with block-diagonal whitening;
+- **geometry sweeps** — per-segment dips, or dips that change with depth,
+  scored by the marginal likelihood with slip integrated out, with bootstrap
+  intervals and a check for forward-model error (`DipSweep`).
 
 ## What is new here relative to the MATLAB
 
@@ -122,17 +126,65 @@ mistake a parameterisation failure for a resolution limit.
 ## Sweeping the dip, segment by segment
 
 `slipsolve.DipSweep` asks the data which dip each stretch of the fault wants. It
-cuts the trace into along-strike segments, gives each a planar dip from a grid,
-and scores every combination by its misfit. Every combination uses the same
-samples, the same regularisation and the same effective rank, so the geometry is
-the only thing that changes:
+cuts the trace into along-strike segments, gives each a dip from a grid, and
+scores every combination. Every combination uses the same samples and the same
+regularisation, so the geometry is the only thing that changes:
 
 ```python
 sweep = DipSweep(trace, obs, segments=6, dips=range(60, 121, 10), engine=engine,
                  ramp="cubic", polarity=(-1, 0, 0), max_depth=40e3, edge_length=8e3)
-result = sweep.run(rank=62)
-result.profiles()      # each segment's misfit against its dip, the others at the best
+result = sweep.run(score="evidence")   # or sweep.run(rank=62) for misfit at a fixed rank
+result.profiles()                      # each segment's score against its dip, the others at the best
+boot = sweep.bootstrap(result)         # per-segment dips with an honest spread
+boot.intervals(); boot.consistency()
 ```
+
+**Score by the evidence.** `score="evidence"` integrates the slip, the ramp, the
+noise scale and the smoothing weight out analytically (`slipsolve.evidence`), so
+there is no rank to choose. A fixed rank is not neutral for geometry: on a
+synthetic Mw 7.7 with data on both sides, rms at rank 60 put a 60° fault at 57–58°
+even with an exact forward model, because the data supported rank ~190. The
+evidence put it within 0.3°. The `rank=` path is kept for comparison with older
+results.
+
+**Take the uncertainty from `bootstrap`, not from the evidence.** That synthetic
+was run over 100 noise draws (`geometry_calibration/`, record of 2026-10-11).
+
+- **iid evidence:** found the dip well, but the posterior it implies was 4–7×
+  too narrow.
+- **Evidence weighted by the true noise covariance:** exact when the forward
+  model was exact. Against a 2 km truth, a 4 km mesh moved the dip +2.2° (0%
+  coverage) and an 8 km mesh +12.6°.
+- **The bootstrap:** re-estimates on synthetic data, the best model plus noise
+  from a fitted model. Its intervals covered the truth 82–97% of the time in every
+  case.
+
+What the bootstrap reports:
+
+- **`intervals()`:** each segment's continuous estimate (splined between grid
+  points), its sd, and normal and basic 95% intervals.
+- **`consistency()`:** the weighted estimate minus the iid one, against its
+  spread under the noise model. `|z|` was of order one with an exact forward model
+  and 5.7–47 when mesh error had biased the weighted posterior. A large `z` means
+  the forward model is not good enough to weight by the covariance; trust the iid
+  estimate and refine the mesh.
+- **`noise="reml"`** (the default) fits each track's covariance to the best
+  model's residual by restricted maximum likelihood (`covariance.fit_reml`). It
+  fits on the samples, with the ramp projected out as the inversion projects it.
+  On the synthetic it calibrated like the true covariance (96% against 95%),
+  where the variogram route gave 83%.
+- **Not in the interval:** mesh and other forward-model error. That is what the
+  consistency check is for.
+
+**A dip that changes with depth** is a tuple in the grid: `(70, 50)` runs from 70°
+at the top of the fault to 50° at its base, linear in depth, and `(60, 80, 100)`
+passes through 80° halfway down. The offset integrates `cot(dip)` exactly.
+Candidates mix freely with planar dips (`dips=(70, (70, 50), (70, 60), 80)`). They
+cost one assembly each, and each segment still hangs from the trace, so the block
+assembly is unchanged. The bootstrap reports the share of replicates choosing
+each profile rather than an interval. Whether data can resolve a change of dip
+with depth has not been calibrated; plant one and recover it (`predict`,
+`data=`) on your own coverage first.
 
 What to know before reading a result:
 
@@ -150,9 +202,18 @@ What to know before reading a result:
   step apart at depth (3.5 km at 20 km depth for 80° against 90°), while the
   boundary nodes are shared, so the slip stays continuous. Rebuild a chosen
   combination as one smooth surface before reporting a model on it.
-- **Compare at a fixed rank** (`rank=`): one smoothing weight resolves a
-  different number of parameters on a different geometry. The smoothing operator
-  is built once, on `reference_dip`, and used for every combination.
+- **The smoothing operator is built once**, on `reference_dip`, and used for
+  every combination. With `rank=`, compare at a fixed rank, since one smoothing
+  weight resolves a different number of parameters on a different geometry. The
+  evidence needs neither: it integrates the weight out.
+- **Give the grid a step finer than the spread you expect near the best.** The
+  bootstrap splines between grid points, and warns when the spread is under a
+  tenth of the step. A coarse sweep followed by a fine grid around its best is
+  the cheap way: each new dip value costs one assembly.
+- **The evidence has no bounds.** Its prior is Gaussian on every free
+  parameter, and the pinned edges are removed outright. Polarity and slip bounds
+  act only in the `rank=`/`smoothing=` path. The posterior-mean `Mw` and `peak`
+  the evidence table reports are a guide, not a model.
 - **Read the profile, not the winner.** Dip preferences are often shallow. The
   Venezuela sweeps rejected one dip direction clearly and barely ranked the
   angles within the other.

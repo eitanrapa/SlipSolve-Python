@@ -749,3 +749,69 @@ def test_a_plain_inversion_still_refuses_without_a_noise_model(signal_setup):
         R.posterior_covariance(plain, 1.0, kind="posterior",
                                noise=CovarianceModel(sill=SILL, range_m=RANGE,
                                                      nugget=NUGGET))
+
+
+# -- REML on the samples ---------------------------------------------------------
+def _point_samples(n=350, seed=0, sill=1e-4, range_m=15e3, nugget=4e-6, kind="exponential",
+                   track="a"):
+    """Samples with a KNOWN covariance plus a plane the ramp projection must ignore."""
+    import xarray as xr
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-75e3, 75e3, n)
+    y = rng.uniform(-50e3, 50e3, n)
+    model = CovarianceModel(sill=sill, range_m=range_m, nugget=nugget, kind=kind)
+    c = model.covariance(np.hypot(x[:, None] - x[None, :], y[:, None] - y[None, :]))
+    c[np.diag_indices_from(c)] = sill + nugget
+    values = np.linalg.cholesky(c) @ rng.standard_normal(n) + 0.01 + 2e-7 * x - 1e-7 * y
+    ds = xr.Dataset({"x": ("obs", x), "y": ("obs", y), "los": ("obs", values),
+                     "look_e": ("obs", np.full(n, 0.6)), "look_n": ("obs", np.full(n, -0.1)),
+                     "look_u": ("obs", np.full(n, 0.79)), "std": ("obs", np.zeros(n)),
+                     "cell_size": ("obs", np.full(n, 1e3)), "count": ("obs", np.ones(n)),
+                     "weight": ("obs", np.ones(n)), "track": ("obs", np.full(n, track, dtype=object))})
+    return Observations(ds), values, model
+
+
+@pytest.mark.parametrize("kind", C.COVARIANCE_KINDS)
+def test_the_reml_gradient_is_the_derivative_of_its_value(kind):
+    rng = np.random.default_rng(7)
+    n = 60
+    x, y = rng.uniform(0, 80e3, n), rng.uniform(0, 60e3, n)
+    dist = np.hypot(x[:, None] - x[None, :], y[:, None] - y[None, :])
+    inv_count = 1.0 / rng.integers(1, 30, n)
+    ramp = np.column_stack([np.ones(n), x / 1e5, y / 1e5])
+    r = rng.normal(scale=0.01, size=n)
+    p = np.log([1e-4, 12e3, 2e-5])
+    value, grad = C._reml_value_grad(p, dist, inv_count, ramp, r, kind)
+    h = 1e-6
+    numeric = [(C._reml_value_grad(p + h * e, dist, inv_count, ramp, r, kind)[0]
+                - C._reml_value_grad(p - h * e, dist, inv_count, ramp, r, kind)[0]) / (2 * h)
+               for e in np.eye(3)]
+    np.testing.assert_allclose(grad, numeric, rtol=1e-5, atol=1e-6)
+
+
+def test_reml_recovers_the_covariance_that_made_the_samples():
+    """A planar trend rides on the noise and the linear ramp projection must hide it.
+
+    One realisation of a 15 km field over 150 km scatters by up to 2x in range
+    (measured over ten seeds), so the median of four is what is pinned.
+    """
+    sill, range_m = [], []
+    for seed in range(11, 15):
+        obs, values, truth = _point_samples(seed=seed)
+        fit = C.fit_reml(obs, values, track="a", ramp="linear")
+        sill.append(fit.sill / truth.sill)
+        range_m.append(fit.range_m / truth.range_m)
+        assert fit.kind == "exponential"
+    assert 0.75 < np.median(sill) < 1.35
+    assert 0.75 < np.median(range_m) < 1.35
+
+
+def test_reml_fits_every_track_unless_told_which():
+    obs_a, values_a, _ = _point_samples(n=120, seed=1, track="a")
+    obs_b, values_b, _ = _point_samples(n=100, seed=2, track="b")
+    obs = Observations.concat([obs_a, obs_b], normalize="none")
+    fits = C.fit_reml(obs, np.concatenate([values_a, values_b]), ramp="linear")
+    assert set(fits) == {"a", "b"}
+    assert all(isinstance(m, CovarianceModel) for m in fits.values())
+    with pytest.raises(ValueError, match="values for"):
+        C.fit_reml(obs, values_a, ramp="linear")

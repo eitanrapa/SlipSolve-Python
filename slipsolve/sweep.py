@@ -1,28 +1,45 @@
 """Segment-by-segment dip sweeps: which dip does each stretch of the fault want?
 
 A geometry sweep lets the data choose the fault's shape. :class:`DipSweep` cuts the
-trace into along-strike segments, gives each its own planar dip from a grid (10 or
-5 degree steps), and scores a combination of dips by how well the best slip model
-on that geometry fits the observations. Every combination is solved on the same
-samples, with the same regularization, at the same effective rank, so the geometry
-is the only thing that differs between them.
+trace into along-strike segments, gives each its own geometry from a grid -- a
+planar dip (10 or 5 degree steps), or a dip that changes with depth -- and scores
+every combination. Every combination is solved on the same samples with the same
+regularization, so the geometry is the only thing that differs between them.
+
+**Two ways to score.** ``run(score="evidence")`` integrates the slip, the ramp,
+the noise scale and the smoothing weight out analytically
+(:mod:`slipsolve.evidence`), so no rank has to be chosen. ``run(rank=...)``
+scores the bounded solve's misfit at a fixed effective rank. ⚠️ A fixed rank is
+not neutral for geometry: on the 2026-10-11 synthetic (Mw 7.7, two-sided data)
+rms at rank 60 put a 60 degree fault at 57-58 even with an exact forward model,
+because the data supported rank ~190; the evidence put it within 0.3.
+
+**Uncertainty comes from** :meth:`DipSweep.bootstrap`, not from the evidence.
+The iid evidence ranks geometries robustly, but the posterior it implies was 4-7x
+too narrow on that synthetic. Its estimate re-made on synthetic data drawn from
+a fitted noise model gave intervals that covered the true dip 82-97% of the time
+at 95%. Weighting the evidence by the noise covariance was exact when the
+forward model was, and 2-13 degrees wrong when it was not. The bootstrap reports
+how far the weighted and unweighted estimates disagree; a large disagreement is
+the sign of that failure.
 
 **Why it is affordable.** Both engines build a node's Green's function as a sum
 over the elements around it, each element computed from its own vertices alone
 (:meth:`~slipsolve.layered.LayeredPointSource._columns`; the half-space engine
 projects per-element columns onto the tents). With a node column on every segment
 boundary no element straddles one, so the design matrix of ANY combination is a
-sum of per-segment blocks, each depending on one segment's dip::
+sum of per-segment blocks, each depending on one segment's geometry::
 
     G(dips) = sum_j  P_j G_j(dip_j)
 
-and the sweep costs one full assembly per dip VALUE -- seven for 60-120 degrees in
-steps of 10 -- instead of one per combination, of which there are ``7**K``. After
-that a combination costs one normal-equation solve.
+and the sweep costs one full assembly per geometry VALUE -- seven for 60-120
+degrees in steps of 10 -- instead of one per combination, of which there are
+``7**K``. After that a combination costs one solve.
 
 **What the geometry is.** Each segment is what :meth:`FaultMesh.curved` builds for
-its dip: every node stepped ``depth / tan(dip)`` along the trace's local normal.
-Adjacent segments meet on the surface trace and STEP apart below it, by
+it: every node stepped along the trace's local normal by ``depth / tan(dip)``, or,
+for a dip that changes with depth, by the integral of ``cot(dip)`` down to that
+depth. Adjacent segments meet on the surface trace and STEP apart below it, by
 ``depth * |cot(dip_a) - cot(dip_b)|`` -- 3.5 km at 20 km depth for 80 against 90.
 The slip does not step: boundary nodes are shared parameters, so the slip field
 stays continuous along strike and only the geometry kinks. This is the torn mesh
@@ -34,9 +51,6 @@ surface, so rebuild the winning combination as one surface
 ramp columns, the boundary rows and the smoothing operator. The operator is built
 ONCE, on the layout embedded at ``reference_dip``, so the regularization is
 identical across geometries rather than re-derived from each one's 3-D metric.
-Combinations are compared at a fixed **effective rank** by default, because one
-smoothing weight resolves a different number of parameters on a different
-geometry.
 
 ⚠️ Read the result as a profile, not a winner. On Venezuela the dip sweeps' power
 was in rejecting the south-dipping side (13.97 against 16.89 mm rms), not in
@@ -49,19 +63,25 @@ believing one.
 """
 
 import itertools
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import scipy.linalg as sla
+from scipy.interpolate import CubicSpline
 from scipy.linalg import cho_factor, cho_solve
 from scipy.optimize import brentq
 
 from .basis import NodeBasis
+from .covariance import CovarianceModel, fit_reml, observation_covariance
+from .evidence import GeometryEvidence, smoothing_precision
 from .inversion import DEFAULT_SHEAR_MODULUS, SlipInversion, SlipModel, _boundary_rows
 from .layout import graded_layout
 from .mesh import FaultMesh, _arc_length, _depth_levels
 from .regularize import laplace_beltrami, ramp_columns, slip_bounds
 from .resolution import JITTER
+from .surface import FaultSurface, centres
 
 #: Dips tried on every segment by default, in degrees: 60 to 120 in steps of 10.
 #: ``FaultMesh.curved(uniform_dip=)``'s convention -- below 90 the fault dips
@@ -71,12 +91,79 @@ from .resolution import JITTER
 DEFAULT_DIPS = tuple(range(60, 121, 10))
 
 #: The scores :meth:`DipSweep.run` can rank combinations by.
-SCORES = ("rms", "weighted_rms")
+SCORES = ("rms", "weighted_rms", "evidence")
 
 #: A combination has to beat the current one by more than this fraction of its
 #: score to replace it in the coordinate search. Without it, two geometries equal
 #: to rounding could swap forever.
 IMPROVEMENT = 1e-9
+
+#: Resolution, in degrees, at which a segment's continuous dip estimate is read
+#: off the spline through its profile.
+REFINE_STEP = 0.005
+
+
+def geometry_key(value):
+    """One segment's geometry, as the sweep keys it.
+
+    A number is a planar dip in degrees. A sequence of two or more numbers is a
+    dip that changes with depth: the dips at evenly spaced depths from the top of
+    the layout to its bottom, linear in between (see :func:`dip_profile_offsets`).
+    A sequence whose entries are all equal is the planar dip and is returned as
+    one, so the two spellings share a mesh and a Green's-function block.
+    """
+    if isinstance(value, (int, float, np.integer, np.floating)) or np.ndim(value) == 0:
+        key = float(value)
+        values = (key,)
+    else:
+        key = tuple(float(v) for v in value)
+        values = key
+        if len(key) < 2:
+            raise ValueError(f"a dip profile needs at least two dips, got {value!r}")
+    for v in values:
+        if not 0.0 < v < 180.0:
+            raise ValueError(f"dips must lie strictly between 0 and 180 degrees, got {v}")
+    if isinstance(key, tuple) and all(v == key[0] for v in key):
+        return key[0]
+    return key
+
+
+def geometry_label(key):
+    """``70`` for a planar dip, ``70>50`` for one that runs from 70 to 50 with depth."""
+    return f"{key:g}" if isinstance(key, float) else ">".join(f"{v:g}" for v in key)
+
+
+def dip_profile_offsets(depths, dips, top=None, bottom=None):
+    """Horizontal offset at each depth for a dip that changes with depth.
+
+    ``dips`` are the dips (degrees) at evenly spaced depths from ``top`` to
+    ``bottom`` (by default the shallowest and deepest of ``depths``), linear in
+    depth between them. The offset is the integral of ``cot(dip)`` from ``top``,
+    taken exactly on each piece (``ln sin`` is its antiderivative), so a
+    constant profile reproduces ``depth / tan(dip)`` and the near-vertical
+    snapping of :func:`~slipsolve.trace.dip_offset` is left to the mesh builder.
+    """
+    depths = np.asarray(depths, dtype=float)
+    theta = np.radians(np.asarray(dips, dtype=float))
+    top = float(depths.min() if top is None else top)
+    bottom = float(depths.max() if bottom is None else bottom)
+    knots = np.linspace(top, bottom, theta.size)
+    out = np.zeros(depths.shape)
+    for i, depth in enumerate(depths.ravel()):
+        total = 0.0
+        for a, b, ta, tb in zip(knots[:-1], knots[1:], theta[:-1], theta[1:]):
+            hi = min(b, depth)
+            if hi <= a:
+                break
+            slope = (tb - ta) / (b - a)
+            if abs(slope) * (hi - a) < 1e-12:
+                total += (hi - a) * np.cos(ta) / np.sin(ta)
+            else:
+                total += (np.log(np.sin(ta + slope * (hi - a))) - np.log(np.sin(ta))) / slope
+        if depth > bottom:                       # below the last knot the dip holds
+            total += (depth - bottom) * np.cos(theta[-1]) / np.sin(theta[-1])
+        out.flat[i] = total
+    return out
 
 
 def segment_breaks(length, count=None, size=None, breaks=None):
@@ -143,24 +230,41 @@ def _box_qp(N, g, lo, hi, x0, max_iter=100):
     raise RuntimeError("the bounded solve's active set did not settle")
 
 
+def _better(a, b):
+    """Whether score ``a`` beats ``b`` by more than :data:`IMPROVEMENT` of its size."""
+    return a < b - IMPROVEMENT * abs(b)
+
+
+def _evidence_cache_key(covariance):
+    if covariance is None or isinstance(covariance, str):
+        return ("plain", covariance)
+    if isinstance(covariance, CovarianceModel):
+        return ("model", covariance)
+    if isinstance(covariance, dict) and all(isinstance(v, CovarianceModel)
+                                            for v in covariance.values()):
+        return ("models", tuple(sorted(covariance.items())))
+    return ("object", id(covariance))
+
+
 class DipSweep:
-    """Sweep the dip of each along-strike segment over a grid of dips.
+    """Sweep the geometry of each along-strike segment over a grid.
 
     ``obs`` is the fixed sample set every geometry is scored on. The segments are
     ``segments`` equal pieces of the trace (4 if nothing is said),
     ``segment_length`` metres each, or cut at ``breaks`` (arc lengths in metres).
-    ``max_depth``, ``edge_length``, ``down_dip_levels``, ``bias_w`` and
-    ``depths`` place the nodes as in :meth:`FaultMesh.curved`. ``engine``,
-    ``ramp`` and ``velocity_model`` mean what they mean to
-    :class:`SlipInversion`, and the remaining keywords are
-    :meth:`SlipInversion.solve`'s regularization and bounds; the slip is always
-    nodal.
+    ``dips`` is the grid every segment draws from: planar dips, and tuples for a
+    dip that changes with depth (see :func:`geometry_key`). ``max_depth``,
+    ``edge_length``, ``down_dip_levels``, ``bias_w`` and ``depths`` place the
+    nodes as in :meth:`FaultMesh.curved`. ``engine``, ``ramp`` and
+    ``velocity_model`` mean what they mean to :class:`SlipInversion`, and the
+    remaining keywords are :meth:`SlipInversion.solve`'s regularization and
+    bounds; the slip is always nodal.
 
     ``reference_dip`` is the geometry the smoothing operator is built on, once,
     for every combination. 90 measures it in the ``(s, z)`` plane itself.
 
-    Green's functions are assembled lazily, one dip at a time, and kept: memory
-    is about one full design matrix per dip used.
+    Green's functions are assembled lazily, one geometry at a time, and kept:
+    memory is about one full design matrix per geometry used.
     """
 
     def __init__(self, trace, obs, *, frame=None, segments=None, segment_length=None,
@@ -175,7 +279,8 @@ class DipSweep:
         # The arc length exactly as `FaultMesh.curved` measures it, or the layout
         # and the meshes built on it would disagree about where the trace ends.
         resampled = trace.resample(self.edge_length, self.frame)
-        self.length = float(_arc_length(*resampled.to_local(self.frame))[-1])
+        self._s = _arc_length(*resampled.to_local(self.frame))
+        self.length = float(self._s[-1])
         if segments is None and segment_length is None and breaks is None:
             segments = 4
         self.breaks = segment_breaks(self.length, count=segments, size=segment_length,
@@ -186,13 +291,14 @@ class DipSweep:
             depths = _depth_levels(0.0, float(max_depth), int(levels), float(bias_w))
         self.depths = np.asarray(depths, dtype=float)
         self.layout = segmented_layout(self.breaks, self.depths, self.edge_length)
-        self.dips = tuple(float(v) for v in dips)
+        self.dips = tuple(dict.fromkeys(geometry_key(v) for v in dips))
         self.engine = engine
         self.ramp_kind = str(ramp)
         self.velocity_model = velocity_model
         self.reference_dip = float(reference_dip)
+        self.sides = tuple(sides)
         self._meshes, self._submeshes, self._blocks = {}, {}, {}
-        self._memo = {}
+        self._memo, self._evidence = {}, {}
         self._last = {"lam": None, "x": None}
 
         self.reference = self._mesh(self.reference_dip)
@@ -213,9 +319,9 @@ class DipSweep:
                             boundary_ratio=float(boundary_ratio), sides=list(sides),
                             polarity=None if polarity is None else list(polarity),
                             strike=list(strike), dip=list(dip))
-        smooth = laplace_beltrami(self.reference, ss_ratio, ds_ratio)
-        self._rows = smooth.shape[0]
-        self._SS = (smooth.T @ smooth).toarray()
+        self._smooth = laplace_beltrami(self.reference, ss_ratio, ds_ratio)
+        self._rows = self._smooth.shape[0]
+        self._SS = (self._smooth.T @ self._smooth).toarray()
         bnd = _boundary_rows(NodeBasis(self.reference), tuple(sides), boundary_ratio)
         self._BB = (bnd.T @ bnd).toarray()
         lo, hi = slip_bounds(self.n, strike, dip, polarity)
@@ -235,14 +341,27 @@ class DipSweep:
                              "start_km": self.breaks[:-1] / 1e3,
                              "end_km": self.breaks[1:] / 1e3})
 
-    def _mesh(self, dip):
-        """The whole layout embedded at one uniform dip."""
-        dip = float(dip)
-        if dip not in self._meshes:
-            self._meshes[dip] = FaultMesh.from_layout(
-                self.layout, self.trace, self.frame, uniform_dip=dip,
-                edge_length=self.edge_length)
-        return self._meshes[dip]
+    def _profile_surface(self, key):
+        """The ``cross(s, z)`` field of a dip that changes with depth, on the mesh lattice."""
+        z_nodes = -self.depths[::-1]
+        top, bottom = float(self.depths.min()), float(self.depths.max())
+        offsets = dip_profile_offsets(self.depths, key, top, bottom)
+        cross = np.broadcast_to(offsets[::-1, None], (self.depths.size, self._s.size))
+        s_c, z_c = centres(self._s), centres(z_nodes)
+        centre = dip_profile_offsets(-z_c, key, top, bottom)
+        return FaultSurface(self._s, z_nodes, np.array(cross), s_c, z_c,
+                            np.array(np.broadcast_to(centre[:, None], (z_c.size, s_c.size))),
+                            attrs={"dips": [float(v) for v in key], "profile": "linear in depth"})
+
+    def _mesh(self, key):
+        """The whole layout embedded at one geometry."""
+        key = geometry_key(key)
+        if key not in self._meshes:
+            geometry = ({"uniform_dip": key} if isinstance(key, float)
+                        else {"surface": self._profile_surface(key)})
+            self._meshes[key] = FaultMesh.from_layout(
+                self.layout, self.trace, self.frame, edge_length=self.edge_length, **geometry)
+        return self._meshes[key]
 
     def segment_mesh(self, j, dip):
         """Segment ``j`` (0-based) of the layout, embedded at ``dip``.
@@ -250,9 +369,9 @@ class DipSweep:
         Its nodes are ``segment_nodes[j]`` of the global parameter vector, in
         that order; a boundary node appears in both segments it bounds.
         """
-        key = (int(j), float(dip))
+        key = (int(j), geometry_key(dip))
         if key not in self._submeshes:
-            mesh = self._mesh(dip)
+            mesh = self._mesh(key[1])
             nodes = self.segment_nodes[j]
             remap = np.full(mesh.n_nodes, -1)
             remap[nodes] = np.arange(nodes.size)
@@ -264,21 +383,25 @@ class DipSweep:
         return self._submeshes[key]
 
     def segment_meshes(self, dips):
-        """Every segment at its own dip, in order -- the stepped geometry ``dips`` describes."""
+        """Every segment at its own geometry, in order -- the stepped fault ``dips`` describes."""
         return [self.segment_mesh(j, v) for j, v in enumerate(self._combination(dips))]
 
     def _combination(self, dips):
-        dips = tuple(float(v) for v in np.atleast_1d(dips))
+        if isinstance(dips, (int, float, np.integer, np.floating)):
+            dips = (dips,)
+        dips = tuple(geometry_key(v) for v in dips)
         if len(dips) == 1 and self.n_segments > 1:
             dips = dips * self.n_segments
         if len(dips) != self.n_segments:
-            raise ValueError(f"need one dip per segment ({self.n_segments}), got {len(dips)}")
+            raise ValueError(
+                f"need one dip per segment ({self.n_segments}), got {len(dips)}; a dip that "
+                "changes with depth is ONE entry, a tuple -- e.g. [(70, 50)] for one segment")
         return dips
 
     # -- the design matrix ---------------------------------------------------
     def _segment_blocks(self, dip):
         """Each segment's Green's columns at ``dip``, one assembly of the whole fault."""
-        dip = float(dip)
+        dip = geometry_key(dip)
         if dip not in self._blocks:
             self._blocks[dip] = [
                 np.asarray(SlipInversion(self.segment_mesh(j, dip), self.obs, engine=self.engine,
@@ -287,10 +410,10 @@ class DipSweep:
         return self._blocks[dip]
 
     def design(self, dips):
-        """The nodal Green's matrix of a combination of dips, ``(n_obs, 2 * n)``.
+        """The nodal Green's matrix of a combination, ``(n_obs, 2 * n)``.
 
-        For one dip on every segment it is exactly the matrix
-        :class:`SlipInversion` assembles on the uniform-dip mesh.
+        For one geometry on every segment it is exactly the matrix
+        :class:`SlipInversion` assembles on that mesh.
         """
         g = np.zeros((self.d.size, 2 * self.n))
         for j, dip in enumerate(self._combination(dips)):
@@ -309,7 +432,7 @@ class DipSweep:
         """
         return self._full_design(dips) @ np.asarray(x, dtype=float)
 
-    # -- the solve ----------------------------------------------------------
+    # -- the bounded solve ---------------------------------------------------
     def _damping(self, lam):
         size = 2 * self.n + self.ramp.shape[1]
         out = np.zeros((size, size))
@@ -375,6 +498,19 @@ class DipSweep:
             total += SlipModel.moment(view, shear_modulus=rigidity)
         return float((2.0 / 3.0) * (np.log10(total) - 9.1)) if total > 0 else float("nan")
 
+    def _summary(self, dips, x, d):
+        """The misfits and moment shared by both scores."""
+        residual = d - self._full_design(dips) @ x
+        m = 2 * self.n
+        out = {"rms": float(np.sqrt(np.mean(residual ** 2))),
+               "weighted_rms": float(np.sqrt(np.sum((self.w * residual) ** 2)
+                                             / np.sum(self.w ** 2))),
+               "Mw": self._moment_magnitude(dips, x),
+               "peak": float(np.hypot(x[: self.n], x[self.n: m]).max())}
+        for t in np.unique(self.track):
+            out[f"rms_{t}"] = float(np.sqrt(np.mean(residual[self.track == t] ** 2)))
+        return out
+
     def evaluate(self, dips, *, rank=None, smoothing=None, data=None):
         """Solve one combination of dips; returns a dict of its scores and solution.
 
@@ -402,37 +538,85 @@ class DipSweep:
                else self._lam_for_rank(N, float(rank), guess=self._last["lam"]))
         self._last["lam"] = lam
         x = self._solve(N, g, lam)
-        residual = d - design @ x
 
         m = 2 * self.n
-        slip = np.hypot(x[: self.n], x[self.n: m])
         bounded = np.isfinite(self._lo[:m]) | np.isfinite(self._hi[:m])
         at_bound = bounded & ((x[:m] <= self._lo[:m] + 1e-6) | (x[:m] >= self._hi[:m] - 1e-6))
         out = {"dips": dips, "lam": lam, "rank": self._rank(N, lam),
-               "rms": float(np.sqrt(np.mean(residual ** 2))),
-               "weighted_rms": float(np.sqrt(np.sum((self.w * residual) ** 2)
-                                             / np.sum(self.w ** 2))),
-               "Mw": self._moment_magnitude(dips, x), "peak": float(slip.max()),
-               "at_bound": float(at_bound.sum() / m), "x": x}
-        for t in np.unique(self.track):
-            out[f"rms_{t}"] = float(np.sqrt(np.mean(residual[self.track == t] ** 2)))
+               **self._summary(dips, x, d), "at_bound": float(at_bound.sum() / m), "x": x}
         if data is None:
             self._memo[key] = out
         return out
 
+    # -- the evidence ---------------------------------------------------------
+    def evidence_model(self, covariance=None):
+        """The :class:`~slipsolve.evidence.GeometryEvidence` this sweep scores with.
+
+        One per noise model, kept, so every geometry it scores shares one
+        ``alpha^2`` grid. The prior is this sweep's own smoothing operator with
+        its ``sides`` pinned to zero outright.
+        """
+        key = _evidence_cache_key(covariance)
+        if key not in self._evidence:
+            q, free = smoothing_precision(self.reference, sides=self.sides,
+                                          operator=self._smooth)
+            self._evidence[key] = GeometryEvidence(self.obs, q, free, self.ramp,
+                                                   covariance=covariance)
+        return self._evidence[key]
+
+    def _evidence_solution(self, ev, dec, dh, g, d, alpha2):
+        """Full parameter vectors ``(2n + k, m)`` at each column's ``alpha2``."""
+        m_free = ev.posterior_mean(dec, dh, alpha2)
+        x = np.zeros((2 * self.n + self.ramp.shape[1], m_free.shape[1]))
+        x[ev.free] = m_free
+        if self.ramp.shape[1]:
+            residual = np.asarray(d, dtype=float).reshape(self.d.size, -1) - g[:, ev.free] @ m_free
+            x[2 * self.n:] = ev.ramp_coefficients(residual)
+        return x
+
+    def evidence(self, dips, *, data=None, covariance=None):
+        """Score one combination by its marginal likelihood; a dict like :meth:`evaluate`'s.
+
+        ``log_evidence`` integrates the slip, ramp, noise scale and smoothing
+        weight out (see :mod:`slipsolve.evidence`); ``alpha2``, ``rank`` and
+        ``sigma2`` are at the integrand's mode, and ``x`` is the posterior-mean
+        solution there -- unbounded, so its ``Mw`` and ``peak`` are a guide only.
+        ``covariance`` is the noise: ``None`` (iid, the robust default),
+        ``"weights"``, or :class:`CovarianceModel`\\ s per track (whitened).
+        """
+        dips = self._combination(dips)
+        d = self.d if data is None else np.asarray(data, dtype=float)
+        if d.shape != self.d.shape:
+            raise ValueError(f"data has shape {d.shape}; the samples need {self.d.shape}")
+        ev = self.evidence_model(covariance)
+        g = self.design(dips)
+        dec = ev.decompose(g)
+        dh, s0 = ev.prepare(d)
+        score = ev.score(dec, dh, s0)
+        x = self._evidence_solution(ev, dec, dh, g, d, score["alpha2"])[:, 0]
+        return {"dips": dips, "log_evidence": float(score["log_evidence"][0]),
+                "alpha2": float(score["alpha2"][0]), "rank": float(score["rank"][0]),
+                "sigma2": float(score["sigma2"][0]), "alpha_edge": bool(score["alpha_edge"][0]),
+                **self._summary(dips, x, d), "x": x}
+
     # -- the search ---------------------------------------------------------
-    def run(self, *, rank=None, smoothing=None, score="rms", method="auto",
+    def run(self, *, rank=None, smoothing=None, score="rms", covariance=None, method="auto",
             max_evaluations=1000, passes=4, start=None, fix=None, data=None, log=None):
         """Search the combinations of dips; returns a :class:`SweepResult`.
 
+        ``score="evidence"`` ranks by the marginal likelihood (no ``rank`` or
+        ``smoothing``; ``covariance`` as :meth:`evidence` takes it).
+        ``"rms"`` (unweighted, the figure the Venezuela record quotes) and
+        ``"weighted_rms"`` (the solve's own data term) rank the bounded solve at
+        a fixed ``rank`` or ``smoothing``.
+
         ``method="exhaustive"`` scores every combination; ``"coordinate"`` starts
-        from the best uniform dip (or ``start``) and repeatedly re-chooses one
-        segment's dip with the others held, until a whole pass changes nothing.
+        from the best uniform geometry (or ``start``) and repeatedly re-chooses one
+        segment with the others held, until a whole pass changes nothing.
         ``"auto"`` is exhaustive when there are at most ``max_evaluations``
-        combinations. ``fix={segment: dip}`` (0-based) holds segments at a dip,
-        which need not be on the grid. ``score`` is ``"rms"`` (unweighted, the
-        figure the Venezuela record quotes) or ``"weighted_rms"`` (the solve's own
-        data term). ``log`` is called with one line per new evaluation.
+        combinations. ``fix={segment: dip}`` (0-based) holds segments at a
+        geometry, which need not be on the grid. ``data`` replaces the observed
+        LOS; ``log`` is called with one line per new evaluation.
 
         ⚠️ The coordinate search finds a combination no single segment can
         improve, which is not guaranteed to be the global best when segments
@@ -441,11 +625,17 @@ class DipSweep:
         """
         if score not in SCORES:
             raise ValueError(f"score must be one of {SCORES}, got {score!r}")
+        if score == "evidence":
+            if rank is not None or smoothing is not None:
+                raise ValueError("score='evidence' integrates the smoothing weight out; "
+                                 "give neither rank= nor smoothing=")
+        elif covariance is not None:
+            raise ValueError("covariance= applies only to score='evidence'")
         candidates = [list(self.dips) for _ in range(self.n_segments)]
         for j, value in (fix or {}).items():
             if not 0 <= int(j) < self.n_segments:
                 raise ValueError(f"fix names segment {j}; segments are 0-{self.n_segments - 1}")
-            candidates[int(j)] = [float(value)]
+            candidates[int(j)] = [geometry_key(value)]
         count = int(np.prod([len(c) for c in candidates]))
         if method == "auto":
             method = "exhaustive" if count <= max_evaluations else "coordinate"
@@ -456,16 +646,24 @@ class DipSweep:
 
         def value(combo):
             if combo not in rows:
-                rows[combo] = self.evaluate(combo, rank=rank, smoothing=smoothing, data=data)
+                if score == "evidence":
+                    rows[combo] = self.evidence(combo, data=data, covariance=covariance)
+                else:
+                    rows[combo] = self.evaluate(combo, rank=rank, smoothing=smoothing, data=data)
                 if log is not None:
-                    r = rows[combo]
-                    log(f"dips {' '.join(f'{v:g}' for v in combo)}: {score} "
-                        f"{1e3 * r[score]:.3f} mm, rank {r['rank']:.1f}, Mw {r['Mw']:.4f}")
-            return rows[combo][score]
+                    r, label = rows[combo], " ".join(geometry_label(v) for v in combo)
+                    if score == "evidence":
+                        log(f"dips {label}: log evidence {r['log_evidence']:.3f}, "
+                            f"rank {r['rank']:.1f}, Mw {r['Mw']:.4f}")
+                    else:
+                        log(f"dips {label}: {score} {1e3 * r[score]:.3f} mm, "
+                            f"rank {r['rank']:.1f}, Mw {r['Mw']:.4f}")
+            r = rows[combo]
+            return -r["log_evidence"] if score == "evidence" else r[score]
 
         if method == "exhaustive":
             for combo in itertools.product(*candidates):
-                value(tuple(float(v) for v in combo))
+                value(tuple(combo))
             best = min(rows, key=value)
         else:
             if start is None:
@@ -473,15 +671,15 @@ class DipSweep:
                            for v in self.dips]
                 current = min(uniform, key=value)
             else:
-                current = tuple(c[0] if len(c) == 1 else float(v)
+                current = tuple(c[0] if len(c) == 1 else v
                                 for c, v in zip(candidates, self._combination(start)))
                 value(current)
             for _ in range(int(passes)):
                 changed = False
                 for j, options in enumerate(candidates):
-                    trials = [current[:j] + (float(v),) + current[j + 1:] for v in options]
+                    trials = [current[:j] + (v,) + current[j + 1:] for v in options]
                     challenger = min(trials, key=value)
-                    if value(challenger) < value(current) * (1.0 - IMPROVEMENT):
+                    if _better(value(challenger), value(current)):
                         current, changed = challenger, True
                 if not changed:
                     break
@@ -493,65 +691,281 @@ class DipSweep:
             while True:
                 for j, options in enumerate(candidates):
                     for v in options:
-                        value(best[:j] + (float(v),) + best[j + 1:])
+                        value(best[:j] + (v,) + best[j + 1:])
                 top = min(rows, key=value)
-                if value(top) >= value(best) * (1.0 - IMPROVEMENT):
+                if not _better(value(top), value(best)):
                     break
                 best = top
         return SweepResult(self, rows, best, method=method, score=score, rank=rank,
-                           smoothing=smoothing)
+                           smoothing=smoothing, covariance=covariance, data=data)
+
+    # -- the uncertainty ----------------------------------------------------
+    def bootstrap(self, result, *, noise="reml", draws=100, seed=0, compare=True, log=None):
+        """Parametric bootstrap of an evidence sweep: each segment's dip with an honest spread.
+
+        The best combination's posterior-mean model predicts the data; ``draws``
+        synthetic data sets add noise drawn from ``noise`` to that prediction,
+        and every combination ``result`` evaluated is re-scored on each. A
+        segment's estimate is read off the spline through its profile, so it is
+        continuous and not tied to the grid.
+
+        ``noise`` is ``"reml"`` -- fitted to the best model's residual by
+        :func:`~slipsolve.covariance.fit_reml`, per track -- or a
+        :class:`CovarianceModel` (every track) or ``{track: model}`` mapping.
+        With ``compare`` (the default), each replicate is also scored by the
+        other evidence: the noise-weighted one if ``result`` was iid, the iid
+        one if it was weighted. :meth:`BootstrapResult.consistency` then says
+        whether the two estimates disagree by more than noise explains.
+
+        ⚠️ Replicates are re-scored on the combinations ``result`` already
+        evaluated, so for a coordinate search the spread is conditional on the
+        other segments. Each replicate keeps its own best combination where that
+        combination's profile was scored; otherwise it falls back to ``result``'s.
+        Give the grid a step finer than the spread you expect near the best:
+        the estimate is splined between grid points, but a profile two points
+        wide carries little information. Mesh and other forward-model error are
+        NOT in these intervals. The weighted-vs-iid comparison is what detects
+        them.
+        """
+        if result.score != "evidence":
+            raise ValueError("bootstrap re-runs the evidence estimator; give it the result of "
+                             "run(score='evidence')")
+        combos = list(result._rows)
+        d_obs = self.d if result.data is None else np.asarray(result.data, dtype=float)
+        pred = self.predict(result.best, result.solution(result.best))
+        names = list(dict.fromkeys(self.track))
+        if isinstance(noise, str):
+            if noise != "reml":
+                raise ValueError(f"noise must be 'reml', a CovarianceModel or a mapping; got {noise!r}")
+            models = fit_reml(self.obs, d_obs - pred, ramp=self.ramp_kind)
+        elif isinstance(noise, CovarianceModel):
+            models = {t: noise for t in names}
+        else:
+            models = dict(noise)
+
+        rng = np.random.default_rng(seed)
+        replicates = np.repeat(pred[:, None], int(draws), axis=1)
+        for t in names:
+            rows = np.flatnonzero(self.track == t)
+            factor = sla.cholesky(observation_covariance(self.obs, models[t], track=t), lower=True)
+            replicates[rows] += factor @ rng.standard_normal((rows.size, int(draws)))
+        data = np.column_stack([d_obs, replicates])          # column 0 is the observed data
+
+        estimators = {"primary": self.evidence_model(result.covariance)}
+        if compare:
+            other = models if result.covariance is None or isinstance(result.covariance, str) else None
+            estimators["other"] = self.evidence_model(other)
+        prepared = {k: ev.prepare(data) for k, ev in estimators.items()}
+        logev = {k: np.empty((len(combos), data.shape[1])) for k in estimators}
+        for i, combo in enumerate(combos):
+            g = self.design(combo)
+            for k, ev in estimators.items():
+                logev[k][i] = ev.score(ev.decompose(g), *prepared[k])["log_evidence"]
+            if log is not None:
+                log(f"bootstrap {i + 1}/{len(combos)}: {' '.join(geometry_label(v) for v in combo)}")
+        estimates = {k: self._estimates(combos, v, result.best) for k, v in logev.items()}
+        return BootstrapResult(self, result, estimates, models, compare=compare)
+
+    def _estimates(self, combos, logev, fallback):
+        """Per data column and segment: the continuous estimate, and the grid step around it."""
+        index = {c: i for i, c in enumerate(combos)}
+        k = self.n_segments
+        out = np.empty((logev.shape[1], k), dtype=object)
+        steps = np.full((logev.shape[1], k), np.nan)
+        best = np.argmax(logev, axis=0)
+        for col in range(logev.shape[1]):
+            top = combos[best[col]]
+            for j in range(k):
+                keys, values = None, None
+                for anchor in (top, tuple(fallback)):
+                    found = [(c[j], logev[i, col]) for c, i in index.items()
+                             if all(c[m] == anchor[m] for m in range(k) if m != j)]
+                    if keys is None or len(found) > len(keys):
+                        keys = [f[0] for f in found]
+                        values = np.array([f[1] for f in found])
+                out[col, j], steps[col, j] = _refine(keys, values)
+        return out, steps
+
+
+def _refine(keys, values):
+    """A profile's continuous maximiser (planar dips) or best key, and the local grid step."""
+    if any(isinstance(key, tuple) for key in keys) or len(keys) < 3:
+        return keys[int(np.argmax(values))], np.nan
+    x = np.asarray(keys, dtype=float)
+    order = np.argsort(x)
+    x, y = x[order], np.asarray(values, dtype=float)[order]
+    i = int(np.argmax(y))
+    lo, hi = max(i - 1, 0), min(i + 1, x.size - 1)
+    fine = np.arange(x[lo], x[hi] + 0.5 * REFINE_STEP, REFINE_STEP)
+    curve = (CubicSpline(x, y)(fine) if x.size >= 4
+             else np.polyval(np.polyfit(x, y, 2), fine))
+    step = float(np.min(np.diff(x[lo: hi + 1]))) if hi > lo else np.nan
+    return float(fine[int(np.argmax(curve))]), step
 
 
 class SweepResult:
     """Every combination a :meth:`DipSweep.run` evaluated, and the best of them.
 
     ``table`` has one row per combination -- ``dip_1 ... dip_K`` in segment order
-    (see ``segments`` for where each lies), its score, the other misfits, the
-    smoothing weight and effective rank, ``Mw``, the peak slip and the fraction of
-    slip parameters on a bound -- sorted best first. ``solution(dips)`` returns
-    the parameter vector of any evaluated combination.
+    (see ``segments`` for where each lies; a dip that changes with depth is a
+    tuple), its score and the other misfits, ``Mw``, the peak slip, and for the
+    bounded solve the smoothing weight, effective rank and fraction of slip
+    parameters on a bound -- sorted best first. ``score`` is the quantity
+    minimised: the misfit, or minus the log evidence, whose drop from the best
+    is ``delta_log_evidence``. ``solution(dips)`` returns the parameter vector of
+    any evaluated combination.
     """
 
-    def __init__(self, sweep, rows, best, method, score, rank, smoothing):
+    def __init__(self, sweep, rows, best, method, score, rank, smoothing,
+                 covariance=None, data=None):
         self.segments = sweep.segments
         self.best = tuple(best)
         self.method, self.score, self.rank, self.smoothing = method, score, rank, smoothing
+        self.covariance, self.data = covariance, data
+        self._combination = sweep._combination
+        self._rows = dict(rows)
         self._solutions = {combo: r["x"] for combo, r in rows.items()}
         records = []
         for combo, r in rows.items():
             record = {f"dip_{j + 1}": v for j, v in enumerate(combo)}
             record.update({k: v for k, v in r.items() if k not in ("dips", "x")})
-            record["score"] = r[score]
+            record["score"] = self._score(r)
             records.append(record)
         self.table = (pd.DataFrame(records).sort_values("score", kind="stable")
                       .reset_index(drop=True))
+        if score == "evidence":
+            self.table["delta_log_evidence"] = (self.table["log_evidence"]
+                                                - self.table["log_evidence"].max())
+
+    def _score(self, row):
+        return -row["log_evidence"] if self.score == "evidence" else row[self.score]
 
     def solution(self, dips):
-        return self._solutions[tuple(float(v) for v in dips)]
+        return self._solutions[self._combination(dips)]
 
     def profiles(self):
-        """Each segment's score against its dip, the other segments at the best.
+        """Each segment's score against its geometry, the other segments at the best.
 
         Long form: ``segment`` (1-based), ``dip``, ``score`` and ``delta`` -- the
-        excess over the best combination's score. Only evaluated combinations
-        appear, so an exhaustive run and a finished coordinate search give
-        complete profiles.
+        excess over the best combination's score (for the evidence, the drop in
+        log evidence). Only evaluated combinations appear, so an exhaustive run
+        and a finished coordinate search give complete profiles.
         """
-        columns = [f"dip_{j + 1}" for j in range(len(self.best))]
-        best_score = float(self.table["score"].iloc[0])
+        best_score = self._score(self._rows[self.best])
         rows = []
-        values = self.table[columns].to_numpy()
         for j in range(len(self.best)):
-            others = np.delete(values, j, axis=1) == np.delete(np.asarray(self.best), j)
-            hit = self.table[others.all(axis=1)]
-            for _, r in hit.iterrows():
-                rows.append({"segment": j + 1, "dip": r[columns[j]], "score": r["score"],
-                             "delta": r["score"] - best_score})
-        return (pd.DataFrame(rows).sort_values(["segment", "dip"])
-                .reset_index(drop=True))
+            hits = [(combo[j], self._score(r)) for combo, r in self._rows.items()
+                    if all(combo[m] == self.best[m] for m in range(len(combo)) if m != j)]
+            hits.sort(key=lambda h: (isinstance(h[0], tuple), h[0]))
+            rows += [{"segment": j + 1, "dip": key, "score": s, "delta": s - best_score}
+                     for key, s in hits]
+        return pd.DataFrame(rows)
 
     def __repr__(self):
         best = self.table.iloc[0]
+        label = " ".join(geometry_label(v) for v in self.best)
+        if self.score == "evidence":
+            return (f"<SweepResult evidence, {self.method}, {len(self.table)} combinations, best "
+                    f"dips {label}: log evidence {best['log_evidence']:.3f} (rank "
+                    f"{best['rank']:.1f} at the mode), Mw {best['Mw']:.4f}>")
         return (f"<SweepResult {self.method}, {len(self.table)} combinations, best dips "
-                f"{' '.join(f'{v:g}' for v in self.best)}: {self.score} "
-                f"{1e3 * best['score']:.3f} mm at rank {best['rank']:.1f}, Mw {best['Mw']:.4f}>")
+                f"{label}: {self.score} {1e3 * best['score']:.3f} mm at rank {best['rank']:.1f}, "
+                f"Mw {best['Mw']:.4f}>")
+
+
+class BootstrapResult:
+    """What :meth:`DipSweep.bootstrap` found: estimates, their spread, and a consistency check.
+
+    ``observed`` is each segment's estimate on the data and ``replicates`` the
+    ``(draws, segments)`` estimates on the synthetic data sets, both continuous
+    for planar dips (and the best key for a dip that changes with depth).
+    ``noise`` holds the per-track models the replicates were drawn from.
+    """
+
+    def __init__(self, sweep, result, estimates, noise, compare=True):
+        self.segments = sweep.segments
+        self.result = result
+        self.noise = noise
+        primary, steps = estimates["primary"]
+        self.observed = list(primary[0])
+        self.replicates = primary[1:]
+        self.grid_step = steps[0]
+        self._other = estimates["other"][0] if compare else None
+        self.weighted = result.covariance is not None and not isinstance(result.covariance, str)
+        for j, est in enumerate(self.observed):
+            column = self.replicates[:, j]
+            if isinstance(est, float) and np.isfinite(self.grid_step[j]):
+                spread = float(np.std(column.astype(float), ddof=1))
+                if spread < 0.1 * self.grid_step[j]:
+                    warnings.warn(
+                        f"segment {j + 1}: the bootstrap spread ({spread:.3g} deg) is under a "
+                        f"tenth of the dip grid's step there ({self.grid_step[j]:.3g} deg), so the "
+                        "estimates rest on the spline between grid points; check with a finer "
+                        f"grid around {est:.2f}", stacklevel=3)
+
+    def intervals(self, level=0.95):
+        """Per segment: the estimate, its bootstrap sd, and two intervals at ``level``.
+
+        ``normal`` is estimate -/+ z sd; ``basic`` reflects the replicates'
+        quantiles about the estimate. A dip that changes with depth gets the
+        share of replicates choosing each candidate instead (``share``).
+        """
+        from scipy.stats import norm
+        z = float(norm.ppf(0.5 + level / 2))
+        a = 100 * (1 - level) / 2
+        rows = []
+        for j, est in enumerate(self.observed):
+            column = self.replicates[:, j]
+            if not isinstance(est, float):
+                keys, counts = np.unique(np.array([geometry_label(v) for v in column]),
+                                         return_counts=True)
+                rows.append({"segment": j + 1, "estimate": geometry_label(est),
+                             "share": dict(zip(keys, counts / counts.sum()))})
+                continue
+            values = column.astype(float)
+            sd = float(np.std(values, ddof=1))
+            q_lo, q_hi = np.percentile(values - values.mean(), [a, 100 - a])
+            rows.append({"segment": j + 1, "estimate": est, "sd": sd,
+                         "normal_lo": est - z * sd, "normal_hi": est + z * sd,
+                         "basic_lo": est - q_hi, "basic_hi": est - q_lo,
+                         "grid_step": self.grid_step[j]})
+        return pd.DataFrame(rows)
+
+    def consistency(self):
+        """Weighted minus iid estimate per segment, against its spread under the noise model.
+
+        ``z`` is the observed difference less its bootstrap mean, over its
+        bootstrap sd. With the forward model right, ``|z|`` is of order one; on
+        the 2026-10-11 synthetic it was 0.4-0.7 when the mesh was exact and 5.7-47
+        when a coarser mesh had biased the weighted posterior by 2-13 degrees.
+        """
+        if self._other is None:
+            raise ValueError("bootstrap(compare=False) did not score the second estimator")
+        rows = []
+        for j, est in enumerate(self.observed):
+            if not (isinstance(est, float) and isinstance(self._other[0, j], float)):
+                rows.append({"segment": j + 1, "difference": np.nan, "sd": np.nan, "z": np.nan})
+                continue
+            diffs = self._other[:, j].astype(float) - self._primary_column(j)
+            if self.weighted:                 # report weighted minus iid either way round
+                diffs = -diffs
+            observed, replicate = diffs[0], diffs[1:]
+            sd = float(np.std(replicate, ddof=1))
+            rows.append({"segment": j + 1, "difference": float(observed),
+                         "mean": float(replicate.mean()), "sd": sd,
+                         "z": float((observed - replicate.mean()) / sd) if sd > 0 else np.nan})
+        return pd.DataFrame(rows)
+
+    def _primary_column(self, j):
+        return np.concatenate([[float(self.observed[j])], self.replicates[:, j].astype(float)])
+
+    def __repr__(self):
+        parts = []
+        for j, est in enumerate(self.observed):
+            if isinstance(est, float):
+                sd = float(np.std(self.replicates[:, j].astype(float), ddof=1))
+                parts.append(f"{est:.2f} +- {sd:.2f}")
+            else:
+                parts.append(geometry_label(est))
+        return (f"<BootstrapResult {len(self.replicates)} draws: "
+                + ", ".join(f"segment {j + 1} {p}" for j, p in enumerate(parts)) + ">")
