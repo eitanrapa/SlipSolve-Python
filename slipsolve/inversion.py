@@ -93,6 +93,14 @@ class _MissingEngine:
     forward = displacement = los_matrix = _refuse
 
 
+def _per_parameter(basis, mesh, factor):
+    """A per-element factor carried onto the parameters: as is, or tent-averaged by area."""
+    if basis.name == "element":
+        return factor
+    areas = mesh.areas
+    return (basis.projection().T @ (areas * factor)) / basis.lumped_areas()
+
+
 def _boundary_rows(basis, sides, ratio):
     """Selection rows pulling the flagged boundary parameters toward zero."""
     idx = np.nonzero(basis.boundary(sides))[0]
@@ -402,6 +410,10 @@ class SlipInversion:
                 # reloaded layered model would report a 30 GPa moment.
                 "velocity_model": (None if self.velocity_model is None
                                    else self.velocity_model.to_dict()),
+                # Carried so a saved model keeps its rigidity contrast: the moment
+                # uses it, and a reloaded half-space model forwards through it.
+                "bimaterial": (self.engine.describe() if hasattr(self.engine, "describe")
+                               else None),
             },
         )
 
@@ -678,7 +690,13 @@ class SlipModel:
         +1.9% in moment, Mw +0.0054; across rank-84 arms +0.0048...+0.0064, and
         +0.0085 / +0.0111 at rank 240 / 340, where a rougher field makes the node
         values less representative of the ground they stand for.
+
+        A fault between blocks of different rigidity (a
+        :class:`~slipsolve.bimaterial.Bimaterial` engine) takes the harmonic mean
+        of the two blocks' rigidities, :attr:`rigidity_factor` times the reference
+        block's; ``shear_modulus``, if given, is the reference block's.
         """
+        factor = getattr(self, "rigidity_factor", None)
         if rule == "lumped":
             areas = self.basis.lumped_areas()
             if shear_modulus is None:
@@ -686,6 +704,8 @@ class SlipModel:
             elif hasattr(shear_modulus, "at"):
                 shear_modulus = shear_modulus.at(self._parameter_depths(), "mu")
             mu = np.broadcast_to(np.asarray(shear_modulus, dtype=float), areas.shape)
+            if factor is not None:
+                mu = mu * _per_parameter(self.basis, self.mesh, factor)
             return float(np.sum(mu * areas * self.slip_magnitude))
         if rule != "integrated":
             raise ValueError(f"rule must be 'integrated' or 'lumped', got {rule!r}")
@@ -702,6 +722,8 @@ class SlipModel:
         if self.basis.name == "element":
             if layered:
                 mu = rigidity.triangle_mean(corner_z)
+            if factor is not None:
+                mu = mu * factor
             return float(np.sum(mu * areas * np.hypot(*self.element_slip.T)))
 
         from .layered import _sub_triangles
@@ -715,7 +737,27 @@ class SlipModel:
         elif mu.ndim:
             # Linear across each element, so a piece's mean is its centroid value.
             mu = mu[triangles] @ centroid.T
+        if factor is not None:
+            mu = mu * np.asarray(factor, dtype=float)[:, None]
         return float(np.sum(mu * magnitude * (areas[:, None] / pieces.shape[0])))
+
+    @property
+    def rigidity_factor(self):
+        """Per element, the moment's rigidity over the rigidity model's; ``None`` for one block.
+
+        Set by a :class:`~slipsolve.bimaterial.Bimaterial` engine: the harmonic
+        mean of the two blocks' rigidities over the reference block's. A loaded
+        model reads it from its options, so it survives :meth:`save`.
+        """
+        engine = getattr(getattr(self, "_inversion", None), "engine", None)
+        if hasattr(engine, "rigidity_factor"):
+            return engine.rigidity_factor(self.mesh)
+        described = (getattr(self, "options", None) or {}).get("bimaterial")
+        if described:
+            from .bimaterial import RigidityContrast
+
+            return RigidityContrast.from_dict(described["contrast"]).element_factor(self.mesh)
+        return None
 
     def _rigidity(self):
         """The inversion's own velocity model, else ``DEFAULT_SHEAR_MODULUS``."""
@@ -743,10 +785,13 @@ class SlipModel:
         What ``moment(rule="lumped")`` weights each parameter with, and what the
         export tables print. The default integrated moment averages the rigidity
         over each element's depth range instead, which differs wherever an element
-        straddles a layer interface.
+        straddles a layer interface. With a rigidity contrast it is the harmonic
+        mean the moment uses.
         """
-        return np.broadcast_to(np.asarray(self._default_shear_modulus(), dtype=float),
-                               self.basis.lumped_areas().shape)
+        mu = np.broadcast_to(np.asarray(self._default_shear_modulus(), dtype=float),
+                             self.basis.lumped_areas().shape)
+        factor = self.rigidity_factor
+        return mu if factor is None else mu * _per_parameter(self.basis, self.mesh, factor)
 
     def _parameter_depths(self):
         """Depth of each parameter: an element centroid, or a node."""
@@ -1068,11 +1113,15 @@ class SlipModel:
         used rather than a constant that may not be. ⚠️ It is the value
         ``moment(rule="lumped")`` weights an element with; the default integrated
         :meth:`moment` averages the rigidity over the element's depth range, which
-        differs wherever an element straddles a layer interface.
+        differs wherever an element straddles a layer interface. With a rigidity
+        contrast it is the two blocks' harmonic mean, as the moment uses.
         """
         self._refuse_if_unconverged()
         lon, lat = self._lonlat(self.mesh.centroids)
         mu = self._mu_at(shear_modulus, self.mesh.centroids[:, 2])
+        factor = self.rigidity_factor
+        if factor is not None:
+            mu = mu * factor
         element = self.element_slip
         table = np.column_stack([
             np.arange(1, self.mesh.n_elements + 1), lon, lat,
@@ -1131,11 +1180,15 @@ class SlipModel:
         outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
 
+        nodal = NodeBasis(self.mesh)
+        mu = self._mu_at(shear_modulus, nodes[:, 2])
+        factor = self.rigidity_factor
+        if factor is not None:
+            mu = mu * _per_parameter(nodal, self.mesh, factor)
         node_table = np.column_stack([
             np.arange(1, self.mesh.n_nodes + 1), lon, lat, nodes[:, 2],
             self.mesh.params[:, 0], slip[:, 0], slip[:, 1],
-            NodeBasis(self.mesh).lumped_areas(),
-            self._mu_at(shear_modulus, nodes[:, 2]),
+            nodal.lumped_areas(), mu,
         ])
         node_path = outdir / "vert_nodes.txt"
         # `node_id` as an integer, the rest at numpy's default precision: these two
@@ -1289,12 +1342,23 @@ class SlipModel:
         # use the homogeneous half-space instead of saying so. Refuse, and name
         # what to do about it.
         engine_name = str(model.attrs.get("engine", HalfSpaceTDE.name))
-        engine = (HalfSpaceTDE(float(model.attrs.get("engine_nu", 0.25)))
-                  if engine_name == HalfSpaceTDE.name
-                  else _MissingEngine(engine_name))
+        nu = float(model.attrs.get("engine_nu", 0.25))
+        described = options.get("bimaterial")
+        if described and described.get("engine") == HalfSpaceTDE.name:
+            from .bimaterial import Bimaterial
+
+            # A contrast round the closed-form engine is pure arithmetic: rebuild it.
+            engine = Bimaterial.from_description(described, HalfSpaceTDE(nu))
+        elif engine_name == HalfSpaceTDE.name:
+            engine = HalfSpaceTDE(nu)
+        else:
+            engine = _MissingEngine(engine_name)
         self._inversion = SimpleNamespace(
             engine=engine, basis=self.basis,
             g=None, ramp=None, n_ramp=n_ramp, ramp_labels=self.ramp_labels,
+            # As SlipInversion decides it, so `forward` takes the same path as
+            # the model it was saved from.
+            exact_basis=bool(getattr(engine, "supports_basis", False)),
         )
         # Rebuilt on demand from obs + the ramp kind, like the smoothing
         # operator above -- G is deliberately not saved, but the ramp columns

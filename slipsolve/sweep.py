@@ -60,6 +60,18 @@ its dip, the others held at the best -- says more than the argmin. And with
 one-sided coverage a dip preference can be a coverage artefact: recover a planted
 geometry through the same samples (:meth:`DipSweep.predict` and ``data=``) before
 believing one.
+
+**A rigidity contrast as a sweep axis.** ``contrast=`` (a
+:class:`~slipsolve.bimaterial.RigidityContrast`) and ``ratios=`` add one coordinate
+per interval of the contrast, after the segments' dips. The scaled mode makes a
+contrast a row and column scaling of the same blocks, so a ratio costs no
+assembly, only a solve or a decomposition. Dip and contrast both make the fault's
+two sides move differently, and on Venezuela's one-sided data they were
+substitutes (2026-10-07); sweep them together. ⚠️ The scaled mode is an
+approximation the data can see. On the Panama synthetic, given exact-mode data, the
+sweep put the dip 5 degrees off and a ratio of 2 at 2.24, and it smeared a step
+along strike (see :mod:`slipsolve.bimaterial`). Read its answer as where to look,
+and take the dip, ratio and moment from ``Bimaterial(exact=True)``.
 """
 
 import itertools
@@ -235,6 +247,26 @@ def _better(a, b):
     return a < b - IMPROVEMENT * abs(b)
 
 
+def _ratio_grids(contrast, ratios):
+    """One grid of ratios per interval of ``contrast``: shared, per interval, or its own."""
+    if contrast is None:
+        return []
+    m = contrast.n_intervals
+    if ratios is None:
+        grids = [[float(r)] for r in contrast.ratio]
+    elif all(np.ndim(v) == 0 for v in ratios):
+        grids = [[float(v) for v in ratios] for _ in range(m)]
+    else:
+        if len(ratios) != m:
+            raise ValueError(f"ratios has {len(ratios)} grids for {m} contrast intervals; give "
+                             "one grid for all, or one per interval")
+        grids = [[float(v) for v in np.atleast_1d(g)] for g in ratios]
+    for g in grids:
+        if not g or any(not np.isfinite(v) or v <= 0 for v in g):
+            raise ValueError(f"ratios must be positive, got {g}")
+    return [list(dict.fromkeys(g)) for g in grids]
+
+
 def _evidence_cache_key(covariance):
     if covariance is None or isinstance(covariance, str):
         return ("plain", covariance)
@@ -263,6 +295,14 @@ class DipSweep:
     ``reference_dip`` is the geometry the smoothing operator is built on, once,
     for every combination. 90 measures it in the ``(s, z)`` plane itself.
 
+    ``contrast`` puts the fault between blocks of different rigidity, in the
+    scaled mode of :mod:`slipsolve.bimaterial`. ``ratios`` makes its ratio a
+    sweep axis: one grid for every interval of the contrast, or one grid per
+    interval (a one-value grid holds that interval fixed). Without ``ratios``
+    the contrast's own ratios hold. A combination is then the segments' dips
+    followed by the intervals' ratios; anywhere a combination is taken, the dips
+    alone mean the contrast's own ratios.
+
     Green's functions are assembled lazily, one geometry at a time, and kept:
     memory is about one full design matrix per geometry used.
     """
@@ -272,7 +312,17 @@ class DipSweep:
                  down_dip_levels=None, bias_w=1.0, depths=None, engine=None,
                  ramp="none", reference_dip=90.0, velocity_model=None, ss_ratio=1.0,
                  ds_ratio=3.0, boundary_ratio=1.0, sides=("bottom", "left", "right"),
-                 polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0)):
+                 polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0),
+                 contrast=None, ratios=None):
+        if hasattr(engine, "contrast"):
+            raise ValueError("give the rigidity contrast to DipSweep(contrast=...), with a plain "
+                             "engine, so the sweep can scale its blocks; not a Bimaterial engine")
+        if ratios is not None and contrast is None:
+            raise ValueError("ratios= sweeps a contrast's ratio; give contrast= too")
+        if contrast is not None and contrast.n_bands > 1:
+            raise NotImplementedError(
+                "DipSweep sweeps one ratio per interval along strike; a contrast with depth_breaks "
+                "is not built into the sweep. Use Bimaterial(contrast, exact=True) at fixed ratios")
         self.trace, self.obs = trace, obs
         self.frame = frame or trace.local_frame()
         self.edge_length = float(edge_length)
@@ -329,10 +379,45 @@ class DipSweep:
         self._lo = np.concatenate([lo, np.full(k, -np.inf)])
         self._hi = np.concatenate([hi, np.full(k, np.inf)])
 
+        self.contrast = contrast
+        self.ratio_grids = _ratio_grids(contrast, ratios)
+        self._factors = {}
+        if contrast is not None:
+            contrast.frame.require_match(self.frame, "The rigidity contrast")
+            x, y = ds["x"].values, ds["y"].values
+            self._obs_left = contrast.trace.side(x, y, contrast.frame) > 0
+            self._obs_interval = contrast.interval(
+                contrast.trace.to_curvilinear(x, y, contrast.frame)[0])
+            # Arc lengths are the layout's, the same at every geometry.
+            self._element_interval = contrast.interval(self.reference.element_params[:, 0])
+            tent = NodeBasis(self.reference)
+            self._tent = (tent.projection(), self.reference.areas, tent.lumped_areas())
+
     # -- geometry -----------------------------------------------------------
     @property
     def n_segments(self):
         return int(self.breaks.size - 1)
+
+    @property
+    def n_ratios(self):
+        """Coordinates after the dips: one per interval of the contrast, or none."""
+        return len(self.ratio_grids)
+
+    @property
+    def _default_ratios(self):
+        """What a combination given as dips alone means for the contrast's ratios."""
+        return tuple(float(g[0]) if len(g) == 1 else float(r)
+                     for g, r in zip(self.ratio_grids,
+                                     [] if self.contrast is None else self.contrast.ratio))
+
+    def label(self, dips):
+        """A combination as text: ``80 70`` for the dips, then ``| r 1.5`` for any ratios."""
+        combo = self._combination(dips)
+        k = self.n_segments
+        text = " ".join(geometry_label(v) for v in combo[:k])
+        if self.n_ratios:
+            text += " | r " + " ".join(f"{v:g}" for v in combo[k:])
+        return text
 
     @property
     def segments(self):
@@ -389,14 +474,23 @@ class DipSweep:
     def _combination(self, dips):
         if isinstance(dips, (int, float, np.integer, np.floating)):
             dips = (dips,)
-        dips = tuple(geometry_key(v) for v in dips)
-        if len(dips) == 1 and self.n_segments > 1:
-            dips = dips * self.n_segments
-        if len(dips) != self.n_segments:
+        dips = tuple(dips)
+        k, m = self.n_segments, self.n_ratios
+        if m and len(dips) == k + m:
+            geometry, ratios = dips[:k], tuple(float(v) for v in dips[k:])
+        else:
+            geometry, ratios = dips, self._default_ratios
+        geometry = tuple(geometry_key(v) for v in geometry)
+        if len(geometry) == 1 and k > 1:
+            geometry = geometry * k
+        if len(geometry) != k:
+            more = f", then optionally one ratio per contrast interval ({m})" if m else ""
             raise ValueError(
-                f"need one dip per segment ({self.n_segments}), got {len(dips)}; a dip that "
+                f"need one dip per segment ({k}){more}, got {len(dips)} entries; a dip that "
                 "changes with depth is ONE entry, a tuple -- e.g. [(70, 50)] for one segment")
-        return dips
+        if any(not np.isfinite(r) or r <= 0 for r in ratios):
+            raise ValueError(f"ratios must be positive, got {ratios}")
+        return geometry + ratios
 
     # -- the design matrix ---------------------------------------------------
     def _segment_blocks(self, dip):
@@ -413,13 +507,39 @@ class DipSweep:
         """The nodal Green's matrix of a combination, ``(n_obs, 2 * n)``.
 
         For one geometry on every segment it is exactly the matrix
-        :class:`SlipInversion` assembles on that mesh.
+        :class:`SlipInversion` assembles on that mesh, and with a contrast, the
+        matrix a scaled-mode :class:`~slipsolve.bimaterial.Bimaterial` would.
         """
+        combo = self._combination(dips)
+        k = self.n_segments
         g = np.zeros((self.d.size, 2 * self.n))
-        for j, dip in enumerate(self._combination(dips)):
+        for j, dip in enumerate(combo[:k]):
             nodes = self.segment_nodes[j]
             g[:, np.concatenate([nodes, self.n + nodes])] += self._segment_blocks(dip)[j]
+        if self.n_ratios:
+            rows, columns, _ = self._contrast_factors(combo[k:])
+            g *= rows[:, None]
+            g *= columns[None, :]
         return g
+
+    def _contrast_factors(self, ratios):
+        """Row factors, nodal column factors and element rigidity factors at ``ratios``.
+
+        The scaled mode of :mod:`slipsolve.bimaterial`: each sample's row times
+        its block's ``a``, each element's slip times ``1/m``. A node takes its
+        tent's area-weighted mean of ``1/m``, measured on the reference mesh.
+        """
+        key = tuple(float(r) for r in ratios)
+        if key not in self._factors:
+            contrast = self.contrast.with_ratio(key)
+            a_left, a_right = contrast._left_right(np.arange(contrast.n_intervals))
+            rows = np.where(self._obs_left, a_left[self._obs_interval],
+                            a_right[self._obs_interval])
+            element = (2.0 / (a_left + a_right))[self._element_interval]
+            projection, areas, lumped = self._tent
+            node = (projection.T @ (areas * element)) / lumped
+            self._factors[key] = (rows, np.concatenate([node, node]), element)
+        return self._factors[key]
 
     def _full_design(self, dips):
         g = self.design(dips)
@@ -489,12 +609,16 @@ class DipSweep:
         """
         rigidity = (self.velocity_model if self.velocity_model is not None
                     else DEFAULT_SHEAR_MODULUS)
+        combo = self._combination(dips)
+        k = self.n_segments
+        element = self._contrast_factors(combo[k:])[2] if self.n_ratios else None
         total = 0.0
-        for j, dip in enumerate(dips):
+        for j, dip in enumerate(combo[:k]):
             mesh = self.segment_mesh(j, dip)
             nodes = self.segment_nodes[j]
-            view = SimpleNamespace(basis=NodeBasis(mesh), mesh=mesh,
-                                   strike_slip=x[nodes], dip_slip=x[self.n + nodes])
+            view = SimpleNamespace(
+                basis=NodeBasis(mesh), mesh=mesh, strike_slip=x[nodes], dip_slip=x[self.n + nodes],
+                rigidity_factor=None if element is None else element[self.segment_elements[j]])
             total += SlipModel.moment(view, shear_modulus=rigidity)
         return float((2.0 / 3.0) * (np.log10(total) - 9.1)) if total > 0 else float("nan")
 
@@ -615,8 +739,10 @@ class DipSweep:
         segment with the others held, until a whole pass changes nothing.
         ``"auto"`` is exhaustive when there are at most ``max_evaluations``
         combinations. ``fix={segment: dip}`` (0-based) holds segments at a
-        geometry, which need not be on the grid. ``data`` replaces the observed
-        LOS; ``log`` is called with one line per new evaluation.
+        geometry, which need not be on the grid; hold a contrast interval with a
+        one-value grid in ``ratios=``. A contrast's ratios are coordinates like
+        the dips, after them. ``data`` replaces the observed LOS; ``log`` is
+        called with one line per new evaluation.
 
         ⚠️ The coordinate search finds a combination no single segment can
         improve, which is not guaranteed to be the global best when segments
@@ -631,11 +757,13 @@ class DipSweep:
                                  "give neither rank= nor smoothing=")
         elif covariance is not None:
             raise ValueError("covariance= applies only to score='evidence'")
-        candidates = [list(self.dips) for _ in range(self.n_segments)]
+        k = self.n_segments
+        candidates = [list(self.dips) for _ in range(k)]
         for j, value in (fix or {}).items():
-            if not 0 <= int(j) < self.n_segments:
-                raise ValueError(f"fix names segment {j}; segments are 0-{self.n_segments - 1}")
+            if not 0 <= int(j) < k:
+                raise ValueError(f"fix names segment {j}; segments are 0-{k - 1}")
             candidates[int(j)] = [geometry_key(value)]
+        candidates += [list(g) for g in self.ratio_grids]
         count = int(np.prod([len(c) for c in candidates]))
         if method == "auto":
             method = "exhaustive" if count <= max_evaluations else "coordinate"
@@ -651,7 +779,7 @@ class DipSweep:
                 else:
                     rows[combo] = self.evaluate(combo, rank=rank, smoothing=smoothing, data=data)
                 if log is not None:
-                    r, label = rows[combo], " ".join(geometry_label(v) for v in combo)
+                    r, label = rows[combo], self.label(combo)
                     if score == "evidence":
                         log(f"dips {label}: log evidence {r['log_evidence']:.3f}, "
                             f"rank {r['rank']:.1f}, Mw {r['Mw']:.4f}")
@@ -667,7 +795,9 @@ class DipSweep:
             best = min(rows, key=value)
         else:
             if start is None:
-                uniform = [tuple(c[0] if len(c) == 1 else v for c in candidates)
+                tail = tuple(c[0] if len(c) == 1 else r
+                             for c, r in zip(candidates[k:], self._default_ratios))
+                uniform = [tuple(c[0] if len(c) == 1 else v for c in candidates[:k]) + tail
                            for v in self.dips]
                 current = min(uniform, key=value)
             else:
@@ -762,14 +892,14 @@ class DipSweep:
             for k, ev in estimators.items():
                 logev[k][i] = ev.score(ev.decompose(g), *prepared[k])["log_evidence"]
             if log is not None:
-                log(f"bootstrap {i + 1}/{len(combos)}: {' '.join(geometry_label(v) for v in combo)}")
+                log(f"bootstrap {i + 1}/{len(combos)}: {self.label(combo)}")
         estimates = {k: self._estimates(combos, v, result.best) for k, v in logev.items()}
         return BootstrapResult(self, result, estimates, models, compare=compare)
 
     def _estimates(self, combos, logev, fallback):
-        """Per data column and segment: the continuous estimate, and the grid step around it."""
+        """Per data column and coordinate: the continuous estimate, and the grid step around it."""
         index = {c: i for i, c in enumerate(combos)}
-        k = self.n_segments
+        k = len(combos[0])
         out = np.empty((logev.shape[1], k), dtype=object)
         steps = np.full((logev.shape[1], k), np.nan)
         best = np.argmax(logev, axis=0)
@@ -783,12 +913,16 @@ class DipSweep:
                     if keys is None or len(found) > len(keys):
                         keys = [f[0] for f in found]
                         values = np.array([f[1] for f in found])
-                out[col, j], steps[col, j] = _refine(keys, values)
+                out[col, j], steps[col, j] = _refine(keys, values, log=j >= self.n_segments)
         return out, steps
 
 
-def _refine(keys, values):
-    """A profile's continuous maximiser (planar dips) or best key, and the local grid step."""
+def _refine(keys, values, log=False):
+    """A profile's continuous maximiser (planar dips, ratios) or best key, and the local grid step.
+
+    ``log`` splines a ratio's profile in log ratio, where its grid is usually
+    even; the step is still reported in the coordinate's own units.
+    """
     if any(isinstance(key, tuple) for key in keys) or len(keys) < 3:
         return keys[int(np.argmax(values))], np.nan
     x = np.asarray(keys, dtype=float)
@@ -796,11 +930,14 @@ def _refine(keys, values):
     x, y = x[order], np.asarray(values, dtype=float)[order]
     i = int(np.argmax(y))
     lo, hi = max(i - 1, 0), min(i + 1, x.size - 1)
-    fine = np.arange(x[lo], x[hi] + 0.5 * REFINE_STEP, REFINE_STEP)
-    curve = (CubicSpline(x, y)(fine) if x.size >= 4
-             else np.polyval(np.polyfit(x, y, 2), fine))
     step = float(np.min(np.diff(x[lo: hi + 1]))) if hi > lo else np.nan
-    return float(fine[int(np.argmax(curve))]), step
+    u = np.log(x) if log else x
+    h = REFINE_STEP / 10 if log else REFINE_STEP          # 0.05% in ratio, 0.005 degrees in dip
+    fine = np.arange(u[lo], u[hi] + 0.5 * h, h)
+    curve = (CubicSpline(u, y)(fine) if u.size >= 4
+             else np.polyval(np.polyfit(u, y, 2), fine))
+    best = float(fine[int(np.argmax(curve))])
+    return (float(np.exp(best)) if log else best), step
 
 
 class SweepResult:
@@ -808,26 +945,29 @@ class SweepResult:
 
     ``table`` has one row per combination -- ``dip_1 ... dip_K`` in segment order
     (see ``segments`` for where each lies; a dip that changes with depth is a
-    tuple), its score and the other misfits, ``Mw``, the peak slip, and for the
-    bounded solve the smoothing weight, effective rank and fraction of slip
-    parameters on a bound -- sorted best first. ``score`` is the quantity
-    minimised: the misfit, or minus the log evidence, whose drop from the best
-    is ``delta_log_evidence``. ``solution(dips)`` returns the parameter vector of
-    any evaluated combination.
+    tuple), then ``ratio_1 ...`` for a contrast's intervals, its score and the
+    other misfits, ``Mw``, the peak slip, and for the bounded solve the smoothing
+    weight, effective rank and fraction of slip parameters on a bound -- sorted
+    best first. ``score`` is the quantity minimised: the misfit, or minus the log
+    evidence, whose drop from the best is ``delta_log_evidence``.
+    ``solution(dips)`` returns the parameter vector of any evaluated combination.
     """
 
     def __init__(self, sweep, rows, best, method, score, rank, smoothing,
                  covariance=None, data=None):
         self.segments = sweep.segments
+        self.n_dips = sweep.n_segments
         self.best = tuple(best)
         self.method, self.score, self.rank, self.smoothing = method, score, rank, smoothing
         self.covariance, self.data = covariance, data
         self._combination = sweep._combination
+        self._label = sweep.label
         self._rows = dict(rows)
         self._solutions = {combo: r["x"] for combo, r in rows.items()}
         records = []
         for combo, r in rows.items():
-            record = {f"dip_{j + 1}": v for j, v in enumerate(combo)}
+            record = {(f"dip_{j + 1}" if j < self.n_dips else f"ratio_{j - self.n_dips + 1}"): v
+                      for j, v in enumerate(combo)}
             record.update({k: v for k, v in r.items() if k not in ("dips", "x")})
             record["score"] = self._score(r)
             records.append(record)
@@ -844,12 +984,14 @@ class SweepResult:
         return self._solutions[self._combination(dips)]
 
     def profiles(self):
-        """Each segment's score against its geometry, the other segments at the best.
+        """Each coordinate's score against its value, the others at the best.
 
-        Long form: ``segment`` (1-based), ``dip``, ``score`` and ``delta`` -- the
-        excess over the best combination's score (for the evidence, the drop in
-        log evidence). Only evaluated combinations appear, so an exhaustive run
-        and a finished coordinate search give complete profiles.
+        Long form: ``parameter`` (``dip`` or ``ratio``), ``segment`` (1-based, for
+        a dip) or ``interval`` (1-based, for a contrast's ratio), ``dip`` or
+        ``ratio``, ``score`` and ``delta`` -- the excess over the best
+        combination's score (for the evidence, the drop in log evidence). Only
+        evaluated combinations appear, so an exhaustive run and a finished
+        coordinate search give complete profiles.
         """
         best_score = self._score(self._rows[self.best])
         rows = []
@@ -857,13 +999,17 @@ class SweepResult:
             hits = [(combo[j], self._score(r)) for combo, r in self._rows.items()
                     if all(combo[m] == self.best[m] for m in range(len(combo)) if m != j)]
             hits.sort(key=lambda h: (isinstance(h[0], tuple), h[0]))
-            rows += [{"segment": j + 1, "dip": key, "score": s, "delta": s - best_score}
-                     for key, s in hits]
+            dip = j < self.n_dips
+            rows += [{"parameter": "dip" if dip else "ratio",
+                      "segment": j + 1 if dip else np.nan,
+                      "interval": np.nan if dip else j - self.n_dips + 1,
+                      "dip": key if dip else np.nan, "ratio": np.nan if dip else key,
+                      "score": s, "delta": s - best_score} for key, s in hits]
         return pd.DataFrame(rows)
 
     def __repr__(self):
         best = self.table.iloc[0]
-        label = " ".join(geometry_label(v) for v in self.best)
+        label = self._label(self.best)
         if self.score == "evidence":
             return (f"<SweepResult evidence, {self.method}, {len(self.table)} combinations, best "
                     f"dips {label}: log evidence {best['log_evidence']:.3f} (rank "
@@ -884,6 +1030,7 @@ class BootstrapResult:
 
     def __init__(self, sweep, result, estimates, noise, compare=True):
         self.segments = sweep.segments
+        self.n_dips = sweep.n_segments
         self.result = result
         self.noise = noise
         primary, steps = estimates["primary"]
@@ -898,17 +1045,38 @@ class BootstrapResult:
                 spread = float(np.std(column.astype(float), ddof=1))
                 if spread < 0.1 * self.grid_step[j]:
                     warnings.warn(
-                        f"segment {j + 1}: the bootstrap spread ({spread:.3g} deg) is under a "
-                        f"tenth of the dip grid's step there ({self.grid_step[j]:.3g} deg), so the "
+                        f"{self._name(j)}: the bootstrap spread ({spread:.3g}) is under a "
+                        f"tenth of the grid's step there ({self.grid_step[j]:.3g}), so the "
                         "estimates rest on the spline between grid points; check with a finer "
-                        f"grid around {est:.2f}", stacklevel=3)
+                        f"grid around {est:.3f}", stacklevel=3)
+        # A coordinate whose best is on its grid's edge cannot move past it, and the
+        # others take up what it would have done. Measured with dip and ratio swept
+        # together: a dip pinned at the edge left the ratio's interval 2-3x too narrow,
+        # and it missed the truth on 2 of 6 seeds (6 of 6 with the grid widened).
+        for j, best in enumerate(result.best):
+            values = sorted({c[j] for c in result._rows if not isinstance(c[j], tuple)})
+            if len(values) >= 3 and best in (values[0], values[-1]):
+                warnings.warn(
+                    f"{self._name(j)}: the best value ({best:g}) is on the edge of its grid "
+                    f"({values[0]:g}-{values[-1]:g}), so it cannot move past it and the other "
+                    "coordinates' intervals come out too narrow; widen the grid", stacklevel=3)
+
+    def _name(self, j):
+        return f"segment {j + 1}" if j < self.n_dips else f"ratio {j - self.n_dips + 1}"
+
+    def _keys(self, j):
+        """The identifying columns of coordinate ``j``'s row."""
+        if j < self.n_dips:
+            return {"parameter": "dip", "segment": j + 1, "interval": np.nan}
+        return {"parameter": "ratio", "segment": np.nan, "interval": j - self.n_dips + 1}
 
     def intervals(self, level=0.95):
-        """Per segment: the estimate, its bootstrap sd, and two intervals at ``level``.
+        """Per coordinate: the estimate, its bootstrap sd, and two intervals at ``level``.
 
         ``normal`` is estimate -/+ z sd; ``basic`` reflects the replicates'
         quantiles about the estimate. A dip that changes with depth gets the
-        share of replicates choosing each candidate instead (``share``).
+        share of replicates choosing each candidate instead (``share``). A
+        contrast's ratios follow the dips, with ``parameter`` saying which is which.
         """
         from scipy.stats import norm
         z = float(norm.ppf(0.5 + level / 2))
@@ -919,20 +1087,20 @@ class BootstrapResult:
             if not isinstance(est, float):
                 keys, counts = np.unique(np.array([geometry_label(v) for v in column]),
                                          return_counts=True)
-                rows.append({"segment": j + 1, "estimate": geometry_label(est),
+                rows.append({**self._keys(j), "estimate": geometry_label(est),
                              "share": dict(zip(keys, counts / counts.sum()))})
                 continue
             values = column.astype(float)
             sd = float(np.std(values, ddof=1))
             q_lo, q_hi = np.percentile(values - values.mean(), [a, 100 - a])
-            rows.append({"segment": j + 1, "estimate": est, "sd": sd,
+            rows.append({**self._keys(j), "estimate": est, "sd": sd,
                          "normal_lo": est - z * sd, "normal_hi": est + z * sd,
                          "basic_lo": est - q_hi, "basic_hi": est - q_lo,
                          "grid_step": self.grid_step[j]})
         return pd.DataFrame(rows)
 
     def consistency(self):
-        """Weighted minus iid estimate per segment, against its spread under the noise model.
+        """Weighted minus iid estimate per coordinate, against its spread under the noise model.
 
         ``z`` is the observed difference less its bootstrap mean, over its
         bootstrap sd. With the forward model right, ``|z|`` is of order one; on
@@ -944,14 +1112,14 @@ class BootstrapResult:
         rows = []
         for j, est in enumerate(self.observed):
             if not (isinstance(est, float) and isinstance(self._other[0, j], float)):
-                rows.append({"segment": j + 1, "difference": np.nan, "sd": np.nan, "z": np.nan})
+                rows.append({**self._keys(j), "difference": np.nan, "sd": np.nan, "z": np.nan})
                 continue
             diffs = self._other[:, j].astype(float) - self._primary_column(j)
             if self.weighted:                 # report weighted minus iid either way round
                 diffs = -diffs
             observed, replicate = diffs[0], diffs[1:]
             sd = float(np.std(replicate, ddof=1))
-            rows.append({"segment": j + 1, "difference": float(observed),
+            rows.append({**self._keys(j), "difference": float(observed),
                          "mean": float(replicate.mean()), "sd": sd,
                          "z": float((observed - replicate.mean()) / sd) if sd > 0 else np.nan})
         return pd.DataFrame(rows)
@@ -964,8 +1132,7 @@ class BootstrapResult:
         for j, est in enumerate(self.observed):
             if isinstance(est, float):
                 sd = float(np.std(self.replicates[:, j].astype(float), ddof=1))
-                parts.append(f"{est:.2f} +- {sd:.2f}")
+                parts.append(f"{self._name(j)} {est:.3g} +- {sd:.2g}")
             else:
-                parts.append(geometry_label(est))
-        return (f"<BootstrapResult {len(self.replicates)} draws: "
-                + ", ".join(f"segment {j + 1} {p}" for j, p in enumerate(parts)) + ">")
+                parts.append(f"{self._name(j)} {geometry_label(est)}")
+        return f"<BootstrapResult {len(self.replicates)} draws: " + ", ".join(parts) + ">"

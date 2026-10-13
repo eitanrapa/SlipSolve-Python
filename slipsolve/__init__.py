@@ -51,6 +51,7 @@ Sign conventions, which matter more here than anywhere else in the package:
 from . import calibrate
 from ._geo import LosGrid, read_grd
 from .basis import ElementBasis, NodeBasis
+from .bimaterial import Bimaterial, RigidityContrast
 from .covariance import (
     correlated_field,
     CovarianceModel,
@@ -112,6 +113,7 @@ from .wavenumber import RemainderTables
 
 __all__ = [
     "ARCSEC_10",
+    "Bimaterial",
     "BootstrapResult",
     "CovarianceModel",
     "DipSweep",
@@ -131,6 +133,7 @@ __all__ = [
     "NodeBasis",
     "Observations",
     "RemainderTables",
+    "RigidityContrast",
     "SlipInversion",
     "SlipModel",
     "SweepResult",
