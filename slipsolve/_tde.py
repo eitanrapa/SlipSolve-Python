@@ -89,6 +89,149 @@ def tde_disp_hs(x, y, z, p1, p2, p3, ss, ds, ts, nu=0.25):
             uv_ms + uv_is + uv_fsc)
 
 
+def tde_disp_hs_unit(x, y, z, p1, p2, p3, nu=0.25):
+    """:func:`tde_disp_hs` for unit strike-, dip- and tensile-slip at once: ``(3, 3, npts)``.
+
+    Axis 0 is the slip component (strike, dip, tensile), axis 1 east/north/up. Every
+    term of the solution is a Burgers-vector component times a function of the
+    geometry alone, so the three slips share all the geometry and the cost is
+    close to one call's, not three. Equal to three :func:`tde_disp_hs` calls to
+    rounding (``tests/test_slip_tde.py``).
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    z = np.asarray(z, dtype=float).ravel()
+    p1 = np.asarray(p1, dtype=float).ravel()
+    p2 = np.asarray(p2, dtype=float).ravel()
+    p3 = np.asarray(p3, dtype=float).ravel()
+    if np.any(z > 0) or p1[2] > 0 or p2[2] > 0 or p3[2] > 0:
+        raise ValueError("Half-space solution: z coordinates must be <= 0")
+    if p1[2] == 0 and p2[2] == 0 and p3[2] == 0:
+        return np.zeros((3, 3, x.size))
+    unit = np.eye(3)[:, :, None]                     # (slip, component, 1)
+    ss, ds, ts = unit[:, 0], unit[:, 1], unit[:, 2]  # each (3, 1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ms = _disp_fs_m(x, y, z, p1, p2, p3, ss, ds, ts, nu)
+        fsc = _disp_har_func_m(x, y, z, p1, p2, p3, ss, ds, ts, nu)
+        q1, q2, q3 = p1.copy(), p2.copy(), p3.copy()
+        q1[2], q2[2], q3[2] = -q1[2], -q2[2], -q3[2]
+        image = _disp_fs_m(x, y, z, q1, q2, q3, ss, ds, ts, nu)
+    return ms + image + fsc
+
+
+def _rotate_m(a, u, v, w):
+    """``a @ [u; v; w]`` for components with a leading slip axis; ``(3, m, npts)``."""
+    return np.stack([a[i, 0] * u + a[i, 1] * v + a[i, 2] * w for i in range(3)])
+
+
+def _disp_fs_m(x, y, z, p1, p2, p3, ss, ds, ts, nu):
+    """:func:`_disp_fs` with ``ss``, ``ds``, ``ts`` of shape ``(m, 1)``; returns ``(m, 3, npts)``."""
+    bx, by, bz = ts, ss, ds
+    m = bx.shape[0]
+    vnorm, vstrike, vdip = _element_basis(p1, p2, p3, image=True)
+    at = np.column_stack([vnorm, vstrike, vdip]).T
+    xt, yt, zt = _coord_trans(x - p2[0], y - p2[1], z - p2[2], at)
+    q1 = np.asarray(_coord_trans(p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2], at)).ravel()
+    q2 = np.zeros(3)
+    q3 = np.asarray(_coord_trans(p3[0] - p2[0], p3[1] - p2[1], p3[2] - p2[2], at)).ravel()
+    e12 = (q2 - q1) / np.linalg.norm(q2 - q1)
+    e13 = (q3 - q1) / np.linalg.norm(q3 - q1)
+    e23 = (q3 - q2) / np.linalg.norm(q3 - q2)
+    a_ang = np.arccos(np.clip(e12 @ e13, -1.0, 1.0))
+    b_ang = np.arccos(np.clip(-e12 @ e23, -1.0, 1.0))
+    c_ang = np.arccos(np.clip(e23 @ e13, -1.0, 1.0))
+    trimode = _trimodefinder(yt, zt, xt, q1[1:], q2[1:], q3[1:])
+    u = np.zeros((m, xt.size))
+    v = np.zeros((m, xt.size))
+    w = np.zeros((m, xt.size))
+    for mask, sign in ((trimode == 1, 1.0), (trimode == -1, -1.0)):
+        if not mask.any():
+            continue
+        xs, ys, zs = xt[mask], yt[mask], zt[mask]
+        u1, v1, w1 = _setup_d_m(xs, ys, zs, a_ang, bx, by, bz, nu, q1, -sign * e13)
+        u2, v2, w2 = _setup_d_m(xs, ys, zs, b_ang, bx, by, bz, nu, q2, sign * e12)
+        u3, v3, w3 = _setup_d_m(xs, ys, zs, c_ang, bx, by, bz, nu, q3, sign * e23)
+        u[:, mask] = u1 + u2 + u3
+        v[:, mask] = v1 + v2 + v3
+        w[:, mask] = w1 + w2 + w3
+    on_side = trimode == 0
+    if on_side.any():
+        u[:, on_side] = v[:, on_side] = w[:, on_side] = np.nan
+    a = np.column_stack([-xt, q1[1] - yt, q1[2] - zt])
+    b = np.column_stack([-xt, -yt, -zt])
+    c = np.column_stack([-xt, q3[1] - yt, q3[2] - zt])
+    na = np.sqrt((a * a).sum(axis=1))
+    nb = np.sqrt((b * b).sum(axis=1))
+    nc = np.sqrt((c * c).sum(axis=1))
+    fi_n = (a[:, 0] * (b[:, 1] * c[:, 2] - b[:, 2] * c[:, 1])
+            - a[:, 1] * (b[:, 0] * c[:, 2] - b[:, 2] * c[:, 0])
+            + a[:, 2] * (b[:, 0] * c[:, 1] - b[:, 1] * c[:, 0]))
+    fi_d = (na * nb * nc + (a * b).sum(axis=1) * nc
+            + (a * c).sum(axis=1) * nb + (b * c).sum(axis=1) * na)
+    fi_n = np.where(fi_n == 0, -0.0, fi_n)
+    fi = -2.0 * np.arctan2(fi_n, fi_d) / (4.0 * np.pi)
+    u = bx * fi + u
+    v = by * fi + v
+    w = bz * fi + w
+    return np.moveaxis(_rotate_m(np.column_stack([vnorm, vstrike, vdip]), u, v, w), 0, 1)
+
+
+def _setup_d_m(x, y, z, alpha, bx, by, bz, nu, tri_vertex, side_vec):
+    """:func:`_setup_d` with a leading slip axis on the Burgers vector and the result."""
+    a = np.array([[side_vec[2], -side_vec[1]],
+                  [side_vec[1], side_vec[2]]])
+    r1 = a @ np.vstack([y - tri_vertex[1], z - tri_vertex[2]])
+    y1, z1 = r1[0], r1[1]
+    by1 = a[0, 0] * by + a[0, 1] * bz
+    bz1 = a[1, 0] * by + a[1, 1] * bz
+    u, v0, w0 = _ang_dis_disp(x, y1, z1, -np.pi + alpha, bx, by1, bz1, nu)
+    return u, a[0, 0] * v0 + a[1, 0] * w0, a[0, 1] * v0 + a[1, 1] * w0
+
+
+def _disp_har_func_m(x, y, z, p1, p2, p3, ss, ds, ts, nu):
+    """:func:`_disp_har_func` with a leading slip axis; returns ``(m, 3, npts)``."""
+    bx, by, bz = ts, ss, ds
+    vnorm, vstrike, vdip = _element_basis(p1, p2, p3, image=False)
+    a = np.column_stack([vnorm, vstrike, vdip])
+    b_x, b_y, b_z = _rotate_m(a, bx, by, bz)
+    total = 0.0
+    for pa, pb in ((p1, p2), (p2, p3), (p3, p1)):
+        total = total + _ang_setup_fsc_m(x, y, z, b_x, b_y, b_z, pa, pb, nu)
+    return total
+
+
+def _ang_setup_fsc_m(x, y, z, b_x, b_y, b_z, pa, pb, nu):
+    """:func:`_ang_setup_fsc` with a leading slip axis; returns ``(m, 3, npts)``."""
+    m = b_x.shape[0]
+    side_vec = pb - pa
+    e_z = np.array([0.0, 0.0, 1.0])
+    beta = np.arccos(np.clip(-(side_vec @ e_z) / np.linalg.norm(side_vec), -1.0, 1.0))
+    eps = np.finfo(float).eps
+    if abs(beta) < eps or abs(np.pi - beta) < eps:
+        return np.zeros((m, 3, x.size))
+    ey1 = np.array([side_vec[0], side_vec[1], 0.0])
+    ey1 = ey1 / np.linalg.norm(ey1)
+    ey3 = -e_z
+    ey2 = np.cross(ey3, ey1)
+    a = np.column_stack([ey1, ey2, ey3])
+    y1a, y2a, y3a = _coord_trans(x - pa[0], y - pa[1], z - pa[2], a)
+    y1ab, y2ab, y3ab = _coord_trans(side_vec[0], side_vec[1], side_vec[2], a)
+    y1b, y2b, y3b = y1a - y1ab[0], y2a - y2ab[0], y3a - y3ab[0]
+    b1, b2, b3 = _rotate_m(a, b_x, b_y, b_z)
+    va = np.zeros((3, m, x.size))
+    vb = np.zeros((3, m, x.size))
+    sel = (beta * y1a) >= 0
+    for mask, ang in ((sel, -np.pi + beta), (~sel, beta)):
+        if not mask.any():
+            continue
+        va[:, :, mask] = _ang_dis_disp_fsc(y1a[mask], y2a[mask], y3a[mask], ang,
+                                           b1, b2, b3, nu, -pa[2])
+        vb[:, :, mask] = _ang_dis_disp_fsc(y1b[mask], y2b[mask], y3b[mask], ang,
+                                           b1, b2, b3, nu, -pb[2])
+    d = vb - va
+    return np.moveaxis(_rotate_m(a.T, d[0], d[1], d[2]), 0, 1)
+
+
 def _element_basis(p1, p2, p3, image=False):
     """Unit normal, strike and dip vectors of a TD, the reference's way.
 

@@ -155,6 +155,28 @@ def test_linearity_in_slip():
     np.testing.assert_allclose(both, 2.0 * ss - 3.0 * ds, rtol=1e-9, atol=0)
 
 
+@pytest.mark.parametrize("tri", [
+    [[0.0, 0.0, 0.0], [3000.0, 0.0, 0.0], [1500.0, 0.0, -4000.0]],          # vertical, at the surface
+    [[0.0, 0.0, -1000.0], [2000.0, 500.0, -1500.0], [800.0, 1800.0, -5000.0]],
+    [[0.0, 0.0, -500.0], [2000.0, 0.0, -500.0], [1000.0, 1500.0, -500.0]],    # horizontal
+], ids=["vertical", "dipping", "horizontal"])
+def test_three_slips_at_once_are_three_calls(tri):
+    """``tde_disp_hs_unit`` shares the geometry between the three unit slips, nothing else."""
+    from slipsolve._tde import tde_disp_hs_unit
+
+    rng = np.random.default_rng(0)
+    x, y = rng.uniform(-8e3, 8e3, (2, 300))
+    z = -rng.uniform(0.0, 9e3, 300)
+    z[:80] = 0.0
+    tri = np.asarray(tri)
+    together = tde_disp_hs_unit(x, y, z, *tri, 0.27)
+    for c in range(3):
+        slip = [0.0, 0.0, 0.0]
+        slip[c] = 1.0
+        alone = np.stack(tde_disp_hs(x, y, z, *tri, *slip, 0.27))
+        np.testing.assert_allclose(together[c], alone, rtol=0, atol=1e-13 * np.abs(alone).max())
+
+
 def test_zero_slip_gives_exactly_zero():
     x, y, z = _surface_grid()
     tde = _tde_rectangle(70.0, (0.0, 0.0, 0.0), x, y, z)
