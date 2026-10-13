@@ -387,6 +387,24 @@ def _ramp_term_label(degree, i):
     return "d" + "x" * (degree - i) + "y" * i
 
 
+def _track_regions(ds, sel, name):
+    """``(mask, label)`` per offset column of one track: one, or one per region.
+
+    The region with the most samples keeps the plain ``"{name}:offset"`` label
+    (ties go to the lower label), so a track sampled without regions, or whose
+    samples all share one, is built exactly as before.
+    """
+    if "region" not in ds:
+        return [(sel, f"{name}:offset")]
+    region = np.asarray(ds["region"].values, dtype=np.int64)
+    values, counts = np.unique(region[sel], return_counts=True)
+    if values.size <= 1:
+        return [(sel, f"{name}:offset")]
+    order = np.lexsort((values, -counts))
+    return [(region == values[k], f"{name}:offset" if j == 0 else f"{name}:offset@{values[k]}")
+            for j, k in enumerate(order)]
+
+
 def ramp_kind_for(n_columns, n_tracks):
     """Which :func:`ramp_columns` kind produced ``n_columns`` over ``n_tracks``.
 
@@ -458,6 +476,15 @@ def ramp_columns(obs, kind="linear"):
 
     The reference implementation reserves space for this and never uses it -- its
     ``bounds_new`` takes an ``add_col`` argument that every caller passes as zero.
+
+    **One offset per region.** A track sampled with ``regions=``
+    (:meth:`~slipsolve.sampling.Observations.from_los`) gets an offset for each
+    region it has samples in, because each region an unwrapper sees on its own
+    carries its own constant: ``"{track}:offset"`` for the region with the most
+    samples, ``"{track}:offset@{label}"`` for the others. The ramp's gradient and
+    higher terms stay one per track, shared by all its regions -- an orbit or
+    ionosphere ramp does not stop at a coastline. ⚠️ With ``kind="none"`` there
+    are no columns at all, so the regions do nothing.
     """
     if kind == "none":
         return np.zeros((obs.n, 0)), []
@@ -485,8 +512,9 @@ def ramp_columns(obs, kind="linear"):
         cx[sel] = (x[sel] - x[sel].mean()) / span
         cy[sel] = (y[sel] - y[sel].mean()) / span
 
-        columns.append(sel.astype(float))
-        labels.append(f"{name}:offset")
+        for region, label in _track_regions(ds, sel, name):
+            columns.append((sel & region).astype(float))
+            labels.append(label)
         # Total-degree monomials, cx**(d-i) * cy**i. Both factors are zero off
         # this track, so every product is -- but only because the loop starts at
         # d=1: at d=0 both exponents are zero and `cx**0` is *one everywhere*,

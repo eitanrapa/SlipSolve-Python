@@ -28,7 +28,11 @@ fault surface:
 - **model-based quadtree subsampling** of each scene (Lohman & Simons 2005,
   Wang & Fialko 2015);
 - **Laplace–Beltrami regularisation** with bound constraints, and per-track
-  ramp and offset terms solved *jointly* with slip;
+  ramp and offset terms solved *jointly* with slip. A scene unwrapped in
+  separate regions (islands, or a block cut off along the rupture so the
+  unwrapper cannot cross it) gets one offset per region:
+  `Observations.from_los(..., regions="connected")`, and no sample mixes two
+  regions;
 - **resolution analysis** — the model resolution matrix, effective rank,
   anisotropic averaging kernels, posterior covariance and regularisation bias;
 - **measured data covariance** — an exponential variogram fitted per track from

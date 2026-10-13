@@ -33,7 +33,8 @@ class Observations:
     Wraps an :class:`xarray.Dataset` on a single ``obs`` dimension carrying
     ``x``, ``y`` (local frame metres), ``los`` (metres, positive toward the
     sensor), ``look_e``/``look_n``/``look_u`` (target->sensor unit vector),
-    ``std`` (the within-cell scatter), ``weight`` and ``track``.
+    ``std`` (the within-cell scatter), ``weight`` and ``track``; and ``region``
+    when the track was sampled with ``regions=`` (see :meth:`from_los`).
     """
 
     STAGE = "slip_observations"
@@ -46,7 +47,7 @@ class Observations:
     def from_los(cls, los_stack, pair=0, name="track", frame=None, trace=None,
                  rms_min=0.005, width_min=1000.0, width_max=20000.0,
                  min_valid_fraction=0.5, exclude_within=0.0, stat="mean",
-                 field=None, refine_within=0.0):
+                 field=None, refine_within=0.0, regions=None):
         """Quadtree-downsample one pair of a gridded LOS product.
 
         ``rms_min`` is the within-cell standard deviation (metres) below which a
@@ -87,6 +88,18 @@ class Observations:
         model curvature, not a noise level, so
         :func:`~slipsolve.diagnostics.scene_report`'s recommendation does
         not apply -- use :func:`~slipsolve.diagnostics.model_rms_min`.
+
+        **Regions unwrapped apart.** Each connected region of an unwrapped
+        interferogram carries its own arbitrary constant: an island, or a block
+        cut off along the fault on purpose so the unwrapper cannot cross it.
+        ``regions`` says where they are, and each region then gets its own offset
+        column (:func:`~slipsolve.regularize.ramp_columns`), so no tie between
+        regions is taken on trust. ``"connected"`` labels the 4-connected regions
+        of the valid pixels, which is how SNAPHU's grid joins them; or pass an
+        integer ``(ny, nx)`` label map (``<= 0`` = unused). No cell mixes two
+        regions: a mixed cell keeps splitting, and one that reaches ``width_min``
+        is reduced over its majority region's pixels only. Each sample records its
+        label in ``region``. ``None`` (the default) is the old sampler exactly.
         """
         if stat not in ("mean", "median"):
             raise ValueError("stat must be 'mean' or 'median'")
@@ -115,6 +128,9 @@ class Observations:
         ])
 
         valid = np.isfinite(los) & np.all(np.isfinite(look), axis=0)
+        region_map = _region_map(regions, valid)
+        if region_map is not None:
+            valid = valid & (region_map > 0)
 
         split_on = los
         if field is not None:
@@ -155,22 +171,24 @@ class Observations:
             max_cols=max(1, int(round(width_max / dx))),
             min_valid_fraction=min_valid_fraction,
             refine=refine,
+            regions=region_map,
         )
         if not cells:
             raise ValueError(
                 "Quadtree produced no samples; loosen rms_min or min_valid_fraction"
             )
 
-        rows = _reduce_cells(cells, los, look, valid, x_native, y_native, stat)
+        rows = _reduce_cells(cells, los, look, valid, x_native, y_native, stat,
+                             regions=region_map, min_valid_fraction=min_valid_fraction)
 
         # Native grid metres -> the shared local frame. Averaging in the native
         # projection and transforming once is exact to well under a metre over a
         # cell, and avoids transforming every pixel of the raster.
         fx, fy = _to_frame(rows["x"], rows["y"], frame, epsg)
 
-        keep = np.ones(fx.size, dtype=bool)
+        keep = rows.pop("keep")
         if exclude_within > 0:
-            keep = trace.distance(fx, fy, frame) > exclude_within
+            keep = keep & (trace.distance(fx, fy, frame) > exclude_within)
             if not keep.any():
                 raise ValueError(
                     f"exclude_within={exclude_within} m removed every sample"
@@ -191,6 +209,8 @@ class Observations:
                 "track": ("obs", np.full(int(keep.sum()), name, dtype=object)),
             }
         )
+        if region_map is not None:
+            out["region"] = ("obs", rows["region"][keep].astype(np.int64))
         quadtree = {
             "rms_min": float(rms_min),
             "width_min": float(width_min),
@@ -204,6 +224,9 @@ class Observations:
             # hash it had before model-based sampling existed.
             quadtree["field"] = "model"
             quadtree["refine_within"] = float(refine_within)
+        if region_map is not None:
+            # Folded in only when used, like ``field``.
+            quadtree["regions"] = regions if isinstance(regions, str) else "labels"
 
         out.attrs.update(
             frame=frame.to_dict(),
@@ -268,6 +291,12 @@ class Observations:
                     factor[track == track_name] *= float(weights.get(str(track_name), 1.0))
             ds["weight"] = ("obs", ds["weight"].values * factor)
             parts.append(ds)
+        # A track sampled without ``regions`` is one region (label 0) beside those
+        # that were; ``xr.concat`` would refuse the missing variable.
+        if any("region" in p for p in parts):
+            for p in parts:
+                if "region" not in p:
+                    p["region"] = ("obs", np.zeros(p.sizes["obs"], dtype=np.int64))
 
         out = xr.concat(parts, dim="obs", combine_attrs="drop_conflicts")
         out.attrs["frame"] = frame
@@ -393,8 +422,29 @@ def _frame_for(ds):
     return LocalFrame(float(lon), float(lat))
 
 
+def _region_map(regions, valid):
+    """``regions`` as an integer label map on the stack's grid, or ``None``."""
+    if regions is None:
+        return None
+    if isinstance(regions, str):
+        if regions != "connected":
+            raise ValueError(f"regions must be 'connected' or a label map, got {regions!r}")
+        from scipy import ndimage
+
+        # 4-connected (the default structure): SNAPHU's grid joins a pixel to its
+        # four neighbours, so two areas touching only at a corner unwrap apart.
+        return ndimage.label(valid)[0].astype(np.int64)
+    labels = np.asarray(regions.values if hasattr(regions, "values") else regions)
+    if labels.shape != valid.shape:
+        raise ValueError(f"regions has shape {labels.shape}, but the stack's grid is "
+                         f"{valid.shape}")
+    if not np.issubdtype(labels.dtype, np.integer):
+        raise ValueError(f"regions must be an integer label map, got dtype {labels.dtype}")
+    return labels.astype(np.int64)
+
+
 def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
-                    max_rows, max_cols, min_valid_fraction, refine=None):
+                    max_rows, max_cols, min_valid_fraction, refine=None, regions=None):
     """Index rectangles ``(r0, r1, c0, c1)`` surviving the variance split.
 
     Constant-time per candidate: the count, sum and sum of squares over any
@@ -410,6 +460,12 @@ def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
     ``refine`` is an optional boolean mask of pixels that must be resolved to
     ``min_rows``/``min_cols`` regardless of how flat ``values`` is over them. It
     rides on a fourth table, so the test stays O(1) per candidate.
+
+    ``regions`` (an integer label map) makes a cell holding valid pixels of two
+    regions split as if it were rough. The test is exact: with ``n``, ``S1`` and
+    ``S2`` the count, sum and sum of squares of the labels in the cell, all equal
+    iff ``n S2 == S1**2``, read from integer tables and multiplied as Python
+    integers, so no rounding can call a mixed cell pure.
     """
     v = np.where(valid, values, 0.0)
     m = valid.astype(np.float64)
@@ -417,6 +473,14 @@ def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
     s1 = _sat(v)
     s2 = _sat(v * v)
     s3 = None if refine is None else _sat(np.asarray(refine, dtype=np.float64))
+    if regions is not None:
+        # Consecutive labels keep the integer sums small.
+        dense = np.zeros(regions.shape, dtype=np.int64)
+        used = valid & (regions > 0)
+        dense[used] = np.unique(regions[used], return_inverse=True)[1] + 1
+        t0 = _sat_int(used.astype(np.int64))
+        t1 = _sat_int(dense)
+        t2 = _sat_int(dense * dense)
 
     def block(sat, r0, r1, c0, c1):
         return sat[r1, c1] - sat[r0, c1] - sat[r1, c0] + sat[r0, c0]
@@ -436,6 +500,11 @@ def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
             rough = np.sqrt(max(var, 0.0)) > rms_min
         if s3 is not None and block(s3, r0, r1, c0, c1) > 0:
             rough = True
+        if regions is not None and not rough:
+            n_lab = int(block(t0, r0, r1, c0, c1))
+            if n_lab > 1:
+                s_lab = int(block(t1, r0, r1, c0, c1))
+                rough = n_lab * int(block(t2, r0, r1, c0, c1)) != s_lab * s_lab
 
         # Each axis is halved only if the halves stay above that axis's minimum
         # width -- decided per axis, not once for the cell. Deciding jointly lets
@@ -462,22 +531,38 @@ def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
     return out
 
 
-def _reduce_cells(cells, los, look, valid, x_native, y_native, stat):
+def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=None,
+                  min_valid_fraction=0.0):
     """Collapse each surviving cell to one sample.
 
     Every quantity is averaged over the *same* valid pixels -- the cell is an
     index rectangle, so the data, the look vector and the coordinates cannot
     disagree about which pixels they came from.
+
+    With ``regions``, a cell still holding two regions (one that reached the
+    minimum width) is reduced over its majority region's pixels only, and dropped
+    (``keep`` False) if those fall under ``min_valid_fraction`` of the cell.
     """
     n = len(cells)
     out = {k: np.empty(n) for k in
            ("x", "y", "los", "look_e", "look_n", "look_u", "std", "cell_size",
             "count")}
+    out["keep"] = np.ones(n, dtype=bool)
+    if regions is not None:
+        out["region"] = np.zeros(n, dtype=np.int64)
     dx = abs(float(np.diff(x_native)[0]))
     dy = abs(float(np.diff(y_native)[0]))
 
     for i, (r0, r1, c0, c1) in enumerate(cells):
         m = valid[r0:r1, c0:c1]
+        if regions is not None:
+            lab = regions[r0:r1, c0:c1]
+            values, counts = np.unique(lab[m], return_counts=True)
+            major = values[np.argmax(counts)]
+            if values.size > 1:
+                m = m & (lab == major)
+                out["keep"][i] = m.sum() >= min_valid_fraction * (r1 - r0) * (c1 - c0)
+            out["region"][i] = major
         d = los[r0:r1, c0:c1][m]
         out["los"][i] = np.median(d) if stat == "median" else d.mean()
         out["std"][i] = d.std() if d.size > 1 else 0.0
@@ -508,4 +593,11 @@ def _sat(a):
     """Summed-area table with a zero first row and column."""
     out = np.zeros((a.shape[0] + 1, a.shape[1] + 1), dtype=np.float64)
     np.cumsum(np.cumsum(a, axis=0), axis=1, out=out[1:, 1:])
+    return out
+
+
+def _sat_int(a):
+    """:func:`_sat` in exact integers."""
+    out = np.zeros((a.shape[0] + 1, a.shape[1] + 1), dtype=np.int64)
+    np.cumsum(np.cumsum(a, axis=0, dtype=np.int64), axis=1, out=out[1:, 1:])
     return out
