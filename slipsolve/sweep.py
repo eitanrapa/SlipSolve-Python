@@ -91,7 +91,8 @@ from .evidence import GeometryEvidence, smoothing_precision
 from .inversion import DEFAULT_SHEAR_MODULUS, SlipInversion, SlipModel, _boundary_rows
 from .layout import graded_layout
 from .mesh import FaultMesh, _arc_length, _depth_levels
-from .regularize import laplace_beltrami, ramp_columns, slip_bounds
+from .regularize import (check_ramp_tracks, laplace_beltrami, ramp_columns, ramp_spec,
+                         slip_bounds)
 from .resolution import JITTER
 from .surface import FaultSurface, centres
 
@@ -343,7 +344,7 @@ class DipSweep:
         self.layout = segmented_layout(self.breaks, self.depths, self.edge_length)
         self.dips = tuple(dict.fromkeys(geometry_key(v) for v in dips))
         self.engine = engine
-        self.ramp_kind = str(ramp)
+        self.ramp_kind = ramp_spec(ramp)
         self.velocity_model = velocity_model
         self.reference_dip = float(reference_dip)
         self.sides = tuple(sides)
@@ -363,7 +364,8 @@ class DipSweep:
         self.d = np.array(ds["los"].values, dtype=float)
         self.w = np.array(ds["weight"].values, dtype=float)
         self.track = np.asarray(ds["track"].values).astype(str)
-        self.ramp, self.ramp_labels = ramp_columns(obs, ramp)
+        check_ramp_tracks(self.ramp_kind, obs.tracks)
+        self.ramp, self.ramp_labels = ramp_columns(obs, self.ramp_kind)
 
         self.options = dict(ss_ratio=float(ss_ratio), ds_ratio=float(ds_ratio),
                             boundary_ratio=float(boundary_ratio), sides=list(sides),

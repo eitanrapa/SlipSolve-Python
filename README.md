@@ -33,6 +33,12 @@ fault surface:
   unwrapper cannot cross it) gets one offset per region:
   `Observations.from_los(..., regions="connected")`, and no sample mixes two
   regions;
+- **pixel offsets as data** beside InSAR. A slant-range or along-track offset map
+  is a track like any other, carrying its own unit vector (an along-track one is
+  horizontal). Each track can take its own nuisance ramp, e.g.
+  `ramp={"*": "cubic", "A061_az": "offset"}`, and should be weighted by its noise
+  (`covariance={track: model}`), not by sample count. nisar_tools'
+  `roff.offset_los_stacks` makes both stacks from a ROFF;
 - **resolution analysis** — the model resolution matrix, effective rank,
   anisotropic averaging kernels, posterior covariance and regularisation bias;
 - **measured data covariance** — an exponential variogram fitted per track from

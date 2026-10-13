@@ -40,8 +40,10 @@ from .greens import HalfSpaceTDE
 from .regularize import (
     laplace_beltrami,
     neighbor_smoothing,
+    check_ramp_tracks,
     ramp_columns,
     ramp_kind_for,
+    ramp_spec,
     scale_smoothing,
     slip_bounds,
     zero_slip_boundary,  # noqa: F401  (public API, and used by callers)
@@ -192,7 +194,9 @@ class SlipInversion:
         """``engine`` and ``basis`` choose the physics and the parameterization.
 
         ``ramp`` adds unbounded per-track nuisance columns -- ``"none"``,
-        ``"offset"``, ``"linear"`` or ``"quadratic"`` (see
+        ``"offset"``, ``"linear"``, ``"quadratic"`` or ``"cubic"``, or a
+        ``{track: kind}`` dict with ``"*"`` for the rest, e.g. a cubic for the
+        interferograms and an offset for pixel-offset tracks (see
         :func:`~slipsolve.regularize.ramp_columns`). Solving the ramp here
         is preferable to pre-removing it with
         :meth:`~nisar_tools.unwrap.UnwrappedStack.deramp`: a pre-removal fits the
@@ -253,8 +257,9 @@ class SlipInversion:
             self.g = (element_g if self.basis.name == "element"
                       else element_g @ _blocked(self.basis.projection()))
 
-        self.ramp, self.ramp_labels = ramp_columns(obs, ramp)
-        self.ramp_kind = str(ramp)
+        self.ramp_kind = ramp_spec(ramp)
+        check_ramp_tracks(self.ramp_kind, obs.tracks)
+        self.ramp, self.ramp_labels = ramp_columns(obs, self.ramp_kind)
         self.n_slip = self.basis.n_param
         self.n_ramp = self.ramp.shape[1]
 
@@ -329,8 +334,9 @@ class SlipInversion:
         import copy
 
         other = copy.copy(self)
-        other.ramp, other.ramp_labels = ramp_columns(self.obs, kind)
-        other.ramp_kind = str(kind)
+        other.ramp_kind = ramp_spec(kind)
+        check_ramp_tracks(other.ramp_kind, self.obs.tracks)
+        other.ramp, other.ramp_labels = ramp_columns(self.obs, other.ramp_kind)
         other.n_ramp = other.ramp.shape[1]
         return other
 

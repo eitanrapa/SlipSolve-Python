@@ -485,16 +485,15 @@ def ramp_columns(obs, kind="linear"):
     higher terms stay one per track, shared by all its regions -- an orbit or
     ionosphere ramp does not stop at a coastline. ⚠️ With ``kind="none"`` there
     are no columns at all, so the regions do nothing.
+
+    **A kind per track.** ``kind`` may be a ``{track: kind}`` mapping, ``"*"``
+    standing for the tracks it does not name (:func:`ramp_spec`): pixel offsets
+    beside InSAR want an offset, or a plane, where the interferograms want a cubic,
+    and a track given ``"none"`` gets no columns.
     """
-    if kind == "none":
+    spec = ramp_spec(kind)
+    if spec == "none":
         return np.zeros((obs.n, 0)), []
-    if kind not in RAMP_DEGREE:
-        raise ValueError(
-            "kind must be 'none' or one of "
-            + ", ".join(repr(k) for k in RAMP_DEGREE)
-            + f", got {kind!r}"
-        )
-    degree = RAMP_DEGREE[kind]
 
     ds = obs.ds
     track = ds["track"].values
@@ -503,6 +502,12 @@ def ramp_columns(obs, kind="linear"):
 
     columns, labels = [], []
     for name in [str(t) for t in np.unique(track)]:
+        own = spec if isinstance(spec, str) else spec.get(name, spec.get("*"))
+        if own is None:
+            raise ValueError(f"ramp gives no kind for track {name!r}; name it or add a '*' default")
+        if own == "none":
+            continue
+        degree = RAMP_DEGREE[own]
         sel = track.astype(str) == name
         # Centre and scale each track's coordinates so the ramp columns are O(1)
         # and do not dominate the conditioning of the joint system.
@@ -524,4 +529,36 @@ def ramp_columns(obs, kind="linear"):
                 columns.append(cx ** (d - i) * cy ** i)
                 labels.append(f"{name}:{_ramp_term_label(d, i)}")
 
+    if not columns:
+        return np.zeros((obs.n, 0)), []
     return np.column_stack(columns), labels
+
+
+def ramp_spec(ramp):
+    """``ramp`` as stored: one kind for every track, or a ``{track: kind}`` dict.
+
+    ``"*"`` in a mapping stands for the tracks it does not name. Each kind is
+    ``"none"`` or one of :data:`RAMP_DEGREE`, checked here. A mapping is kept as a
+    plain dict of strings, so it travels in a saved model's options as JSON.
+    """
+    def check(kind):
+        if kind != "none" and kind not in RAMP_DEGREE:
+            raise ValueError("kind must be 'none' or one of "
+                             + ", ".join(repr(k) for k in RAMP_DEGREE) + f", got {kind!r}")
+        return kind
+
+    if isinstance(ramp, dict):
+        return {str(name): check(str(kind)) for name, kind in ramp.items()}
+    return check(str(ramp))
+
+
+def check_ramp_tracks(spec, tracks):
+    """Refuse a ``{track: kind}`` ramp naming a track the observations lack, or missing one."""
+    if not isinstance(spec, dict):
+        return
+    unknown = sorted(set(spec) - set(tracks) - {"*"})
+    if unknown:
+        raise ValueError(f"ramp names tracks the observations do not have: {unknown}")
+    missing = [t for t in tracks if t not in spec and "*" not in spec]
+    if missing:
+        raise ValueError(f"ramp gives no kind for {missing}; name them or add a '*' default")
