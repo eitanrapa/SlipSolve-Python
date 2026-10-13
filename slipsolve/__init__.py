@@ -75,6 +75,7 @@ from .frame import LocalFrame
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel
 from .layered import LayeredPointSource
+from .layered_tde import LayeredTDE
 from .layout import MeshLayout, graded_layout, lloyd_layout, triangulate
 from .mesh import FaultMesh
 from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
@@ -107,6 +108,7 @@ from .surface import FaultSurface, gridfit
 from .sweep import (BootstrapResult, DipSweep, SweepResult, dip_profile_offsets,
                     geometry_key, segment_breaks)
 from .trace import FaultSegment, FaultTrace
+from .wavenumber import RemainderTables
 
 __all__ = [
     "ARCSEC_10",
@@ -122,11 +124,13 @@ __all__ = [
     "GeometryEvidence",
     "HalfSpaceTDE",
     "LayeredPointSource",
+    "LayeredTDE",
     "LocalFrame",
     "LosGrid",
     "MeshLayout",
     "NodeBasis",
     "Observations",
+    "RemainderTables",
     "SlipInversion",
     "SlipModel",
     "SweepResult",

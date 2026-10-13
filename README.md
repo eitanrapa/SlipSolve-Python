@@ -21,8 +21,10 @@ fault surface:
 
 - **curved fault meshes** built from a surface trace, with element-constant or
   nodal (P1) slip;
-- **layered elastic Green's functions** via EDGRN/EDCMP, or a closed-form
-  homogeneous half-space (Nikkhoo & Walter triangular dislocations);
+- **layered elastic Green's functions** from the package's own wavenumber-domain
+  solver (`RemainderTables`, `LayeredTDE`): exact near the fault, at depth too.
+  EDGRN/EDCMP tables (`LayeredPointSource`) and a closed-form homogeneous
+  half-space (Nikkhoo & Walter triangular dislocations) remain available;
 - **model-based quadtree subsampling** of each scene (Lohman & Simons 2005,
   Wang & Fialko 2015);
 - **Laplace–Beltrami regularisation** with bound constraints, and per-track
