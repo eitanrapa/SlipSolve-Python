@@ -88,7 +88,8 @@ from scipy.optimize import brentq
 from .basis import NodeBasis
 from .covariance import CovarianceModel, fit_reml, observation_covariance
 from .evidence import GeometryEvidence, smoothing_precision
-from .inversion import DEFAULT_SHEAR_MODULUS, SlipInversion, SlipModel, _boundary_rows
+from .inversion import (DEFAULT_SHEAR_MODULUS, SlipInversion, SlipModel, _boundary_rows,
+                        box_qp)
 from .layout import graded_layout
 from .mesh import FaultMesh, _arc_length, _depth_levels
 from .regularize import (check_ramp_tracks, laplace_beltrami, ramp_columns, ramp_spec,
@@ -219,28 +220,13 @@ def segmented_layout(breaks, depths, edge_length):
 
 
 def _box_qp(N, g, lo, hi, x0, max_iter=100):
-    """Minimise ``x'Nx/2 - g'x`` under ``lo <= x <= hi``, exactly, by primal-dual active set.
+    """Minimise ``x'Nx/2 - g'x`` under ``lo <= x <= hi``, exactly; the minimiser.
 
-    The same problem :meth:`SlipInversion.solve` hands ``lsq_linear``, written in
-    its normal equations. Each step solves the free block exactly, so a converged
-    answer is the minimiser and not an approximation to it. Started from a nearby
-    solution, as in a sweep, it settles in a few steps.
+    :func:`slipsolve.inversion.box_qp`, which ``SlipInversion.solve(
+    method="active_set")`` uses too. Started from a nearby solution, as in a
+    sweep, it settles in a few steps.
     """
-    at_lo = np.isfinite(lo) & (x0 <= lo + 1e-4)
-    at_hi = np.isfinite(hi) & (x0 >= hi - 1e-4)
-    for _ in range(max_iter):
-        free = ~(at_lo | at_hi)
-        x = np.where(at_lo, lo, np.where(at_hi, hi, 0.0))
-        if free.any():
-            rhs = g[free] - N[np.ix_(free, ~free)] @ x[~free]
-            x[free] = cho_solve(cho_factor(N[np.ix_(free, free)], lower=True), rhs)
-        mu = N @ x - g
-        new_lo = np.isfinite(lo) & ((free & (x < lo)) | (at_lo & (mu > 0)))
-        new_hi = np.isfinite(hi) & ((free & (x > hi)) | (at_hi & (mu < 0)))
-        if np.array_equal(new_lo, at_lo) and np.array_equal(new_hi, at_hi):
-            return x
-        at_lo, at_hi = new_lo, new_hi
-    raise RuntimeError("the bounded solve's active set did not settle")
+    return box_qp(N, g, lo, hi, x0, max_iter).x
 
 
 def _better(a, b):

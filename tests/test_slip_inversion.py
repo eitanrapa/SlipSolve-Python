@@ -361,6 +361,171 @@ def test_lsmr_tol_auto_is_the_default_and_cuts_work(recovery, monkeypatch):
         np.testing.assert_allclose(fast.strike_slip, slow.strike_slip, atol=0.05)
 
 
+# -- the active-set solver ---------------------------------------------------
+
+def _stacked(inversion, smoothing, polarity=(-1, 0, 0)):
+    """The solve's stacked system, dense, and its bounds: for an independent referee."""
+    import scipy.sparse as sp
+
+    from slipsolve.inversion import _boundary_rows
+    from slipsolve.regularize import laplace_beltrami, scale_smoothing
+
+    if inversion.basis.name == "element":
+        smooth = neighbor_smoothing(inversion.mesh.neighbors, 1.0, 3.0,
+                                    weighting="uniform", mesh=inversion.mesh)
+    else:
+        smooth = laplace_beltrami(inversion.mesh, 1.0, 3.0)
+    boundary = _boundary_rows(inversion.basis, ("bottom", "left", "right"), 1.0)
+    lo, hi = slip_bounds(inversion.basis.n_basis, (-10.0, 10.0), (-10.0, 10.0), polarity)
+    k = inversion.n_ramp
+    if k:
+        smooth = sp.hstack([smooth, sp.csr_matrix((smooth.shape[0], k))], format="csr")
+        boundary = sp.hstack([boundary, sp.csr_matrix((boundary.shape[0], k))], format="csr")
+        lo = np.concatenate([lo, np.full(k, -np.inf)])
+        hi = np.concatenate([hi, np.full(k, np.inf)])
+    design = np.hstack([inversion.g, inversion.ramp]) if k else inversion.g
+    a = np.vstack([inversion.whiten(design), scale_smoothing(smooth, smoothing).toarray(),
+                   boundary.toarray()])
+    b = np.concatenate([inversion.whiten(inversion.d), np.zeros(a.shape[0] - inversion.obs.n)])
+    return a, b, lo, hi
+
+
+def _bvls(inversion, smoothing):
+    """BVLS on the dense stacked system: exact, and without squaring the condition number."""
+    from scipy.optimize import lsq_linear
+
+    a, b, lo, hi = _stacked(inversion, smoothing)
+    ref = lsq_linear(a, b, bounds=(lo, hi), method="bvls", tol=1e-13, max_iter=5000)
+    # BVLS can also stop on a small change in cost (status 2), which is not exact.
+    assert ref.status == 1, f"the referee did not converge exactly: {ref.message}"
+    return ref.x
+
+
+def test_box_qp_is_the_bounded_minimiser():
+    """Against BVLS on the Cholesky factor, an independent exact method."""
+    from scipy.linalg import cholesky
+    from scipy.optimize import lsq_linear
+
+    from slipsolve.inversion import box_qp
+
+    rng = np.random.default_rng(3)
+    a = rng.normal(size=(60, 25))
+    N = a.T @ a + 0.1 * np.eye(25)
+    g = 3.0 * a.T @ rng.normal(size=60)
+    lo, hi = np.full(25, -0.5), np.full(25, 0.5)
+    lo[:5], hi[:5] = -np.inf, np.inf        # unbounded, as the ramp columns are
+    hi[5:10] = 0.0                          # one-signed, as under a polarity
+
+    qp = box_qp(N, g, lo, hi)
+    r = cholesky(N)                         # x'Nx/2 - g'x = |Rx - R^-T g|^2 / 2 + const
+    ref = lsq_linear(r, np.linalg.solve(r.T, g), bounds=(lo, hi), method="bvls", tol=1e-14)
+    assert (qp.at_lo | qp.at_hi).sum() >= 3, "the bounds must be doing something"
+    np.testing.assert_allclose(qp.x, ref.x, atol=1e-10)
+    assert qp.kkt < 1e-12 and 0.0 < qp.rcond <= 1.0
+    # Started from its own answer, the active set is already right.
+    assert box_qp(N, g, lo, hi, x0=qp.x).nit == 1
+
+
+def test_active_set_is_the_exact_minimiser(setup, recovery):
+    """The active-set answer is the minimiser; ``lsq_linear`` stops short of it.
+
+    Measured on this fixture against BVLS on the stacked system: the active set
+    agrees with it to 3e-13 m (element basis, lam 0.3) and 1e-10 m (nodes and a
+    quadratic ramp, lam 0.002), while ``lsq_linear`` sits 0.36 mm and 48 mm away
+    at a cost 1.1e-5 and 3.1e-6 higher, though it reports convergence.
+    """
+    _, _, mesh = setup
+    _, _, obs, inversion = recovery
+    nodes = SlipInversion(mesh, obs, basis="node", ramp="quadratic")
+    for inv, lam in ((inversion, 0.3), (nodes, 0.002)):
+        got = inv.solve(smoothing=lam, polarity=(-1, 0, 0), method="active_set")
+        assert got.options["method"] == "active_set" and got.converged
+        np.testing.assert_allclose(got.x, _bvls(inv, lam), atol=1e-8)
+
+
+def test_active_set_agrees_with_lsq_linear(recovery, tmp_path):
+    """The same problem: never a higher cost, the same slip, and the bounds held exactly."""
+    _, _, _, inversion = recovery
+    for lam in (2.0, 0.3):
+        ref = inversion.solve(smoothing=lam, polarity=(-1, 0, 0))
+        got = inversion.solve(smoothing=lam, polarity=(-1, 0, 0), method="active_set")
+        assert got.converged and got.options["method"] == "active_set"
+        assert got.result.cost <= ref.result.cost
+        # Measured 0.04 / 0.36 mm, all of it lsq_linear stopping short.
+        np.testing.assert_allclose(got.strike_slip, ref.strike_slip, atol=1e-3)
+        np.testing.assert_allclose(got.dip_slip, ref.dip_slip, atol=1e-3)
+        assert got.moment_magnitude == pytest.approx(ref.moment_magnitude, abs=1e-4)
+        assert np.all(got.strike_slip <= 0.0)
+    assert got.to_dataset().attrs["options"]["method"] == "active_set"
+
+
+def test_a_refused_active_set_answer_falls_back_to_lsq_linear(recovery, monkeypatch):
+    """A cycling active set, or a badly conditioned one, gets the trust-region answer."""
+    import slipsolve.inversion as module
+
+    _, _, _, inversion = recovery
+    ref = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+
+    def cycles(*_, **__):
+        raise RuntimeError("the active set cycled after 3 steps")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "box_qp", cycles)
+        with pytest.warns(RuntimeWarning, match="refused .*cycled"):
+            model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
+    assert model.options["method"] == "lsq_linear"
+    np.testing.assert_array_equal(model.x, ref.x)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "ACTIVE_SET_MAX_COND", 1.0)
+        with pytest.warns(RuntimeWarning, match="condition number"):
+            model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
+    assert model.options["method"] == "lsq_linear"
+
+    with pytest.raises(ValueError, match="method must be one of"):
+        inversion.solve(smoothing=0.3, method="lbfgs")
+
+
+def test_the_data_block_is_kept_and_follows_the_data(recovery):
+    """Formed once across weights; formed again when the data change in place or the ramp does."""
+    import copy
+
+    _, _, _, fixture = recovery
+    inversion = copy.copy(fixture)
+    inversion.d = fixture.d.copy()
+    inversion._normal_cache = None
+
+    first = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
+    block = inversion._normal_cache
+    inversion.solve(smoothing=2.0, polarity=(-1, 0, 0), method="active_set")
+    assert inversion._normal_cache is block
+
+    # In place, as an edit of the observations' own `los` buffer would be.
+    inversion.d += 0.01
+    shifted = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
+    assert inversion._normal_cache is not block
+    ref = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    np.testing.assert_allclose(shifted.x, ref.x, atol=1e-3)
+    assert np.abs(shifted.x - first.x).max() > 0.01
+
+    # A copy with another ramp shares G but not the block.
+    other = inversion.with_ramp("offset")
+    got = other.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
+    assert got.ramp.size == 2 and other._normal_cache is not inversion._normal_cache
+    ref = other.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    np.testing.assert_allclose(got.x, ref.x, atol=1e-3)
+
+
+def test_l_curve_with_the_active_set(recovery):
+    _, _, _, inversion = recovery
+    ref, _ = inversion.l_curve([0.3, 2.0], polarity=(-1, 0, 0))
+    got, models = inversion.l_curve([0.3, 2.0], polarity=(-1, 0, 0), method="active_set")
+    assert all(m.options["method"] == "active_set" for m in models)
+    assert np.all(got["converged"].values)
+    np.testing.assert_allclose(got["rms_misfit"].values, ref["rms_misfit"].values, rtol=1e-4)
+    np.testing.assert_allclose(got["roughness"].values, ref["roughness"].values, rtol=1e-3)
+
+
 def test_ramp_absorbs_an_added_offset(recovery):
     """A constant added to one track must land in the nuisance column, not in slip."""
     mesh, _, obs, plain = recovery

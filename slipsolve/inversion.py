@@ -18,7 +18,11 @@ sparse, so the stack is wrapped in a :class:`~scipy.sparse.linalg.LinearOperator
 that applies each in its natural form: the smoothing block then costs a sparse
 matrix-vector product rather than a dense one, and the 0.5-1 GB materialised copy
 never exists. ``scipy.optimize.lsq_linear`` accepts a ``LinearOperator`` with
-``lsq_solver="lsmr"``, which is the combination used here.
+``lsq_solver="lsmr"``, which is the combination used here by default.
+
+``solve(method="active_set")`` solves the same bounded problem in its normal
+equations instead, exactly, by primal-dual active set (:func:`box_qp`); see
+:data:`METHODS` for when that is faster and when it is refused.
 
 Solver honesty matters more than usual in this problem. Runtime depends far more
 on conditioning than on size, and an iteration-capped solve returns a
@@ -31,7 +35,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.linalg import solve_triangular
+from scipy.linalg import cho_factor, cho_solve, lapack, solve_triangular
 from scipy.optimize import lsq_linear
 from scipy.sparse.linalg import LinearOperator
 
@@ -115,6 +119,72 @@ def _boundary_rows(basis, sides, ratio):
         shape=(cols.size, 2 * n),
     )
 
+
+def box_qp(N, g, lo, hi, x0=None, max_iter=100):
+    """Minimise ``x'Nx/2 - g'x`` under ``lo <= x <= hi``, exactly, by primal-dual active set.
+
+    The problem :meth:`SlipInversion.solve` hands ``lsq_linear``, written in its
+    normal equations. Each step holds the variables the current guess puts on a
+    bound there and solves for the rest by Cholesky. It then moves onto its bound
+    every free variable that crossed one, and off its bound every held variable
+    whose gradient points inside. When a step changes nothing, every KKT condition
+    holds, so the answer is the minimiser and not an approximation to it.
+
+    ``x0``, a nearby solution as in a sweep, picks the first guess (a variable
+    within 0.1 mm of a bound starts on it), and the set then settles in a few
+    steps. Without it every variable starts free.
+
+    Returns a namespace: ``x``; ``nit``, the steps taken; ``at_lo``/``at_hi``, the
+    final active set; ``kkt``, the largest gradient left on a free variable
+    relative to ``max|g|``; and ``rcond``, LAPACK's 1-norm estimate of the
+    reciprocal condition number of the free block (1 when nothing is free).
+
+    Raises ``RuntimeError`` if the active set comes back to a guess it has
+    already tried (primal-dual active set can cycle when ``N`` is not an
+    M-matrix) or has not settled in ``max_iter`` steps, and
+    :class:`numpy.linalg.LinAlgError` if a free block is not positive definite.
+    """
+    g = np.asarray(g, dtype=float)
+    lo = np.asarray(lo, dtype=float)
+    hi = np.asarray(hi, dtype=float)
+    has_lo, has_hi = np.isfinite(lo), np.isfinite(hi)
+    if x0 is None:
+        at_lo = np.zeros(g.size, dtype=bool)
+        at_hi = np.zeros(g.size, dtype=bool)
+    else:
+        at_lo = has_lo & (x0 <= lo + 1e-4)
+        at_hi = has_hi & (x0 >= hi - 1e-4)
+    tried = set()
+    for step in range(1, int(max_iter) + 1):
+        held = at_lo | at_hi
+        free = ~held
+        x = np.where(at_lo, lo, np.where(at_hi, hi, 0.0))
+        block = factor = None
+        if free.any():
+            rhs = g[free] - N[np.ix_(free, held)] @ x[held]
+            block = N[np.ix_(free, free)]
+            factor = cho_factor(block, lower=True)
+            x[free] = cho_solve(factor, rhs)
+        mu = N @ x - g
+        new_lo = has_lo & ((free & (x < lo)) | (at_lo & (mu > 0)))
+        new_hi = has_hi & ((free & (x > hi)) | (at_hi & (mu < 0)))
+        if np.array_equal(new_lo, at_lo) and np.array_equal(new_hi, at_hi):
+            break
+        tried.add(np.packbits(at_lo).tobytes() + np.packbits(at_hi).tobytes())
+        if np.packbits(new_lo).tobytes() + np.packbits(new_hi).tobytes() in tried:
+            raise RuntimeError(f"the active set cycled after {step} steps")
+        at_lo, at_hi = new_lo, new_hi
+    else:
+        raise RuntimeError(f"the active set did not settle in {int(max_iter)} steps")
+
+    rcond = 1.0
+    if factor is not None:
+        rcond, info = lapack.dpocon(factor[0], float(np.abs(block).sum(axis=0).max()), uplo="L")
+        rcond = float(rcond) if info == 0 else 0.0
+    scale = max(float(np.abs(g).max(initial=0.0)), np.finfo(float).tiny)
+    kkt = float(np.abs(mu[free]).max(initial=0.0)) / scale
+    return SimpleNamespace(x=x, nit=step, at_lo=at_lo, at_hi=at_hi, kkt=kkt, rcond=rcond)
+
 #: Crustal shear modulus used for moment when no velocity model is supplied.
 DEFAULT_SHEAR_MODULUS = 30e9
 
@@ -180,6 +250,35 @@ DEFAULT_MAX_ITER = 400
 #: converged answer) while a cap of 25 was fine. The adaptive tolerance has no
 #: such cliff.
 DEFAULT_LSMR_TOL = "auto"
+
+#: The solvers :meth:`SlipInversion.solve` offers. Both minimise the same
+#: objective under the same bounds.
+#:
+#: * ``"lsq_linear"``: scipy's trust-region solve of the stacked system, through
+#:   ``lsmr`` on the operator. The default, and what every model on record used.
+#: * ``"active_set"``: the normal equations ``(A'A + S'S + B'B) m = A'b``,
+#:   solved exactly by :func:`box_qp`. ``A'A`` and ``A'b`` do not depend on the
+#:   regularization, so they are formed once per inversion and kept; a sweep
+#:   over smoothing weights then pays one small factorization per weight
+#:   instead of a trust-region solve over every observation row. This is the
+#:   solve :class:`~slipsolve.sweep.DipSweep` and the production blocked CV
+#:   always used (that CV's scores matched ``lsq_linear`` re-solves' to
+#:   0.0002 mm).
+#:
+#: Normal equations square the condition number, so an active-set answer is
+#: refused, with a warning and a fallback to ``lsq_linear``, if its free block
+#: is worse conditioned than :data:`ACTIVE_SET_MAX_COND`, if its KKT residual
+#: exceeds :data:`ACTIVE_SET_MAX_KKT`, if a free block is not positive
+#: definite, or if the active set cycles.
+METHODS = ("lsq_linear", "active_set")
+
+#: Largest 1-norm condition number an active-set solve's free block may have.
+#: The answer's relative error is bounded by about this times machine epsilon.
+ACTIVE_SET_MAX_COND = 1e12
+
+#: Largest gradient an active-set answer may leave on a free parameter,
+#: relative to the largest gradient at zero slip.
+ACTIVE_SET_MAX_KKT = 1e-8
 
 
 class SlipInversion:
@@ -345,8 +444,16 @@ class SlipInversion:
               boundary_ratio=1.0, sides=("bottom", "left", "right"),
               polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0),
               max_iter=DEFAULT_MAX_ITER, tol=1e-10,
-              lsmr_tol=DEFAULT_LSMR_TOL, smooth_weighting="uniform", verbose=0):
+              lsmr_tol=DEFAULT_LSMR_TOL, smooth_weighting="uniform", verbose=0,
+              method="lsq_linear"):
         """Solve for slip at one smoothing weight; returns a :class:`SlipModel`.
+
+        ``method`` is ``"lsq_linear"`` (the default) or ``"active_set"``; see
+        :data:`METHODS`. Both solve the same bounded problem. ``max_iter`` caps
+        the trust-region iterations of the first and the active-set steps of the
+        second. ``tol`` and ``lsmr_tol`` are ``lsq_linear``'s alone. The model's
+        ``options["method"]`` records the solver that produced it, which is
+        ``"lsq_linear"`` when an active-set answer was refused.
 
         ``lsmr_tol`` is the inner least-squares tolerance; see
         :data:`DEFAULT_LSMR_TOL` for why the default is ``"auto"`` and not
@@ -359,6 +466,8 @@ class SlipInversion:
         Laplace-Beltrami operator is already area- and shape-weighted and
         ignores it.
         """
+        if method not in METHODS:
+            raise ValueError(f"method must be one of {METHODS}, got {method!r}")
         if self.basis.name == "element":
             smooth = neighbor_smoothing(self.mesh.neighbors, ss_ratio, ds_ratio,
                                         weighting=smooth_weighting, mesh=self.mesh)
@@ -382,20 +491,14 @@ class SlipInversion:
 
         scaled_smooth = scale_smoothing(smooth, smoothing)
 
-        design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
-        weighted = self.whiten(design)
-        rhs = np.concatenate([
-            self.whiten(self.d),
-            np.zeros(smooth.shape[0]),
-            np.zeros(boundary.shape[0]),
-        ])
-
-        operator = _StackedOperator(weighted, scaled_smooth, boundary)
-        result = lsq_linear(
-            operator, rhs, bounds=(lo, hi),
-            lsq_solver="lsmr", max_iter=max_iter, tol=tol,
-            lsmr_tol=lsmr_tol, verbose=verbose,
-        )
+        result = None
+        if method == "active_set":
+            result = self._solve_active_set(scaled_smooth, boundary, lo, hi,
+                                            max_iter, verbose)
+        if result is None:
+            method = "lsq_linear"
+            result = self._solve_lsq(scaled_smooth, boundary, lo, hi, max_iter,
+                                     tol, lsmr_tol, verbose)
 
         return SlipModel(
             self, result.x, result,
@@ -407,7 +510,7 @@ class SlipInversion:
                 "boundary_ratio": float(boundary_ratio), "sides": list(sides),
                 "polarity": None if polarity is None else list(polarity),
                 "strike": list(strike), "dip": list(dip), "max_iter": int(max_iter),
-                "lsmr_tol": lsmr_tol,
+                "lsmr_tol": lsmr_tol, "method": method,
                 "smooth_weighting": str(smooth_weighting),
                 # Carried so a reloaded model can rebuild the ramp columns and
                 # separate the nuisance surface from the fault's own prediction.
@@ -423,6 +526,92 @@ class SlipInversion:
             },
         )
 
+    def _solve_lsq(self, smooth, boundary, lo, hi, max_iter, tol, lsmr_tol, verbose):
+        """``method="lsq_linear"``: the stacked system through scipy's trust region."""
+        design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
+        weighted = self.whiten(design)
+        rhs = np.concatenate([
+            self.whiten(self.d),
+            np.zeros(smooth.shape[0]),
+            np.zeros(boundary.shape[0]),
+        ])
+
+        operator = _StackedOperator(weighted, smooth, boundary)
+        return lsq_linear(
+            operator, rhs, bounds=(lo, hi),
+            lsq_solver="lsmr", max_iter=max_iter, tol=tol,
+            lsmr_tol=lsmr_tol, verbose=verbose,
+        )
+
+    def _data_block(self):
+        """``(WA)'(WA)`` and ``(WA)'(Wd)``, the half of the normal equations the data set.
+
+        Neither depends on the regularization, so they are kept between solves
+        and a sweep forms them once. The cache holds while ``G``, the ramp and
+        the whitening are the same objects (nothing writes to ``G`` in place; see
+        :meth:`with_ramp`) and the data and weights the same VALUES: ``d`` can
+        be the observation dataset's own buffer, so an in-place edit must not
+        find a stale block. The last answer rides along as the next warm start.
+        """
+        chol = getattr(self, "_chol", None)
+        cached = getattr(self, "_normal_cache", None)
+        if (cached is not None and cached.g is self.g and cached.ramp is self.ramp
+                and cached.chol is chol and np.array_equal(cached.d, self.d)
+                and np.array_equal(cached.w, self.w)):
+            return cached
+        design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
+        weighted = self.whiten(design)
+        block = SimpleNamespace(
+            g=self.g, ramp=self.ramp, chol=chol, d=self.d.copy(), w=self.w.copy(),
+            normal=weighted.T @ weighted, rhs=weighted.T @ self.whiten(self.d),
+            last=None,
+        )
+        self._normal_cache = block
+        return block
+
+    def _solve_active_set(self, smooth, boundary, lo, hi, max_iter, verbose):
+        """``method="active_set"``: an ``lsq_linear``-like result, or None if refused.
+
+        Refused, with a warning, under the conditions :data:`METHODS` lists; the
+        caller then solves with ``lsq_linear``.
+        """
+        block = self._data_block()
+        total = block.normal + (smooth.T @ smooth + boundary.T @ boundary).toarray()
+        problem = None
+        try:
+            qp = box_qp(total, block.rhs, lo, hi, x0=block.last, max_iter=max_iter)
+        except (RuntimeError, np.linalg.LinAlgError) as err:
+            problem = str(err)
+        else:
+            cond = 1.0 / qp.rcond if qp.rcond > 0 else np.inf
+            if cond > ACTIVE_SET_MAX_COND:
+                problem = f"its free block's condition number is ~{cond:.1e}"
+            elif qp.kkt > ACTIVE_SET_MAX_KKT:
+                problem = f"its KKT residual is {qp.kkt:.1e}"
+        if problem is not None:
+            warnings.warn(f"the active-set solve was refused ({problem}); solved "
+                          "with lsq_linear instead", RuntimeWarning, stacklevel=3)
+            return None
+
+        x = qp.x
+        block.last = x
+        n = self.n_slip
+        prediction = self.g @ x[:n] + (self.ramp @ x[n:] if self.n_ramp else 0.0)
+        misfit = self.whiten(self.d - prediction)
+        rough, edge = smooth @ x, boundary @ x
+        free = ~(qp.at_lo | qp.at_hi)
+        if verbose:
+            print(f"active set: {qp.nit} steps, {int(free.sum())} of {x.size} "
+                  f"parameters free, condition ~{1.0 / qp.rcond:.1e}, KKT {qp.kkt:.1e}")
+        return SimpleNamespace(
+            x=x, status=1, nit=qp.nit, success=True, method="active_set",
+            cost=0.5 * float(misfit @ misfit + rough @ rough + edge @ edge),
+            optimality=float(np.abs((total @ x - block.rhs)[free]).max(initial=0.0)),
+            kkt=qp.kkt, condition=1.0 / qp.rcond,
+            active_mask=np.where(qp.at_lo, -1, np.where(qp.at_hi, 1, 0)),
+            message=f"active set settled in {qp.nit} steps; KKT residual {qp.kkt:.1e}",
+        )
+
     def l_curve(self, smoothing_values, **kwargs):
         """Solve at each smoothing weight and tabulate misfit against roughness.
 
@@ -434,6 +623,10 @@ class SlipInversion:
         Swept from **large to small** smoothing deliberately: a smoother problem
         is better conditioned and converges in fewer iterations, and the sweep's
         total cost is dominated by its roughest end.
+
+        ``method="active_set"`` (see :data:`METHODS`) forms the data half of the
+        normal equations once for the whole sweep, and each weight starts from
+        the previous weight's active set.
 
         **The sweep is serial, deliberately.** Every weight is an independent
         solve over the same Green's matrix, which makes a worker pool the obvious

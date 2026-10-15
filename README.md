@@ -33,6 +33,13 @@ fault surface:
   unwrapper cannot cross it) gets one offset per region:
   `Observations.from_los(..., regions="connected")`, and no sample mixes two
   regions;
+- **two solvers for the bounded problem**: scipy's `lsq_linear` on the stacked
+  system (the default), or `solve(method="active_set")`, which solves its normal
+  equations exactly by primal-dual active set. The second was 100-1,700x faster
+  on the problems measured, and it reaches the minimum where `lsq_linear` can
+  stop short of it. It hands the problem back to `lsq_linear`, with a warning,
+  when its own answer cannot be trusted (an ill-conditioned block, a cycling
+  active set);
 - **pixel offsets as data** beside InSAR. A slant-range or along-track offset map
   is a track like any other, carrying its own unit vector (an along-track one is
   horizontal). Each track can take its own nuisance ramp, e.g.
