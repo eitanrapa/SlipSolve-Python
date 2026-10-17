@@ -683,6 +683,23 @@ def test_persist_round_trip(recovery, tmp_path):
     assert stored.attrs["mesh_digest"] == inversion.mesh.digest()
 
 
+def test_save_load_keeps_per_row_smoothing(recovery, tmp_path):
+    """``solve`` takes one smoothing weight per row; the saved model must reopen with them (``load`` read a float)."""
+    from slipsolve.inversion import SlipModel
+
+    _, _, _, inversion = recovery
+    rows = neighbor_smoothing(inversion.mesh.neighbors, 1.0, 3.0, weighting="uniform",
+                              mesh=inversion.mesh).shape[0]
+    weights = np.full(rows, 0.3)
+    weights[: rows // 2] = 0.1
+    model = inversion.solve(smoothing=weights, polarity=(-1, 0, 0))
+    path = tmp_path / "per_row.slip.zip"
+    model.save(path)
+    back = SlipModel.load(path)
+    np.testing.assert_allclose(back.smoothing, weights)
+    np.testing.assert_allclose(back.strike_slip, model.strike_slip)
+
+
 # -- recovery on a dipping fault ---------------------------------------------
 
 @pytest.fixture(scope="module")

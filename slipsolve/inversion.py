@@ -1503,7 +1503,11 @@ class SlipModel:
             nit=int(model.attrs["solver_iterations"]),
             x=self.x,
         )
-        self.smoothing = float(model.attrs["smoothing"])
+        # A scalar for most runs, one weight per smoothing row when the solve was given an array
+        # (see `scale_smoothing`); `float` cannot read the second, so a per-row model would not reopen.
+        smoothing = model.attrs["smoothing"]
+        self.smoothing = (float(smoothing) if np.ndim(smoothing) == 0
+                          else np.asarray(smoothing, dtype=float))
         self.options = options
         self.ramp_labels = [str(s) for s in model.attrs.get("ramp_labels", [])]
 
