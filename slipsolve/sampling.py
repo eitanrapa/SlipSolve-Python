@@ -243,6 +243,62 @@ class Observations:
         return cls(out)
 
     @classmethod
+    def from_points(cls, x, y, values, look, std, name="gnss", frame=None, epsg=4326):
+        """Observations that are already points: GNSS components, or any point measurement.
+
+        ``x``, ``y`` are station coordinates in ``epsg`` (lon/lat by default), or local
+        metres with ``epsg=None``; ``frame`` is required either way, since a handful of
+        stations is no basis for choosing one -- pass the frame the mesh was built in.
+        ``values`` (metres) and ``std`` (metres, > 0) are one per row, and ``look`` is
+        ``(n, 3)`` or one 3-vector for every row: a row measures ``u . look`` with ``u``
+        the (east, north, up) displacement. A three-component GNSS station is therefore
+        three rows, with looks ``(1, 0, 0)``, ``(0, 1, 0)`` and ``(0, 0, 1)``. A look need
+        not point upward -- the up-ward check :meth:`from_los` inherits from radar
+        geometry does not apply to a horizontal component -- but it must be a unit vector.
+
+        ``weight`` is ``1 / std``: the diagonal noise weighting, which is what
+        :meth:`concat` keeps with ``normalize="none"``. Under ``"sqrt_count"`` the track's
+        total influence is rescaled as for any other track and the relative station
+        weights survive. ``cell_size`` is 0 and ``count`` 1, since nothing was averaged.
+        """
+        if frame is None:
+            raise ValueError("from_points needs the frame the mesh was built in")
+        values = np.asarray(values, dtype=float).ravel()
+        n = values.size
+        std = np.broadcast_to(np.asarray(std, dtype=float), (n,)).copy()
+        look = np.asarray(look, dtype=float)
+        look = np.broadcast_to(look, (n, 3)).copy() if look.ndim == 1 else look.reshape(n, 3)
+        x = np.asarray(x, dtype=float).ravel()
+        y = np.asarray(y, dtype=float).ravel()
+        if x.size != n or y.size != n:
+            raise ValueError("x, y and values must have one entry per row")
+        if not (np.all(np.isfinite(values)) and np.all(np.isfinite(x)) and np.all(np.isfinite(y))):
+            raise ValueError("from_points needs finite coordinates and values")
+        if not np.all(std > 0):
+            raise ValueError("every std must be positive: it sets weight = 1/std")
+        norm = np.linalg.norm(look, axis=1)
+        if not np.allclose(norm, 1.0, atol=1e-6):
+            raise ValueError(f"looks must be unit vectors (norms {norm.min():.4f}..{norm.max():.4f})")
+        fx, fy = (x, y) if epsg is None else frame.from_epsg(x, y, int(epsg))
+        out = xr.Dataset(
+            {
+                "x": ("obs", np.asarray(fx, dtype=float)),
+                "y": ("obs", np.asarray(fy, dtype=float)),
+                "los": ("obs", values),
+                "look_e": ("obs", look[:, 0]),
+                "look_n": ("obs", look[:, 1]),
+                "look_u": ("obs", look[:, 2]),
+                "std": ("obs", std),
+                "cell_size": ("obs", np.zeros(n)),
+                "count": ("obs", np.ones(n)),
+                "weight": ("obs", 1.0 / std),
+                "track": ("obs", np.full(n, name, dtype=object)),
+            }
+        )
+        out.attrs.update(frame=frame.to_dict(), epsg=epsg, tracks=[name], source_epsg=epsg)
+        return cls(out)
+
+    @classmethod
     def concat(cls, items, normalize="sqrt_count", weights=None):
         """Combine several tracks into one observation set.
 

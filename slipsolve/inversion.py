@@ -289,7 +289,7 @@ class SlipInversion:
     """
 
     def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
-                 velocity_model=None, covariance=None):
+                 velocity_model=None, covariance=None, sees=None):
         """``engine`` and ``basis`` choose the physics and the parameterization.
 
         ``ramp`` adds unbounded per-track nuisance columns -- ``"none"``,
@@ -327,6 +327,15 @@ class SlipInversion:
         ``L^-1 G m = L^-1 d`` with ``Cd = L L'``, which is what
         :meth:`whiten` applies. ``None`` keeps the diagonal weights and is
         bit-for-bit what every run before this did.
+
+        ``sees`` restricts which faults of a mesh built by
+        :meth:`~slipsolve.mesh.FaultMesh.join` a track measures: ``{track: [fault, ...]}``,
+        faults by their position in the join. A track not named sees every fault. Made for an earthquake sequence
+        whose radar pairs span every event while GNSS resolves each one: the GNSS for
+        event 1 sees only the faults event 1 broke, so its rows get zero Green's
+        functions on the others, and the radar rows see the sum. That is exact when no
+        fault slipped in more than one event; slip a fault took between two events
+        (afterslip in the hours between) is assigned to whichever track sees it.
         """
         self.mesh = mesh
         self.obs = obs
@@ -356,6 +365,10 @@ class SlipInversion:
             self.g = (element_g if self.basis.name == "element"
                       else element_g @ _blocked(self.basis.projection()))
 
+        self.sees = None
+        if sees:
+            self._restrict_views(sees)
+
         self.ramp_kind = ramp_spec(ramp)
         check_ramp_tracks(self.ramp_kind, obs.tracks)
         self.ramp, self.ramp_labels = ramp_columns(obs, self.ramp_kind)
@@ -366,6 +379,44 @@ class SlipInversion:
         self._chol = self._track_rows = None
         if covariance is not None:
             self._build_whitening(covariance)
+
+    def fault_labels(self):
+        """The joined fault each basis function belongs to, ``(n_basis,)``.
+
+        Read from the counts :meth:`~slipsolve.mesh.FaultMesh.join` records, so it
+        follows the join's order. A mesh that was not joined is one fault, label 0.
+        """
+        key = "joined_nodes" if self.basis.name == "node" else "joined_elements"
+        counts = self.mesh.attrs.get(key)
+        if counts is None:
+            return np.zeros(self.basis.n_basis, dtype=int)
+        labels = np.repeat(np.arange(len(counts)), np.asarray(counts, dtype=int))
+        if labels.size != self.basis.n_basis:
+            raise ValueError(
+                f"mesh.attrs[{key!r}] sums to {labels.size} but the {self.basis.name} basis "
+                f"has {self.basis.n_basis} functions; was the mesh rebuilt after the join?")
+        return labels
+
+    def _restrict_views(self, sees):
+        """Zero the Green's functions of the faults each named track does not see."""
+        labels = self.fault_labels()
+        n_faults = int(labels.max()) + 1
+        track = np.asarray(self.obs.ds["track"].values, dtype=object).astype(str)
+        unknown = sorted(set(map(str, sees)) - set(track))
+        if unknown:
+            raise ValueError(f"sees names track(s) {unknown} not in the observations")
+        recorded = {}
+        for name, faults in sees.items():
+            faults = sorted({int(f) for f in faults})
+            if not faults or min(faults) < 0 or max(faults) >= n_faults:
+                raise ValueError(f"sees[{name!r}] = {faults}: faults are 0..{n_faults - 1}")
+            hidden = ~np.isin(labels, faults)
+            cols = np.concatenate([np.flatnonzero(hidden),
+                                   np.flatnonzero(hidden) + self.basis.n_basis])
+            rows = np.flatnonzero(track == str(name))
+            self.g[np.ix_(rows, cols)] = 0.0
+            recorded[str(name)] = faults
+        self.sees = recorded
 
     def _build_whitening(self, covariance):
         """Cholesky factors of ``Cd``, one block per track."""
@@ -523,6 +574,8 @@ class SlipInversion:
                 # uses it, and a reloaded half-space model forwards through it.
                 "bimaterial": (self.engine.describe() if hasattr(self.engine, "describe")
                                else None),
+                # Which faults each track was allowed to see; None = all of them.
+                "sees": getattr(self, "sees", None),
             },
         )
 
