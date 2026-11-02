@@ -19,7 +19,11 @@ Geometry follows the paper. In the fault's own frame the rectangle spans
 ``0 <= xi <= length`` along strike (the ``+x`` axis) and ``0 <= w <= width``
 down dip, with the **lower** edge at ``depth`` and the plane dipping so that
 
-    P(xi, w) = (xi, -w cos(dip), -(depth - w sin(dip)))
+    P(xi, w) = (xi, w cos(dip), -(depth - w sin(dip)))
+
+(as :func:`rect_corners` builds it): the plane rises toward ``+y``, so its trace
+is at ``y = width cos(dip)`` when it reaches the surface and the hanging wall is
+the ``-y`` side. A positive ``U2`` moves that side up dip.
 
 Slip components are the paper's: ``U1`` left-lateral strike-slip, ``U2``
 dip-slip (thrust positive), ``U3`` tensile opening.
