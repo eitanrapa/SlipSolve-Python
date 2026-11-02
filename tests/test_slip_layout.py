@@ -313,6 +313,38 @@ def test_the_layout_is_reproducible():
     np.testing.assert_array_equal(a.triangles, b.triangles)
 
 
+def test_a_layout_longer_than_the_resampled_trace_is_refused(trace, frame):
+    """``np.interp`` clamps past the last station, so nodes beyond the end of the
+    trace as ``curved`` resamples it would all land on the end point. An end
+    column a few metres over is let through (clamped, as before); a longer layout,
+    or an interior node past the end, is refused. Shorter layouts mesh part of
+    the trace, as before."""
+    from slipsolve.mesh import LAYOUT_OVERRUN_FRACTION
+
+    edge = 3e3
+    x, y = trace.resample(edge, frame).to_local(frame)
+    end = float(np.sum(np.hypot(np.diff(x), np.diff(y))))
+    tol = LAYOUT_OVERRUN_FRACTION * edge
+
+    def rect(length, extra=None):
+        s, z = np.meshgrid(np.linspace(0.0, length, 6), -np.linspace(0.0, 15e3, 3))
+        params = np.column_stack([s.ravel(), z.ravel()])
+        if extra is not None:
+            params = np.vstack([params, extra])
+        return L.MeshLayout(params=params, triangles=L.triangulate(params))
+
+    def build(layout):
+        return FaultMesh.from_layout(layout, trace, frame, uniform_dip=90.0, edge_length=edge)
+
+    build(rect(end))
+    build(rect(end + 0.5 * tol))
+    build(rect(0.5 * end))
+    with pytest.raises(ValueError, match="clamped onto the end point"):
+        build(rect(end + 1e3))
+    with pytest.raises(ValueError, match="clamped onto the end point"):
+        build(rect(end + 0.5 * tol, extra=[[end + 0.25 * tol, -7.5e3]]))
+
+
 def test_an_unstructured_layout_keeps_a_rectangular_outline():
     """Freeform means the discretisation, not the fault's extent: the four edges
     stay straight because ``boundary_node_mask`` finds them by exact equality and

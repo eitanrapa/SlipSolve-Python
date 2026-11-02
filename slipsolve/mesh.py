@@ -54,6 +54,18 @@ from .trace import VERTICAL_TOL_DEG, FaultSegment, dip_offset  # noqa: F401
 # closely than either tracks Okada inside it. A warning here would fire on two
 # thirds of every irregular vertical mesh and teach the reader to ignore it.
 
+#: How far a layout may run past either end of the trace, as :meth:`FaultMesh.curved`
+#: resamples it, before it is refused -- a fraction of ``edge_length``. Nodes are
+#: placed by ``np.interp`` on the resampled trace's arc length, which CLAMPS: every
+#: node past the end lands on the end point. An end column a few metres over is
+#: harmless (the Venezuela production meshes run 2.19 m past at ``edge_length``
+#: 8 km, 2026-11-02). Interior nodes past the end are not: the Myanmar set-up
+#: (2026-11-02) measured its layout on a finer resampling, 1.7 km longer at its
+#: ``edge_length``, and the remesh put three nodes on one point -- a zero-area
+#: triangle whose Green's functions came back non-finite. A coarser resampling cuts
+#: corners, so the arc length shrinks as ``edge_length`` grows on a wiggly trace.
+LAYOUT_OVERRUN_FRACTION = 0.01
+
 
 class FaultMesh:
     """A triangulated fault surface in local ENU metres, ``z <= 0``.
@@ -308,6 +320,7 @@ class FaultMesh:
         layout, depths = _resolve_layout(
             layout, depths, nodes_per_level, along_spacing, s,
             top_depth, max_depth, down_dip_levels, bias_w, edge_length, balance)
+        _require_layout_on_trace(layout, s, edge_length)
         top_depth = float(-layout.params[:, 1].max())
         max_depth = float(-layout.params[:, 1].min())
 
@@ -760,6 +773,31 @@ def _resolve_layout(layout, depths, nodes_per_level, along_spacing, stations,
     return graded_layout(stations[-1], depths, counts=nodes_per_level,
                          along_spacing=along_spacing, stations=stations,
                          balance=balance), depths
+
+
+def _require_layout_on_trace(layout, stations, edge_length):
+    """Refuse a layout whose nodes run past the resampled trace's ends.
+
+    See :data:`LAYOUT_OVERRUN_FRACTION`. A layout shorter than the trace is fine
+    (it meshes part of it); one longer is clamped node by node onto the end point.
+    """
+    s = layout.params[:, 0]
+    end = float(stations[-1])
+    tol = LAYOUT_OVERRUN_FRACTION * float(edge_length)
+    s_min, s_max = float(s.min()), float(s.max())
+    past_end = int(np.sum((s > end) & (s < s_max)))
+    past_start = int(np.sum((s < 0.0) & (s > s_min)))
+    if s_max - end > tol or -s_min > tol or past_end or past_start:
+        raise ValueError(
+            f"the layout spans arc length {s_min:.1f}..{s_max:.1f} m but the trace, "
+            f"resampled at edge_length={float(edge_length):g} m, spans 0..{end:.1f} m; "
+            f"{past_end + past_start} interior node(s) lie beyond its ends, and "
+            "every node past an end would be clamped onto the end point (collapsed "
+            "elements, non-finite Green's functions). Measure the layout's length "
+            "on trace.resample(edge_length, frame) -- the arc length this call "
+            "embeds on -- not on trace.length() or another spacing: a coarser "
+            "resampling cuts the trace's corners and is shorter."
+        )
 
 
 def _layout_attrs(layout):
