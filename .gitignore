@@ -36,10 +36,10 @@ dist/
 *.fls
 .DS_Store
 
-# The methods paper builds on Overleaf; the upload zip and local preview are
-# regenerated from docs/methods_paper/ and not tracked.
+# The methods paper draft is kept local, out of the public repository (it
+# builds on Overleaf; the upload zip is regenerated from it).
+docs/methods_paper/
 docs/methods_paper.zip
-docs/methods_paper/draft_preview.pdf
 
 # GMT drops this wherever it is run (grdsample/grdinfo session shelf)
 gmt.history
