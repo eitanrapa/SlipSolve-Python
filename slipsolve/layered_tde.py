@@ -30,6 +30,7 @@ least accurate place in the model.
 
 import numpy as np
 
+from ._okada92 import point_source_enu
 from ._tde import (STRAIN_STEP, _element_basis, tde_disp_hs, tde_disp_hs_unit,
                    tde_disp_hs_unit_many, tde_strain_hs_unit, tde_strain_hs_unit_many)
 from ._tde import barycentric as _barycentric
@@ -46,12 +47,23 @@ REMAINDER_TOLERANCE = 3e-3
 #: Surface receivers farther than this many triangle sizes from a triangle take point
 #: sources of the whole tabulated surface field instead of a dislocation plus the
 #: remainder: the point-source rule is accurate there and costs table lookups, where a
-#: tent costs at least six dislocations at every receiver.
+#: tent costs at least six dislocations at every receiver. :meth:`LayeredTDE.strain`
+#: uses the same distance for receivers at any depth, with the half-space part of each
+#: point source analytic (Okada 1992, :mod:`slipsolve._okada92`) since no table holds
+#: the whole field's strain.
 FAR = 4.0
 
 #: Most points per side of a piece in the remainder's quadrature (``order**2``
 #: points).
 MAX_ORDER = 30
+
+#: The point-source rule's tolerance on :meth:`LayeredTDE.strain`'s far path, where each
+#: point is an analytic half-space point source and a table lookup, far cheaper than the
+#: dislocations it replaces. Measured on the two-layer test crust against the converged
+#: path (2026-11-04), a tent's strain at 4-40 sizes: 3e-3 up to 6.4e-4 of its peak, 1e-3
+#: up to 4.5e-4, 3e-4 up to 1.1e-4 at three times 1e-3's points. The near path inside 4
+#: sizes holds 5e-4, so 1e-3.
+STRAIN_FAR_TOLERANCE = 1e-3
 
 #: Most Gauss-Legendre points in a tent's level-set integral (see :meth:`LayeredTDE.tent_field`).
 TENT_MAX_POINTS = 24
@@ -65,8 +77,9 @@ TENT_MAX_POINTS = 24
 TENT_GAIN = 2.0
 
 #: :data:`TENT_GAIN` and the fewest Gauss-Legendre points for a tent's STRAIN
-#: (:meth:`LayeredTDE.tent_strain`). Strain at depth has no far path, so the tent rule
-#: must hold at any distance, and two points do not: far away the level integrand is
+#: (:meth:`LayeredTDE.tent_strain`). Set when strain at depth had no far path (it has one
+#: beyond :attr:`LayeredTDE.strain_far` since), so the tent rule holds at any distance,
+#: which two points do not: far away the level integrand is
 #: ``(1-t)^2`` times a polynomial in ``(1-t)``, whose ``(1-t)^4`` term two points miss,
 #: leaving ``~0.05 (L/d)^2`` (5e-3 at 3 sizes; the displacement's far path hides it
 #: beyond 4). Measured (2026-11-04, the three tents' sum against the element, two
@@ -170,7 +183,7 @@ class LayeredTDE:
     #: projected from element means.
     supports_basis = True
 
-    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR):
+    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR, quadratic=False):
         self.tables = tables
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
@@ -178,6 +191,17 @@ class LayeredTDE:
         #: the whole tabulated surface field (``tables.surface``) instead of a dislocation;
         #: ``None``, or tables without a surface field, keeps dislocations everywhere.
         self.far = None if far is None or not tables.has_surface else float(far)
+        #: :meth:`strain`'s far path, at any depth; it needs no surface field.
+        self.strain_far = None if far is None else float(far)
+        #: Integrate the displacement's remainder (and its far path) with the rule exact for
+        #: quadratics (:func:`_rule_quadratic`) instead of sub-triangle centroids. Off by
+        #: default, which keeps production's Green's functions bit for bit; strain always
+        #: uses it. The centroids split an element's remainder among its tents with an error
+        #: first order in size / distance: on model 4e's mesh and samples (v2 tables,
+        #: 2026-11-04) a nodal LOS column was 5e-4 to 1.6e-3 (rms) off its converged value,
+        #: a single tent up to 8.8e-3 (deeper nodes worse); with this rule 8e-6 to 3e-5, at
+        #: the same cost.
+        self.quadratic = bool(quadratic)
         #: The surface layer's, for the engine protocol; each piece uses its own.
         self.nu = float(tables.poisson(0.0))
         #: Depths (m) where the crust steps. An element crossing one is cut there,
@@ -353,8 +377,10 @@ class LayeredTDE:
         Components as :data:`~slipsolve._tde.STRAIN_COMPONENTS` (east, north, up; tensor
         shears); columns as :meth:`displacement`: element columns without a basis, each
         node's tent with a nodal one. For points at depth (the voxel centres of
-        :mod:`slipsolve.heterogeneity`); there is no far path, since no table holds the
-        whole field's strain. Needs tables computed with ``strain=True``.
+        :mod:`slipsolve.heterogeneity`). Receivers farther than :attr:`strain_far` sizes from a
+        triangle take point sources of the whole field: Okada's (1992) half-space point
+        source plus the tabulated remainder, ordered by the point-source rule. Needs
+        tables computed with ``strain=True``.
         """
         x, y, z = _as_points(x, y, z)
         nodal = basis is not None and getattr(basis, "name", "element") != "element"
@@ -385,8 +411,8 @@ class LayeredTDE:
         The half-space strain of each piece (:func:`~slipsolve._tde.tde_strain_hs_unit`,
         with its layer's Poisson ratio) plus the remainder's, integrated over the pieces
         (:meth:`~slipsolve.wavenumber.RemainderTables.gather_strain`,
-        :func:`combine_strain`). Receivers anywhere at or below the surface; there is no
-        far path.
+        :func:`combine_strain`). Receivers anywhere at or below the surface; those
+        farther than :attr:`strain_far` sizes take the far path (:meth:`strain`).
         """
         x, y, z = _as_points(x, y, z)
         vertices = np.asarray(vertices, dtype=float)
@@ -394,10 +420,15 @@ class LayeredTDE:
         packing = self._packing(vertices)[components]
         pieces = split_by_layers(vertices, self._interfaces)
         out = np.zeros((x.size, len(components), 6))
+        far = self._far_strain(vertices, x, y, z)
+        near = np.flatnonzero(~far)
         nu = self.tables.poisson(np.array([mid for _, mid in pieces]))
-        for (tri, _), nu_piece in zip(pieces, nu):
-            out += np.moveaxis(tde_strain_hs_unit(x, y, z, *tri, nu_piece)[components], -1, 0)
-        out += self._remainder(pieces, packing, x, y, z, strain=True)
+        if near.size:
+            for (tri, _), nu_piece in zip(pieces, nu):
+                out[near] += np.moveaxis(tde_strain_hs_unit(x[near], y[near], z[near], *tri, nu_piece)[components],
+                                         -1, 0)
+        out += self._remainder(pieces, packing, x, y, z, strain=True,
+                               halfspace=self._halfspace_far(vertices, far, components))
         return out
 
     def tent_strain(self, vertices, x, y, z=None, components=(0, 1)):
@@ -412,11 +443,31 @@ class LayeredTDE:
         packing = self._packing(vertices)[components]
         pieces = split_by_layers(vertices, self._interfaces)
         out = np.zeros((x.size, 3, len(components), 6))
-        tent_levelset(vertices, x, y, z, np.arange(x.size), out, components, tde_strain_hs_unit,
-                      STRAIN_TENT_GAIN, STRAIN_TENT_MIN_POINTS, self._interfaces,
-                      self.tables.poisson, batched=True)
-        out += self._remainder(pieces, packing, x, y, z, parent=vertices, strain=True)
+        far = self._far_strain(vertices, x, y, z)
+        near = np.flatnonzero(~far)
+        if near.size:
+            tent_levelset(vertices, x, y, z, near, out, components, tde_strain_hs_unit,
+                          STRAIN_TENT_GAIN, STRAIN_TENT_MIN_POINTS, self._interfaces,
+                          self.tables.poisson, batched=True)
+        out += self._remainder(pieces, packing, x, y, z, parent=vertices, strain=True,
+                               halfspace=self._halfspace_far(vertices, far, components))
         return out
+
+    def _far_strain(self, vertices, x, y, z):
+        """Receivers at any depth more than :attr:`strain_far` triangle sizes from the triangle."""
+        if self.strain_far is None:
+            return np.zeros(x.size, bool)
+        v = np.asarray(vertices, dtype=float)
+        size = np.sqrt(np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0])))
+        return _distance_to_triangle(v, np.column_stack([x, y, z])) > self.strain_far * size
+
+    @staticmethod
+    def _halfspace_far(vertices, far, components):
+        """What :meth:`_remainder` needs to add the half-space point sources at ``far`` receivers."""
+        if not far.any():
+            return None
+        vnorm, vstrike, vdip = _element_basis(*np.asarray(vertices, dtype=float))
+        return far, vnorm, np.stack([vstrike, vdip, vnorm])[list(components)]
 
     def _far(self, vertices, x, y, z):
         """Surface receivers more than :attr:`far` triangle sizes from the triangle."""
@@ -438,7 +489,8 @@ class LayeredTDE:
         vnorm, vstrike, vdip = _element_basis(*vertices)
         return np.array([moment_packing(vnorm, d) for d in (vstrike, vdip, vnorm)])
 
-    def _remainder(self, pieces, packing, x, y, z, parent=None, whole=False, strain=False):
+    def _remainder(self, pieces, packing, x, y, z, parent=None, whole=False, strain=False,
+                   halfspace=None):
         """The remainder's integral over the pieces, ``(npts, n_components, 3)``.
 
         Every (receiver, quadrature point) pair of a piece goes through one table
@@ -449,7 +501,11 @@ class LayeredTDE:
         surface and the table is the whole surface field, not the remainder: point
         sources, ordered by the point-source rule. With ``strain`` the last axis is the
         six strain components (:func:`combine_strain`), every receiver reads the 3-D
-        tables (the surface ones carry no strain), and ``whole`` is refused.
+        tables (the surface ones carry no strain), and ``whole`` is refused. With
+        ``halfspace = (far, normal, slips)`` (strain only) the receivers flagged ``far``
+        also get each point source's half-space strain (:func:`~slipsolve._okada92.point_source_enu`,
+        with the piece's Poisson ratio), and are ordered by the point-source rule: the
+        whole field, for :meth:`strain`'s far path.
         """
         n = x.size
         tents = parent is not None
@@ -464,15 +520,28 @@ class LayeredTDE:
         # the 3-D table is too coarse in depth for a point source seen from the surface.
         at_surface = (z == 0.0) & tables.has_surface & (not strain)
         receiver = tables.depth_stencil(np.where(at_surface, 0.0, z))
-        for tri, _ in pieces:
+        if halfspace is not None:
+            if not strain:
+                raise ValueError("halfspace is the strain far path's")
+            far, normal, slips = halfspace
+            nus = tables.poisson(np.array([mid for _, mid in pieces]))
+        for piece, (tri, _) in enumerate(pieces):
             area = 0.5 * np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0]))
             size = np.sqrt(2.0 * area)
             orders = (self._point_orders(tri, size, x, y, z) if whole
                       else self._orders(tri, size, x, y, z))
+            # Strain takes the rule exact for quadratics everywhere: the sub-triangle
+            # centroids split an element's remainder among its tents with an error first
+            # order in size / distance (_rule_quadratic). Displacement keeps the centroids
+            # unless the engine was made with quadratic=True.
+            quadratic = np.full(n, bool(strain) or self.quadratic)
+            if halfspace is not None:
+                orders = np.where(far, self._point_orders(tri, size, x, y, z, STRAIN_FAR_TOLERANCE), orders)
             rec, points, weights = [], [], []
-            for order in np.unique(orders):
-                at = np.flatnonzero(orders == order)
-                bary, share = _rule(int(order))
+            key = 2 * orders + quadratic                  # displacement: the orders alone
+            for k in np.unique(key):
+                at = np.flatnonzero(key == k)
+                bary, share = _rule_quadratic(int(k // 2)) if k % 2 else _rule(int(k // 2))
                 rec.append(np.repeat(at, share.size))
                 points.append(np.tile(bary @ tri, (at.size, 1)))
                 weights.append(np.tile(share * area, at.size))
@@ -500,6 +569,11 @@ class LayeredTDE:
                                                  tuple(a[rec[deep]] for a in receiver))
             if strain:
                 pair = combine_strain(values, derivatives, np.arctan2(de, dn), packing)
+                if halfspace is not None:
+                    at = far[rec]
+                    if at.any():
+                        pair[at] += point_source_enu(nus[piece], normal, slips, points[at, 0], points[at, 1],
+                                                     points[at, 2], x[rec[at]], y[rec[at]], z[rec[at]])[1]
             else:
                 pair = _combine(values, np.arctan2(de, dn), packing)
             pair *= np.concatenate(weights)[:, None, None]
@@ -515,11 +589,12 @@ class LayeredTDE:
                         out[:, j, i, c] += np.bincount(rec, phi[:, j] * pair[:, i, c], minlength=n)
         return out
 
-    def _point_orders(self, tri, size, x, y, z):
+    def _point_orders(self, tri, size, x, y, z, tolerance=None):
         """The point-source rule of :class:`~slipsolve.layered.LayeredPointSource` for the whole field."""
         centroid = tri.mean(axis=0)
         distance = np.sqrt((x - centroid[0]) ** 2 + (y - centroid[1]) ** 2 + (z - centroid[2]) ** 2)
-        gain = np.sqrt(_QUADRATURE_SAFETY * _QUADRATURE_CONSTANT / self.tolerance)
+        tolerance = self.tolerance if tolerance is None else tolerance
+        gain = np.sqrt(_QUADRATURE_SAFETY * _QUADRATURE_CONSTANT / tolerance)
         return np.clip(np.ceil(gain * size / np.maximum(distance, size / 100.0)), 1,
                        self.max_order).astype(int)
 
@@ -882,6 +957,30 @@ def _rule(order):
         points, share = _triangle_quadrature(unit[0], unit[1], unit[2], order)
         _RULES[order] = (points, share)
     return _RULES[order]
+
+
+def _rule_quadratic(order):
+    """``order**2`` equal sub-triangles, each with the three-point rule exact for quadratics: barycentric rows.
+
+    The strain's rule (:meth:`LayeredTDE._remainder`). The sub-triangle centroids of
+    :func:`_rule` integrate a tent times a smooth kernel with an error FIRST order in
+    ``size / distance``: at one point each tent gets a third of the element, its first
+    moment wrong. Measured on the two-layer test crust (2026-11-04), a tent's strain from
+    the centroid-rule remainder was 2e-3 to 3e-2 of its peak off its converged value at
+    1-40 sizes, the element's 3e-4 to 3e-3. This rule (points at 2/3, 1/6, 1/6 of each
+    sub-triangle's vertices, Strang & Fix) makes the first moment exact, so a tent's
+    error is second order like a uniform slip's.
+    """
+    key = ("quadratic", order)
+    if key not in _RULES:
+        m = int(order)
+        grid = lambda i, j: np.array([i / m, j / m, 1.0 - (i + j) / m])
+        subs = [(grid(i, j), grid(i + 1, j), grid(i, j + 1)) for i in range(m) for j in range(m - i)]
+        subs += [(grid(i + 1, j), grid(i, j + 1), grid(i + 1, j + 1)) for i in range(m) for j in range(m - i - 1)]
+        mix = np.array([[2 / 3, 1 / 6, 1 / 6], [1 / 6, 2 / 3, 1 / 6], [1 / 6, 1 / 6, 2 / 3]])
+        bary = np.concatenate([mix @ np.stack(sub) for sub in subs])
+        _RULES[key] = (bary, np.full(bary.shape[0], 1.0 / bary.shape[0]))
+    return _RULES[key]
 
 
 def _refuse_nodal(basis):

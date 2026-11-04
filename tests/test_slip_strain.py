@@ -435,7 +435,7 @@ def _point_source_strain(vertices, x, y, z, remainder, order):
 
 
 def test_a_one_layer_crust_is_the_half_space_strain():
-    """The remainder of a uniform crust is zero, strain included: the TDE strain alone."""
+    """The remainder of a uniform crust is zero, strain included: the TDE strain alone (near path everywhere)."""
     tops, _, _ = wn.layer_stack(ONE_LAYER)
     z = wn.depth_grid(tops, z_max=40e3, first=50.0, growth=2.0, spacing=2000.0, deep_spacing=8000.0)
     tables = wn.RemainderTables.compute(ONE_LAYER, z=z, r=wn.distance_grid(per_decade=5), n_k=256,
@@ -443,7 +443,7 @@ def test_a_one_layer_crust_is_the_half_space_strain():
                                         strain=True)
     assert np.all(tables.strain == 0.0)
     pts = _around(BELOW, 10, 0.5, 20.0, seed=1)
-    got = LayeredTDE(tables).element_strain(BELOW, *pts.T)
+    got = LayeredTDE(tables, far=None).element_strain(BELOW, *pts.T)
     want = np.moveaxis(tde_strain_hs_unit(*pts.T, *BELOW, float(ONE_LAYER.poisson())), -1, 0)
     assert np.allclose(got, want, rtol=1e-12, atol=0)
 
@@ -472,10 +472,15 @@ def test_far_away_the_strain_is_the_point_source_sum(strain_tables, vertices):
     whole kernel at nearly the source's depth barely decays in wavenumber, and the
     strain's extra power of ``k`` spoils FFTLog's cancellation at 25 km (a receiver 1 km
     deep beside the crossing triangle read 100x its neighbours, 2026-11-04). The engine
-    never meets this: its remainder decays by the images. The bar is the coarse test
-    tables' (displacement's is 5e-3 on the same tables).
+    never meets this: its remainder decays by the images. The near path's construction, so
+    the far path is off here (it has its own test).
+
+    The bar is the coarse test tables': against references converged in their order (4, 8
+    and 12 agree to 7e-4), both the centroid-rule remainder (``ef53e31``) and the
+    quadratic rule measure 1e-3 to 5.0e-3 on the crossing triangle (2026-11-04); the old
+    5e-3 bar sat on that floor, and the order-4 reference reads 5.1e-3 for the new rule.
     """
-    engine = LayeredTDE(strain_tables)
+    engine = LayeredTDE(strain_tables, far=None)
     top, bottom = -vertices[:, 2].min(), -vertices[:, 2].max()
     depths = [d for d in (500.0, 6500.0, 9000.0) if d < top - 1500.0 or d > bottom + 1500.0]
     x = np.array([15e3, -12e3, 3e3])[:len(depths)]
@@ -484,7 +489,26 @@ def test_far_away_the_strain_is_the_point_source_sum(strain_tables, vertices):
     got = engine.element_strain(vertices, x, y, z)
     want = _point_source_strain(vertices, x, y, z, remainder=False, order=4)
     for c in range(3):
-        assert np.abs(got[:, c] - want[:, c]).max() < 5e-3 * np.abs(want[:, c]).max()
+        assert np.abs(got[:, c] - want[:, c]).max() < 7e-3 * np.abs(want[:, c]).max()
+
+
+@pytest.mark.parametrize("vertices", [BELOW, CROSSING], ids=["below", "crossing"])
+def test_far_away_the_point_source_path_is_the_dislocation_path(strain_tables, vertices):
+    """Beyond ``far`` sizes: Okada point sources plus the remainder, against the level-set path.
+
+    Both paths converge to the same field: with tolerance 1e-7 they agree to 3e-5 / 1e-4
+    (below / crossing the interface) of each receiver's peak at 4-40 sizes (2026-11-04).
+    At the defaults the far path is the closer of the two to that limit (tents 3e-5 /
+    1.2e-4 against the near path's 3e-4 / 5e-4), so this bar is the near path's.
+    """
+    pts = _around(vertices, 12, 4.5, 30.0, seed=8)
+    far, near = LayeredTDE(strain_tables), LayeredTDE(strain_tables, far=None)
+    assert far._far_strain(vertices, *pts.T).all()
+    for f in (lambda e: e.tent_strain(vertices, *pts.T, components=(0, 1, 2)),
+              lambda e: e.element_strain(vertices, *pts.T)):
+        a, b = f(far), f(near)
+        axes = tuple(range(1, a.ndim))
+        assert (np.abs(a - b).max(axis=axes) / np.abs(b).max(axis=axes)).max() < 1.5e-3
 
 
 def test_the_strain_needs_strain_tables():
@@ -533,7 +557,7 @@ def test_the_tabulated_remainder_strain_is_the_remainders(strain_tables, vertice
     and 40, 2.6e-3 / 1.7e-2. The quadrature tolerance (3e-3 or 3e-4) changed nothing.
     On this fixture 0.05-0.10.
     """
-    engine = LayeredTDE(strain_tables)
+    engine = LayeredTDE(strain_tables, far=None)
     pts = _around(vertices, 4, 1.5, 6.0, seed=3)
     pieces = split_by_layers(vertices, strain_tables.tops[1:])
     nu = strain_tables.poisson(np.array([mid for _, mid in pieces]))
