@@ -119,6 +119,110 @@ def tde_disp_hs_unit(x, y, z, p1, p2, p3, nu=0.25):
     return ms + image + fsc
 
 
+#: Central-difference step of :func:`tde_strain_hs_unit`, as a fraction of each point's
+#: distance to the triangle. Measured against ``cutde``'s analytic strain (2026-11-04; four
+#: triangles, vertical, dipping, shallow, one reaching the surface): worst over components
+#: and slips, relative to the point's largest strain, 1e-4 gives <= 1.4e-7 within 10
+#: triangle sizes and <= 1e-5 beyond 100. A larger step loses to truncation near the
+#: triangle (1e-3: 1e-6 to 1e-5 everywhere), a smaller one to round-off far away (1e-5:
+#: 1.6e-4 beyond 100 sizes, where the displacement is a small difference of large terms).
+#: Richardson extrapolation of 1e-3 and 2e-3 agrees with ``cutde`` to 1e-9 within 10 sizes,
+#: so the reference is good there; beyond 100 sizes both carry ~1e-6 of round-off.
+STRAIN_STEP = 1e-4
+
+#: The smallest step :func:`tde_strain_hs_unit` takes, in units in the last place of the
+#: coordinates; a point whose step would be smaller is on the triangle and gets NaN.
+STRAIN_MIN_STEP_ULPS = 1e4
+
+#: Order of the six strain components :func:`tde_strain_hs_unit` returns, ``cutde``'s:
+#: tensor components (``xy`` is half the engineering shear), east/north/up.
+STRAIN_COMPONENTS = ("xx", "yy", "zz", "xy", "xz", "yz")
+
+
+def tde_strain_hs_unit(x, y, z, p1, p2, p3, nu=0.25, step=STRAIN_STEP):
+    """Strain of unit strike-, dip- and tensile-slip on one triangle in a half-space: ``(3, 6, npts)``.
+
+    Axis 0 is the slip component (strike, dip, tensile) as :func:`tde_disp_hs_unit` has
+    it, axis 1 the components of :data:`STRAIN_COMPONENTS`. Units: strain per unit slip.
+
+    By central differences of :func:`tde_disp_hs_unit`, with a step of ``step`` times each
+    point's distance to the triangle (:data:`STRAIN_STEP`), all stencil points in one call.
+    A point closer to the free surface than its step takes the one-sided second-order
+    difference downward for ``d/dz``, so points at ``z = 0`` are fine; there the field is
+    traction-free. A point on the triangle itself has no strain (it is singular on the
+    edges and two-valued on the face) and gets NaN, as does one so close that its step
+    would be under :data:`STRAIN_MIN_STEP_ULPS` units in the last place of its coordinates.
+
+    Nikkhoo & Walter's ``TDstressHS`` gives the same analytically. It is not ported: these
+    differences cost six displacement calls, agree with ``cutde`` (an independent port of
+    it) to 1e-5 or better, and the kernels they feed carry 1e-4 to 1e-3 of table error.
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    z = np.asarray(z, dtype=float).ravel()
+    tri = np.array([np.asarray(p, dtype=float).ravel() for p in (p1, p2, p3)])
+    if np.any(z > 0) or np.any(tri[:, 2] > 0):
+        raise ValueError("Half-space solution: z coordinates must be <= 0")
+    n = x.size
+    h = float(step) * distance_to_triangle(tri, np.column_stack([x, y, z]))
+    # A difference needs a step well above the coordinates' rounding: a point within
+    # rounding of the triangle is on it (at 100 km from the origin, within ~1.5 mm).
+    scale = np.maximum(np.abs(np.column_stack([x, y, z])).max(axis=1), np.abs(tri).max())
+    h = np.where(h > STRAIN_MIN_STEP_ULPS * np.spacing(scale), h, np.nan)
+    central = np.flatnonzero(z + np.nan_to_num(h) <= 0.0)
+    below = np.setdiff1d(np.arange(n), central, assume_unique=True)
+    xs = [x + h, x - h, x, x, x, x[central], x[below], x[below]]
+    ys = [y, y, y + h, y - h, y, y[central], y[below], y[below]]
+    zs = [z, z, z, z, z - h, z[central] + h[central], z[below], z[below] - 2.0 * h[below]]
+    sizes = [n, n, n, n, n, central.size, below.size, below.size]
+    stencil = [np.concatenate(v) for v in (xs, ys, zs)]
+    finite = np.isfinite(stencil[0]) & np.isfinite(stencil[1]) & np.isfinite(stencil[2])
+    u = np.full((3, 3, finite.size), np.nan)
+    if finite.any():
+        u[:, :, finite] = tde_disp_hs_unit(*(v[finite] for v in stencil), *tri, nu)
+    xp, xm, yp, ym, zm, zp, z0, zmm = np.split(u, np.cumsum(sizes)[:-1], axis=-1)
+    grad = np.empty((3, 3, 3, n))              # slip, displacement component, derivative
+    with np.errstate(divide="ignore", invalid="ignore"):
+        grad[:, :, 0] = (xp - xm) / (2.0 * h)
+        grad[:, :, 1] = (yp - ym) / (2.0 * h)
+        grad[:, :, 2, central] = (zp - zm[:, :, central]) / (2.0 * h[central])
+        grad[:, :, 2, below] = (3.0 * z0 - 4.0 * zm[:, :, below] + zmm) / (2.0 * h[below])
+    sym = 0.5 * (grad + np.swapaxes(grad, 1, 2))
+    return np.stack([sym[:, 0, 0], sym[:, 1, 1], sym[:, 2, 2],
+                     sym[:, 0, 1], sym[:, 0, 2], sym[:, 1, 2]], axis=1)
+
+
+def distance_to_triangle(triangle, points):
+    """Each point's distance to the nearest point of the triangle, ``(npoints,)``.
+
+    ``triangle`` is ``(3, 3)`` and ``points`` ``(npoints, 3)``, in any one Cartesian frame.
+    """
+    triangle = np.asarray(triangle, dtype=float)
+    points = np.asarray(points, dtype=float)
+    v0, v1, v2 = triangle
+    normal = np.cross(v1 - v0, v2 - v0)
+    normal = normal / np.linalg.norm(normal)
+    height = (points - v0) @ normal
+    inside = np.all(barycentric(triangle, points - np.outer(height, normal)) >= 0.0, axis=1)
+    edge = np.full(points.shape[0], np.inf)
+    for a, b in ((v0, v1), (v1, v2), (v2, v0)):
+        t = np.clip((points - a) @ (b - a) / ((b - a) @ (b - a)), 0.0, 1.0)
+        edge = np.minimum(edge, np.linalg.norm(points - (a + np.outer(t, b - a)), axis=1))
+    return np.where(inside, np.abs(height), edge)
+
+
+def barycentric(triangle, points):
+    """Barycentric coordinates of points in the triangle's plane, ``(npoints, 3)``."""
+    triangle = np.asarray(triangle, dtype=float)
+    points = np.asarray(points, dtype=float)
+    v0 = triangle[0]
+    e1, e2 = triangle[1] - v0, triangle[2] - v0
+    gram = np.array([[e1 @ e1, e1 @ e2], [e1 @ e2, e2 @ e2]])
+    rhs = np.stack([(points - v0) @ e1, (points - v0) @ e2])
+    a, b = np.linalg.solve(gram, rhs)
+    return np.column_stack([1.0 - a - b, a, b])
+
+
 def _rotate_m(a, u, v, w):
     """``a @ [u; v; w]`` for components with a leading slip axis; ``(3, m, npts)``."""
     return np.stack([a[i, 0] * u + a[i, 1] * v + a[i, 2] * w for i in range(3)])

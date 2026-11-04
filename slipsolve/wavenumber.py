@@ -81,6 +81,18 @@ TABLE_KEYS = (("ss", "uz"), ("ss", "ur"), ("ss", "ut"),
               ("cl", "uz"), ("cl", "ur"),
               ("ep", "uz"), ("ep", "ur"))
 
+#: The combinations of :data:`TABLE_KEYS` that the strain divides by ``r``
+#: (:func:`~slipsolve.layered_tde.combine_strain`), each tabulated over ``r``.
+OVER_R_KEYS = (("ss", "ur-2ut"), ("ss", "2ur-ut"), ("ss", "uz"), ("ds", "ur+ut"), ("ds", "uz"),
+               ("cl", "ur"), ("ep", "ur"))
+
+#: The strain tables' columns: :data:`TABLE_KEYS`' derivatives in distance (``"dr"``), then
+#: in receiver depth (``"dz"``, depth positive down), then :data:`OVER_R_KEYS` over ``r``
+#: (``"/r"``). The azimuthal derivatives need no table: the azimuthal patterns are known.
+STRAIN_KEYS = (tuple(("dr",) + key for key in TABLE_KEYS)
+               + tuple(("dz",) + key for key in TABLE_KEYS)
+               + tuple(("/r",) + key for key in OVER_R_KEYS))
+
 #: Wavenumber range (1/m) of the Hankel transforms, and the number of samples.
 #: Fourteen decades put the transform's periodic ends far outside any distance
 #: used: ``1/k`` spans 1 cm to 1e12 m against tables from 0.5 m to 2000 km.
@@ -302,15 +314,19 @@ class _Solution:
         self.c = np.linalg.solve(a, rhs)
         self.c_sh = np.linalg.solve(b, rhs_sh)
 
-    def at(self, z_receiver):
+    def at(self, z_receiver, derivatives=False):
         """``U``, ``V``, ``W`` at the receiver depths: each ``(n_z, n_k, n_sources)``.
 
+        With ``derivatives``, also their derivatives in depth (``z`` down), ``U'``,
+        ``V'``, ``W'``: six arrays. They come from the layer's equations and the
+        tractions the solution already carries, ``U' = (R + lam k V) / (lam + 2 mu)``,
+        ``V' = S / mu - k U`` and ``W' = T / mu``, with the receiver layer's constants.
         A receiver at the source depth takes the side below it.
         """
         z_receiver = np.atleast_1d(np.asarray(z_receiver, dtype=float))
         k = self.k
         n_layers = self.tops.size
-        out = np.empty((3, z_receiver.size, k.size, self.c.shape[-1]))
+        out = np.empty((6 if derivatives else 3, z_receiver.size, k.size, self.c.shape[-1]))
         layer = _layer_index(self.tops, z_receiver)
         for which in np.unique(layer):
             pick = np.flatnonzero(layer == which)
@@ -325,7 +341,16 @@ class _Solution:
             e_sh = _sh_columns(zt, zb, self.mu[which], half)
             out[2, pick] = np.einsum("zki,kis->zks", e_sh[:, :, 0, :],
                                      self.c_sh[:, self._cols[which], :])
-        return out[0], out[1], out[2]
+            if derivatives:
+                lam, mu = self.lam[which], self.mu[which]
+                # The traction rows, scaled by 1 / (k MU_SCALE) as in the global matrix.
+                rs = np.einsum("zkri,kis->rzks", e[:, :, 2:4, :], self.c[:, self._col[which], :])
+                t = np.einsum("zki,kis->zks", e_sh[:, :, 1, :], self.c_sh[:, self._cols[which], :])
+                kk = k[None, :, None]
+                out[3, pick] = kk * (MU_SCALE * rs[0] + lam * uv[1]) / (lam + 2.0 * mu)
+                out[4, pick] = kk * (MU_SCALE * rs[1] / mu - uv[0])
+                out[5, pick] = kk * MU_SCALE * t / mu
+        return tuple(out)
 
 
 def wavenumbers(k_range=K_RANGE, n=N_WAVENUMBERS):
@@ -334,20 +359,23 @@ def wavenumbers(k_range=K_RANGE, n=N_WAVENUMBERS):
     return k, float(np.log(k_range[1] / k_range[0]) / (int(n) - 1))
 
 
-def kernels(tops, lam, mu, z_source, z_receiver, k, remainder=True):
+def kernels(tops, lam, mu, z_source, z_receiver, k, remainder=True, derivatives=False):
     """``U``, ``V``, ``W`` per unit potency, ``(n_z, n_k, 4)`` each.
 
     ``remainder=True`` subtracts the half-space with the source layer's ``lam`` and
     ``mu``, which is what the tables hold. ``False`` keeps the whole layered field,
     which is singular at the source: transform it only for receivers off the
-    source's depth.
+    source's depth. ``derivatives`` adds their depth derivatives ``U'``, ``V'``,
+    ``W'`` (see :meth:`_Solution.at`), six arrays in all; the remainder's are
+    continuous at the source, where both fields jump alike.
     """
     j = int(_layer_index(tops, z_source))
     psv, sh = source_jumps(lam[j], mu[j])
-    layered = _Solution(k, tops, lam, mu, z_source, psv, sh).at(z_receiver)
+    layered = _Solution(k, tops, lam, mu, z_source, psv, sh).at(z_receiver, derivatives)
     if not remainder:
         return layered
-    half = _Solution(k, tops[:1], lam[j:j + 1], mu[j:j + 1], z_source, psv, sh).at(z_receiver)
+    half = _Solution(k, tops[:1], lam[j:j + 1], mu[j:j + 1], z_source, psv, sh).at(z_receiver,
+                                                                                derivatives)
     return tuple(a - b for a, b in zip(layered, half))
 
 
@@ -367,7 +395,47 @@ def hankel(f, k, dln, order):
     return r, values / r
 
 
-def transform(U, V, W, k, dln, r):
+def _log_distance(r):
+    """``log r``, with ``r = 0`` at the smallest positive float: interpolation clamps it to the first node."""
+    return np.log(np.maximum(np.asarray(r, dtype=float), np.finfo(float).tiny))
+
+
+def _hankel_at(f, k, dln, order, log_r):
+    """:func:`hankel` at ``r = exp(log_r)``, linear in ``log r`` between its own nodes."""
+    grid, values = hankel(f, k, dln, order)
+    flat = values.reshape(-1, values.shape[-1])
+    out = np.stack([np.interp(log_r, np.log(grid), row) for row in flat])
+    return out.reshape(values.shape[:-1] + (log_r.size,))
+
+
+def _hankel_dr_at(f, k, dln, order, log_r):
+    """``d/dr`` of :func:`_hankel_at`'s integral: ``(H_{n-1}[k f] - H_{n+1}[k f]) / 2``.
+
+    From ``J_n'(x) = (J_{n-1}(x) - J_{n+1}(x)) / 2`` under the integral, and
+    ``J_{-1} = -J_1`` for order 0 (FFTLog's kernel has a pole at order -1).
+    """
+    g = k * f
+    lower = (-_hankel_at(g, k, dln, 1, log_r) if order == 0
+             else _hankel_at(g, k, dln, order - 1, log_r))
+    return 0.5 * (lower - _hankel_at(g, k, dln, order + 1, log_r))
+
+
+def _hankel_over_r_at(f, k, dln, order, log_r):
+    """:func:`_hankel_at`'s integral over ``r``: ``(H_{n-1}[k f] + H_{n+1}[k f]) / (2 n)``.
+
+    From ``J_n(x) / x = (J_{n-1}(x) + J_{n+1}(x)) / (2 n)``, ``n >= 1``. No division by
+    ``r``: dividing a transform that vanishes on the axis by ``r`` amplifies FFTLog's
+    absolute error floor there (a strike-slip source's strain was 1000x off on the axis,
+    2026-11-04), where these are finite and accurate.
+    """
+    if order < 1:
+        raise ValueError("over r needs order >= 1; an order-0 transform does not vanish on the axis")
+    g = k * f
+    return (_hankel_at(g, k, dln, order - 1, log_r)
+            + _hankel_at(g, k, dln, order + 1, log_r)) / (2.0 * order)
+
+
+def transform(U, V, W, k, dln, r, radial=False):
     """The ten table components from ``U``, ``V``, ``W``, at distances ``r``.
 
     Returns ``(..., n_r, 10)`` in :data:`TABLE_KEYS` order, with EDGRN's azimuthal
@@ -375,14 +443,19 @@ def transform(U, V, W, k, dln, r):
     ``ut``; ``ds`` is ``cos phi`` and ``sin phi``; ``cl`` and ``ep`` are axisymmetric.
     The horizontal components use ``J_m' = (J_{m-1} - J_{m+1}) / 2`` and
     ``m J_m / x = (J_{m-1} + J_{m+1}) / 2``.
+
+    ``radial=True`` returns their derivatives in ``r`` instead: every column is a sum
+    of Hankel transforms, and each transform's derivative is two more
+    (:func:`_hankel_dr_at`), so the recipe is the same. Their derivatives in depth are
+    this transform of ``U'``, ``V'``, ``W'`` (:func:`kernels` with ``derivatives``).
+    A distance below FFTLog's first node (about 1 cm), ``r = 0`` included, takes that
+    node's value.
     """
-    log_r = np.log(r)
+    log_r = _log_distance(r)
+    one = _hankel_dr_at if radial else _hankel_at
 
     def h(f, order):
-        grid, values = hankel(f, k, dln, order)
-        flat = values.reshape(-1, values.shape[-1])
-        out = np.stack([np.interp(log_r, np.log(grid), row) for row in flat])
-        return out.reshape(values.shape[:-1] + (r.size,))
+        return one(f, k, dln, order, log_r)
 
     u = {name: U[..., i] for i, name in enumerate(SOURCE_TYPES)}
     v = {name: V[..., i] for i, name in enumerate(SOURCE_TYPES)}
@@ -398,6 +471,37 @@ def transform(U, V, W, k, dln, r):
         h(u["ep"], 0), -h(v["ep"], 1),
     ]
     return np.stack(columns, axis=-1)
+
+
+def transform_over_r(U, V, W, k, dln, r):
+    """The :data:`OVER_R_KEYS` combinations divided by ``r``, at distances ``r``: ``(..., n_r, 7)``.
+
+    With :func:`transform`'s recipe, ``ss_ur = (S1 - S3) / 2`` and ``ss_ut = (S1 + S3) / 2``
+    for ``S1 = H_1[V - W]``, ``S3 = H_3[V + W]``; ``ds_ur + ds_ut = -H_2[V - W]`` (the order-0
+    parts cancel exactly); ``cl_ur = -H_1[V]``. Every term has order >= 1, so each goes
+    over ``r`` by :func:`_hankel_over_r_at`, finite and smooth on the axis.
+    """
+    log_r = _log_distance(r)
+
+    def over(f, order):
+        return _hankel_over_r_at(f, k, dln, order, log_r)
+
+    u = {name: U[..., i] for i, name in enumerate(SOURCE_TYPES)}
+    v = {name: V[..., i] for i, name in enumerate(SOURCE_TYPES)}
+    w = {name: W[..., i] for i, name in enumerate(SOURCE_TYPES)}
+    s1 = over(v["ss"] - w["ss"], 1)
+    s3 = over(v["ss"] + w["ss"], 3)
+    columns = [-0.5 * s1 - 1.5 * s3, 0.5 * s1 - 1.5 * s3, over(u["ss"], 2),
+               -over(v["ds"] - w["ds"], 2), over(u["ds"], 1),
+               -over(v["cl"], 1), -over(v["ep"], 1)]
+    return np.stack(columns, axis=-1)
+
+
+def strain_columns(U, V, W, dU, dV, dW, k, dln, r):
+    """The :data:`STRAIN_KEYS` columns from the kernels and their depth derivatives: ``(..., n_r, 27)``."""
+    return np.concatenate([transform(U, V, W, k, dln, r, radial=True),
+                           transform(dU, dV, dW, k, dln, r),
+                           transform_over_r(U, V, W, k, dln, r)], axis=-1)
 
 
 # -- the tables ---------------------------------------------------------------------
@@ -425,11 +529,17 @@ def surface_depth_grid(tops, fine_to=60e3, z_max=200e3, first=5.0, growth=1.5, s
 
 
 def _one_source_depth(task):
-    """One source depth's remainder slice, ``(n_r, n_z, 10)``."""
-    tops, lam, mu, z_source, z, r, k_range, n_k = task
+    """One source depth's remainder slice, ``(n_r, n_z, 10)``, and with ``strain`` its
+    strain columns, ``(n_r, n_z, 27)`` (:data:`STRAIN_KEYS`), else ``None``."""
+    tops, lam, mu, z_source, z, r, k_range, n_k, strain = task
     k, dln = wavenumbers(k_range, n_k)
-    U, V, W = kernels(tops, lam, mu, z_source, z, k)
-    return np.moveaxis(transform(U, V, W, k, dln, r), 1, 0)
+    if not strain:
+        U, V, W = kernels(tops, lam, mu, z_source, z, k)
+        return np.moveaxis(transform(U, V, W, k, dln, r), 1, 0), None
+    U, V, W, dU, dV, dW = kernels(tops, lam, mu, z_source, z, k, derivatives=True)
+    values = transform(U, V, W, k, dln, r)
+    derivatives = strain_columns(U, V, W, dU, dV, dW, k, dln, r)
+    return np.moveaxis(values, 1, 0), np.moveaxis(derivatives, 1, 0)
 
 
 def _one_surface_depth(task):
@@ -510,9 +620,14 @@ class RemainderTables:
     ``far``). ⚠️ The 3-D grid is too coarse in depth for a point source's field at
     the surface (500 m mid-layer against the ~100 m that 1e-3 needs at a few km),
     so surface receivers should always come from ``surface``.
+
+    ``strain`` (optional) is ``(n_r, n_z, n_z, 27)`` on the 3-D grid: the remainder's
+    derivatives in distance and receiver depth and its ``1/r`` combinations
+    (:data:`STRAIN_KEYS`), for the strain of a point source at depth (:meth:`gather_strain`).
+    Receivers at the surface need none.
     """
 
-    def __init__(self, r, z, values, tops, lam, mu, attrs=None, surface=None):
+    def __init__(self, r, z, values, tops, lam, mu, attrs=None, surface=None, strain=None):
         self.r = np.asarray(r, dtype=float)
         self.z = np.asarray(z, dtype=float)
         self.values = np.asarray(values)
@@ -523,6 +638,10 @@ class RemainderTables:
         expected = (self.r.size, self.z.size, self.z.size, len(TABLE_KEYS))
         if self.values.shape != expected:
             raise ValueError(f"values have shape {self.values.shape}; expected {expected}")
+        self.strain = None if strain is None else np.asarray(strain)
+        if self.strain is not None and self.strain.shape != expected[:-1] + (len(STRAIN_KEYS),):
+            raise ValueError(f"strain has shape {self.strain.shape}; expected "
+                             f"{expected[:-1] + (len(STRAIN_KEYS),)}")
         self._r_axis = _LogAxis(self.r)
         self._z_axis = _DepthAxis(self.z, self.tops)
         self._nodes = self._z_axis.nodes
@@ -541,16 +660,21 @@ class RemainderTables:
     def has_surface(self):
         return self.surface is not None
 
+    @property
+    def has_strain(self):
+        return self.strain is not None
+
     @classmethod
     def compute(cls, model, z=None, r=None, k_range=K_RANGE, n_k=N_WAVENUMBERS,
-                z_max=200e3, surface_z=None, surface_r=None, workers=None):
+                z_max=200e3, surface_z=None, surface_r=None, workers=None, strain=False):
         """Tabulate the remainder for ``model`` (a :class:`~slipsolve.edgrn.VelocityModel`).
 
         ``z`` defaults to :func:`depth_grid` to ``z_max`` and ``r`` to
         :func:`distance_grid`; the surface tables to :func:`surface_depth_grid` and
         50 distances a decade. Each source depth is independent; ``workers`` runs
         them in that many processes (the Venezuela crust's 172 depths took 377 s in
-        one).
+        one). ``strain`` also tabulates the 3-D grid's strain columns (:attr:`strain`):
+        about five times the transforms and 2.7 times the memory of the 3-D part.
         """
         tops, lam, mu = layer_stack(model)
         z = depth_grid(tops, z_max) if z is None else np.asarray(z, dtype=float)
@@ -559,27 +683,36 @@ class RemainderTables:
               else np.asarray(surface_z, dtype=float))
         sr = distance_grid(per_decade=50) if surface_r is None else np.asarray(surface_r, dtype=float)
         values = np.empty((r.size, z.size, z.size, len(TABLE_KEYS)))
+        derivatives = (np.empty((r.size, z.size, z.size, len(STRAIN_KEYS))) if strain
+                       else None)
         whole = np.empty((sr.size, sz.size, len(TABLE_KEYS)))
         remainder = np.empty_like(whole)
-        tasks = [(tops, lam, mu, z_source, z, r, k_range, n_k) for z_source in z]
+        tasks = [(tops, lam, mu, z_source, z, r, k_range, n_k, bool(strain)) for z_source in z]
         surface_tasks = [(tops, lam, mu, z_source, sr, k_range, n_k) for z_source in sz]
+
+        def keep(j, block):
+            values[:, j] = block[0]
+            if strain:
+                derivatives[:, j] = block[1]
+
         if workers and workers > 1:
             from concurrent.futures import ProcessPoolExecutor
 
             with ProcessPoolExecutor(int(workers)) as pool:
                 for j, block in enumerate(pool.map(_one_source_depth, tasks)):
-                    values[:, j] = block
+                    keep(j, block)
                 for j, (w, rem) in enumerate(pool.map(_one_surface_depth, surface_tasks)):
                     whole[:, j], remainder[:, j] = w, rem
         else:
             for j, task in enumerate(tasks):
-                values[:, j] = _one_source_depth(task)
+                keep(j, _one_source_depth(task))
             for j, task in enumerate(surface_tasks):
                 whole[:, j], remainder[:, j] = _one_surface_depth(task)
         attrs = {"k_range": list(k_range), "n_k": int(n_k),
                  "model": model.to_dict() if hasattr(model, "to_dict") else None}
         return cls(r, z, values, tops, lam, mu, attrs=attrs,
-                   surface={"r": sr, "z": sz, "whole": whole, "remainder": remainder})
+                   surface={"r": sr, "z": sz, "whole": whole, "remainder": remainder},
+                   strain=derivatives)
 
     # -- lookups ---------------------------------------------------------------------
     def layer(self, depth):
@@ -618,13 +751,17 @@ class RemainderTables:
         """Two nodes in the depth's layer and a weight, on the 3-D table's depth grid."""
         return self._z_axis.stencil(depth)
 
-    def gather(self, distance, source, receiver):
-        """The trilinear sum over three stencils, one gather of all eight corners."""
+    def gather(self, distance, source, receiver, table=None):
+        """The trilinear sum over three stencils, one gather of all eight corners.
+
+        ``table`` is the 3-D array to read, :attr:`values` by default.
+        """
+        table = self.values if table is None else table
         i0, ti = distance
         s0, s1, ts = source
         q0, q1, tq = receiver
         nz = self.z.size
-        flat = self.values.reshape(-1, self.values.shape[-1])
+        flat = table.reshape(-1, table.shape[-1])
         index, weight = [], []
         for ii, wi in ((i0, 1.0 - ti), (i0 + 1, ti)):
             for jj, wj in ((s0, 1.0 - ts), (s1, ts)):
@@ -633,6 +770,12 @@ class RemainderTables:
                     weight.append(wi * wj * wl)
         corners = flat[np.stack(index)]                   # (8, n, 10)
         return np.einsum("cn,cnk->nk", np.stack(weight), corners)
+
+    def gather_strain(self, distance, source, receiver):
+        """:meth:`gather` on the strain tables: ``(n, 27)`` in :data:`STRAIN_KEYS` order."""
+        if self.strain is None:
+            raise ValueError("these tables carry no strain; compute them with strain=True")
+        return self.gather(distance, source, receiver, table=self.strain)
 
     def surface_lookup(self, distance, source_depth, which="remainder"):
         """Bilinear lookup in ``(log r, z_source)`` for receivers at the surface; ``(n, 10)``.
@@ -657,6 +800,8 @@ class RemainderTables:
         path = Path(path).expanduser()
         extra = ({} if self.surface is None else
                  {f"surface_{k}": v for k, v in self.surface.items()})
+        if self.strain is not None:
+            extra["strain"] = self.strain
         np.savez_compressed(path, r=self.r, z=self.z, values=self.values, tops=self.tops,
                             lam=self.lam, mu=self.mu, attrs=json.dumps(self.attrs), **extra)
         return path
@@ -667,10 +812,11 @@ class RemainderTables:
         with np.load(Path(path).expanduser(), allow_pickle=False) as f:
             surface = ({k: f[f"surface_{k}"] for k in ("r", "z", "whole", "remainder")}
                        if "surface_whole" in f.files else None)
+            strain = f["strain"] if "strain" in f.files else None
             return cls(f["r"], f["z"], f["values"], f["tops"], f["lam"], f["mu"],
-                       attrs=json.loads(str(f["attrs"])), surface=surface)
+                       attrs=json.loads(str(f["attrs"])), surface=surface, strain=strain)
 
     def __repr__(self):
         return (f"<RemainderTables {len(self.tops)} layers, nr={self.r.size} "
                 f"r={self.r[0]:.1f}m-{self.r[-1] / 1e3:.0f}km, nz={self.z.size} "
-                f"z=0-{self.z[-1] / 1e3:.0f}km>")
+                f"z=0-{self.z[-1] / 1e3:.0f}km{', strain' if self.has_strain else ''}>")

@@ -31,6 +31,8 @@ least accurate place in the model.
 import numpy as np
 
 from ._tde import _element_basis, tde_disp_hs, tde_disp_hs_unit
+from ._tde import barycentric as _barycentric
+from ._tde import distance_to_triangle as _distance_to_triangle
 from .greens import _as_points, _require_finite
 from .layered import _QUADRATURE_CONSTANT, _QUADRATURE_SAFETY, _triangle_quadrature
 from .wavenumber import TABLE_KEYS
@@ -485,28 +487,90 @@ def _combine(values, azimuth, packing):
     return out
 
 
-def _distance_to_triangle(triangle, points):
-    """Each point's distance to the nearest point of the triangle, ``(npoints,)``."""
-    v0, v1, v2 = triangle
-    normal = np.cross(v1 - v0, v2 - v0)
-    normal = normal / np.linalg.norm(normal)
-    height = (points - v0) @ normal
-    inside = np.all(_barycentric(triangle, points - np.outer(height, normal)) >= 0.0, axis=1)
-    edge = np.full(points.shape[0], np.inf)
-    for a, b in ((v0, v1), (v1, v2), (v2, v0)):
-        t = np.clip((points - a) @ (b - a) / ((b - a) @ (b - a)), 0.0, 1.0)
-        edge = np.minimum(edge, np.linalg.norm(points - (a + np.outer(t, b - a)), axis=1))
-    return np.where(inside, np.abs(height), edge)
+def tensor_packing(moment, lam, mu):
+    """``(m1, m2, m3, m4, m5, e)`` of a moment tensor, for tables carrying ``mu`` and ``K``.
+
+    ``moment`` is ``(3, 3)`` east/north/up (or ``(n, 3, 3)``), at a source whose layer
+    has ``lam`` and ``mu``. The tables give the field per unit potency with the moment
+    ``mu`` times a deviatoric unit tensor (``ss``, ``ds``, ``cl``) or ``K = lam + 2 mu / 3``
+    times the identity (``ep``), so the packing is ``dev(M) / mu`` in EDCMP's five and
+    ``e = tr(M) / (3 K)``. A dislocation's moment, ``mu (n d + d n) + lam (n . d) I``,
+    packs exactly as :func:`moment_packing` packs ``n`` and ``d``.
+    """
+    m = np.asarray(moment, dtype=float)
+    single = m.ndim == 2
+    m = m.reshape(-1, 3, 3)
+    m = 0.5 * (m + np.swapaxes(m, 1, 2))
+    trace = np.trace(m, axis1=1, axis2=2)
+    dev = (m - trace[:, None, None] / 3.0 * np.eye(3)) / float(mu)
+    swap = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
+    ned = swap @ dev @ swap.T
+    out = np.column_stack([ned[:, 0, 1], ned[:, 0, 2], ned[:, 2, 2],
+                           0.5 * (ned[:, 0, 0] - ned[:, 1, 1]), ned[:, 1, 2],
+                           trace / (3.0 * (float(lam) + 2.0 * float(mu) / 3.0))])
+    return out[0] if single else out
 
 
-def _barycentric(triangle, points):
-    """Barycentric coordinates of points in the triangle's plane, ``(npoints, 3)``."""
-    v0 = triangle[0]
-    e1, e2 = triangle[1] - v0, triangle[2] - v0
-    gram = np.array([[e1 @ e1, e1 @ e2], [e1 @ e2, e2 @ e2]])
-    rhs = np.stack([(points - v0) @ e1, (points - v0) @ e2])
-    a, b = np.linalg.solve(gram, rhs)
-    return np.column_stack([1.0 - a - b, a, b])
+def combine_strain(values, derivatives, azimuth, packing):
+    """Strain of each tabulated pair for each moment packing: ``(npairs, ncomp, 6)``.
+
+    ``values`` are the ten table columns at each pair (:func:`_combine`'s input) and
+    ``derivatives`` the 27 strain columns (:data:`~slipsolve.wavenumber.STRAIN_KEYS`:
+    derivatives in distance and in receiver depth, then the ``1/r`` combinations), as
+    :meth:`~slipsolve.wavenumber.RemainderTables.gather_strain` returns them; ``azimuth``
+    is the direction from source to receiver clockwise from north. Components as
+    :data:`~slipsolve._tde.STRAIN_COMPONENTS`: east, north, up, tensor shears.
+
+    In EDGRN's north/east/down frame ``(r, phi, z)`` is a right-handed cylindrical
+    system with ``z`` down, so the usual formulas hold::
+
+        e_rr = d_r u_r          e_pp = (d_phi u_t + u_r) / r       e_zz = d_z u_z
+        e_rp = (d_r u_t + (d_phi u_r - u_t) / r) / 2
+        e_rz = (d_z u_r + d_r u_z) / 2          e_pz = (d_z u_t + d_phi u_z / r) / 2
+
+    The azimuthal derivatives need no table: the patterns :func:`_combine` puts back
+    differentiate into each other (``sin 2phi`` and ``cos 2phi`` swap with a factor 2,
+    ``sin phi`` and ``cos phi`` with 1; ``cl`` and ``ep`` have none). What is divided by
+    ``r`` is read from the tables' ``1/r`` columns, never divided here, so the axis
+    (``r = 0``, where a volume rule puts points) needs no special case. Then
+    ``eps_ENU = Q' eps_cyl Q`` with rows ``e_r = (sin, cos, 0)``, ``e_phi = (cos, -sin, 0)``,
+    ``e_down = (0, 0, -1)``.
+    """
+    values = np.asarray(values, dtype=float).T
+    derivatives = np.asarray(derivatives, dtype=float).T
+    radial, depth, over = derivatives[:10], derivatives[10:20], derivatives[20:27]
+    azimuth = np.asarray(azimuth, dtype=float)
+    cos1, sin1 = np.cos(azimuth), np.sin(azimuth)
+    cos2, sin2 = np.cos(2.0 * azimuth), np.sin(2.0 * azimuth)
+    out = np.empty((azimuth.size, np.shape(packing)[0], 6))
+    for i, (m1, m2, m3, m4, m5, e) in enumerate(np.asarray(packing, dtype=float)):
+        ps_ss = m1 * sin2 + m4 * cos2
+        sh_ss = m1 * cos2 - m4 * sin2
+        ps_ds = m2 * cos1 + m5 * sin1
+        sh_ds = m2 * sin1 - m5 * cos1
+        fields = []
+        for t in (radial, depth):
+            fields.append((ps_ss * t[0] + ps_ds * t[3] + m3 * t[6] + e * t[8],
+                           ps_ss * t[1] + ps_ds * t[4] + m3 * t[7] + e * t[9],
+                           sh_ss * t[2] + sh_ds * t[5]))
+        (uz_r, ur_r, ut_r), (uz_z, ur_z, ut_z) = fields
+        # (d_phi u_t + u_r) / r, (d_phi u_r - u_t) / r and d_phi u_z / r, from the 1/r columns
+        hoop = ps_ss * over[0] + ps_ds * over[3] + m3 * over[5] + e * over[6]
+        twist = sh_ss * over[1] - sh_ds * over[3]
+        tilt = 2.0 * sh_ss * over[2] - sh_ds * over[4]
+        e_rr = ur_r
+        e_pp = hoop
+        e_zz = uz_z
+        e_rp = 0.5 * (ut_r + twist)
+        e_rz = 0.5 * (ur_z + uz_r)
+        e_pz = 0.5 * (ut_z + tilt)
+        out[:, i, 0] = sin1 * sin1 * e_rr + 2.0 * sin1 * cos1 * e_rp + cos1 * cos1 * e_pp
+        out[:, i, 1] = cos1 * cos1 * e_rr - 2.0 * sin1 * cos1 * e_rp + sin1 * sin1 * e_pp
+        out[:, i, 2] = e_zz
+        out[:, i, 3] = sin1 * cos1 * (e_rr - e_pp) + (cos1 * cos1 - sin1 * sin1) * e_rp
+        out[:, i, 4] = -(sin1 * e_rz + cos1 * e_pz)
+        out[:, i, 5] = -(cos1 * e_rz - sin1 * e_pz)
+    return out
 
 
 def _tent_levels(vertices, j, interfaces, count):
