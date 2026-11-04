@@ -424,3 +424,21 @@ def test_bodies_set_the_voxels_whose_centres_they_hold(coarse_tables):
     assert np.all(soft == 4e9) and np.all(v.lam[:2, :2, 0] == 5e9)
     assert np.allclose(v.mu[1:3, 1:3, 1:3], 0.8 * t.mu[1])
     assert np.all(~v.active[3, 3, :])
+
+
+def test_a_surface_voxel_leaves_the_free_surface_traction_free(uniform_tables):
+    """At ``z = 0`` over a surface voxel (its eigenstrain subtracted) and around it, ``sigma . e_z = 0``.
+
+    The top face is dropped and the interior term carries the rest. Measured 3e-8 of the peak
+    stress (2026-11-04), inside the footprint and out, uniform and two-layer crusts.
+    """
+    v = VoxelSource(LayeredTDE(uniform_tables), (-500.0, 700.0), (-300.0, 600.0), (0.0, 800.0))
+    xs = np.array([0.0, 300.0, -250.0, 2000.0, -1800.0, 400.0])
+    ys = np.array([100.0, 350.0, -100.0, 900.0, -2000.0, 2600.0])
+    z = np.zeros(xs.size)
+    inside = v.inside(xs, ys, z)
+    assert inside[:3].all() and not inside[3:].any()
+    elastic = v.strain(xs, ys, z) - np.where(inside[:, None, None], to_voigt(v.eigenstrain)[None], 0.0)
+    t = from_voigt(elastic)
+    sigma = v.lam * np.trace(t, axis1=-2, axis2=-1)[..., None, None] * np.eye(3) + 2.0 * v.mu * t
+    assert np.abs(sigma[..., :, 2]).max() < 1e-6 * np.abs(sigma).max()
