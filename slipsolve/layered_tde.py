@@ -30,7 +30,7 @@ least accurate place in the model.
 
 import numpy as np
 
-from ._tde import _element_basis, tde_disp_hs, tde_disp_hs_unit
+from ._tde import _element_basis, tde_disp_hs, tde_disp_hs_unit, tde_strain_hs_unit
 from ._tde import barycentric as _barycentric
 from ._tde import distance_to_triangle as _distance_to_triangle
 from .greens import _as_points, _require_finite
@@ -62,6 +62,17 @@ TENT_MAX_POINTS = 24
 #: 3.6; 3 points 3e-4 at 1.8; 6 points 1e-4 at 0.36; 12 points 6e-5 at 0.11; 24 points 1.4e-4 at
 #: 0.04. Projecting the element's mean instead puts a single tent 9-60% off at those distances.
 TENT_GAIN = 2.0
+
+#: :data:`TENT_GAIN` and the fewest Gauss-Legendre points for a tent's STRAIN
+#: (:meth:`LayeredTDE.tent_strain`). Strain at depth has no far path, so the tent rule
+#: must hold at any distance, and two points do not: far away the level integrand is
+#: ``(1-t)^2`` times a polynomial in ``(1-t)``, whose ``(1-t)^4`` term two points miss,
+#: leaving ``~0.05 (L/d)^2`` (5e-3 at 3 sizes; the displacement's far path hides it
+#: beyond 4). Measured (2026-11-04, the three tents' sum against the element, two
+#: triangles, 0.6-30 sizes, worst over components): gain 2 / min 2 up to 5e-3;
+#: gain 4 / min 3 at most 4e-5 within 2 sizes and 9e-5 beyond.
+STRAIN_TENT_GAIN = 4.0
+STRAIN_TENT_MIN_POINTS = 3
 
 #: A piece smaller than this fraction of its triangle is dropped. Clipping at an
 #: interface that passes within rounding of a vertex leaves slivers whose
@@ -314,26 +325,96 @@ class LayeredTDE:
         far = self._far(vertices, x, y, z)
         near = np.flatnonzero(~far)
         if near.size:
-            area = 0.5 * np.linalg.norm(np.cross(vertices[1] - vertices[0], vertices[2] - vertices[0]))
-            size = np.sqrt(2.0 * area)
-            distance = _distance_to_triangle(vertices, np.column_stack([x[near], y[near], z[near]]))
-            points = np.clip(np.ceil(TENT_GAIN * size / np.maximum(distance, 1e-3 * size)) + 1,
-                             2, TENT_MAX_POINTS).astype(int)
-            for count in np.unique(points):
-                at = near[points == count]
-                for j in range(3):
-                    levels, weights = _tent_levels(vertices, j, self._interfaces, int(count))
-                    for level, weight in zip(levels, weights):
-                        shrunk = vertices[j] + (1.0 - level) * (vertices - vertices[j])
-                        cut = split_by_layers(shrunk, self._interfaces)
-                        nu = self.tables.poisson(np.array([mid for _, mid in cut]))
-                        for (tri, _), nu_piece in zip(cut, nu):
-                            u = tde_disp_hs_unit(x[at], y[at], z[at], *tri, nu_piece)[components]
-                            out[at, j] += weight * np.moveaxis(u, -1, 0)
+            self._tent_halfspace(vertices, x, y, z, near, out, components, tde_disp_hs_unit)
             out[near] += self._remainder(pieces, packing, x[near], y[near], z[near], parent=vertices)
         if far.any():
             out[far] = self._remainder(pieces, packing, x[far], y[far], z[far], parent=vertices,
                                        whole=True)
+        return out
+
+    def _tent_halfspace(self, vertices, x, y, z, near, out, components, kernel,
+                        gain=None, min_points=2):
+        """Add each tent's half-space field at the points ``near`` into ``out[near]``.
+
+        :func:`tent_levelset` with this engine's interfaces and each piece's own layer's
+        Poisson ratio. ``kernel`` is :func:`~slipsolve._tde.tde_disp_hs_unit` (displacement)
+        or :func:`~slipsolve._tde.tde_strain_hs_unit` (strain); ``out`` is
+        ``(npts, 3, ncomp, 3 or 6)``.
+        """
+        tent_levelset(vertices, x, y, z, near, out, components, kernel,
+                      TENT_GAIN if gain is None else gain, min_points, self._interfaces,
+                      self.tables.poisson)
+
+    # -- strain at depth: the heterogeneous engine's E ------------------------------
+    def strain(self, mesh, x, y, z, basis=None):
+        """Strain per unit slip at points, ``(npts, 6, 2 * n_parameters)``.
+
+        Components as :data:`~slipsolve._tde.STRAIN_COMPONENTS` (east, north, up; tensor
+        shears); columns as :meth:`displacement`: element columns without a basis, each
+        node's tent with a nodal one. For points at depth (the voxel centres of
+        :mod:`slipsolve.heterogeneity`); there is no far path, since no table holds the
+        whole field's strain. Needs tables computed with ``strain=True``.
+        """
+        x, y, z = _as_points(x, y, z)
+        nodal = basis is not None and getattr(basis, "name", "element") != "element"
+        if not nodal:
+            n = mesh.n_elements
+            out = np.zeros((x.size, 6, 2 * n))
+            for k in range(n):
+                eps = self.element_strain(mesh.vertices[k], x, y, z, components=(0, 1))
+                out[:, :, k] += eps[:, 0]
+                out[:, :, n + k] += eps[:, 1]
+        else:
+            if basis.name != "node":
+                raise ValueError(f"LayeredTDE cannot assemble the {basis.name!r} basis")
+            n = basis.n_basis
+            out = np.zeros((x.size, 6, 2 * n))
+            triangles = np.asarray(mesh.triangles)
+            for e in range(mesh.n_elements):
+                tents = self.tent_strain(mesh.vertices[e], x, y, z, components=(0, 1))
+                for j, node in enumerate(triangles[e]):
+                    out[:, :, node] += tents[:, j, 0]
+                    out[:, :, n + node] += tents[:, j, 1]
+        _require_finite(out, mesh, x, y, z)
+        return out
+
+    def element_strain(self, vertices, x, y, z=None, components=(0, 1, 2)):
+        """Strain of unit slip on one triangle: ``(npts, len(components), 6)``.
+
+        The half-space strain of each piece (:func:`~slipsolve._tde.tde_strain_hs_unit`,
+        with its layer's Poisson ratio) plus the remainder's, integrated over the pieces
+        (:meth:`~slipsolve.wavenumber.RemainderTables.gather_strain`,
+        :func:`combine_strain`). Receivers anywhere at or below the surface; there is no
+        far path.
+        """
+        x, y, z = _as_points(x, y, z)
+        vertices = np.asarray(vertices, dtype=float)
+        components = list(components)
+        packing = self._packing(vertices)[components]
+        pieces = split_by_layers(vertices, self._interfaces)
+        out = np.zeros((x.size, len(components), 6))
+        nu = self.tables.poisson(np.array([mid for _, mid in pieces]))
+        for (tri, _), nu_piece in zip(pieces, nu):
+            out += np.moveaxis(tde_strain_hs_unit(x, y, z, *tri, nu_piece)[components], -1, 0)
+        out += self._remainder(pieces, packing, x, y, z, strain=True)
+        return out
+
+    def tent_strain(self, vertices, x, y, z=None, components=(0, 1)):
+        """Strain of unit slip shaped by each of the triangle's tents: ``(npts, 3, ncomp, 6)``.
+
+        :meth:`tent_field`'s construction with the half-space strain in the level-set
+        integral and the remainder's strain weighted by the tents; no far path.
+        """
+        x, y, z = _as_points(x, y, z)
+        vertices = np.asarray(vertices, dtype=float)
+        components = list(components)
+        packing = self._packing(vertices)[components]
+        pieces = split_by_layers(vertices, self._interfaces)
+        out = np.zeros((x.size, 3, len(components), 6))
+        self._tent_halfspace(vertices, x, y, z, np.arange(x.size), out, components,
+                             tde_strain_hs_unit, gain=STRAIN_TENT_GAIN,
+                             min_points=STRAIN_TENT_MIN_POINTS)
+        out += self._remainder(pieces, packing, x, y, z, parent=vertices, strain=True)
         return out
 
     def _far(self, vertices, x, y, z):
@@ -356,7 +437,7 @@ class LayeredTDE:
         vnorm, vstrike, vdip = _element_basis(*vertices)
         return np.array([moment_packing(vnorm, d) for d in (vstrike, vdip, vnorm)])
 
-    def _remainder(self, pieces, packing, x, y, z, parent=None, whole=False):
+    def _remainder(self, pieces, packing, x, y, z, parent=None, whole=False, strain=False):
         """The remainder's integral over the pieces, ``(npts, n_components, 3)``.
 
         Every (receiver, quadrature point) pair of a piece goes through one table
@@ -365,15 +446,22 @@ class LayeredTDE:
         triangle) each point is also weighted by the three tents, and the result is
         ``(npts, 3, n_components, 3)``. With ``whole`` the receivers are at the
         surface and the table is the whole surface field, not the remainder: point
-        sources, ordered by the point-source rule.
+        sources, ordered by the point-source rule. With ``strain`` the last axis is the
+        six strain components (:func:`combine_strain`), every receiver reads the 3-D
+        tables (the surface ones carry no strain), and ``whole`` is refused.
         """
         n = x.size
         tents = parent is not None
-        out = np.zeros((n, 3, packing.shape[0], 3) if tents else (n, packing.shape[0], 3))
+        width = 6 if strain else 3
+        out = np.zeros((n, 3, packing.shape[0], width) if tents else (n, packing.shape[0], width))
         tables = self.tables
+        if strain and (whole or not tables.has_strain):
+            raise ValueError("strain needs remainder tables computed with strain=True, and has "
+                             "no far path" if whole else
+                             "strain needs remainder tables computed with strain=True")
         # Receivers at the surface read the fine 2-D surface tables when there are any;
         # the 3-D table is too coarse in depth for a point source seen from the surface.
-        at_surface = (z == 0.0) & tables.has_surface
+        at_surface = (z == 0.0) & tables.has_surface & (not strain)
         receiver = tables.depth_stencil(np.where(at_surface, 0.0, z))
         for tri, _ in pieces:
             area = 0.5 * np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0]))
@@ -394,6 +482,11 @@ class LayeredTDE:
             distance = np.hypot(dn, de)
             if whole:
                 values = tables.surface_lookup(distance, points[:, 2], "whole")
+            elif strain:
+                stencils = (tables.distance_stencil(distance), tables.depth_stencil(points[:, 2]),
+                            tuple(a[rec] for a in receiver))
+                values = tables.gather(*stencils)
+                derivatives = tables.gather_strain(*stencils)
             else:
                 values = np.empty((rec.size, len(TABLE_KEYS)))
                 top = at_surface[rec]
@@ -404,17 +497,20 @@ class LayeredTDE:
                     values[deep] = tables.gather(tables.distance_stencil(distance[deep]),
                                                  tables.depth_stencil(points[deep, 2]),
                                                  tuple(a[rec[deep]] for a in receiver))
-            pair = _combine(values, np.arctan2(de, dn), packing)
+            if strain:
+                pair = combine_strain(values, derivatives, np.arctan2(de, dn), packing)
+            else:
+                pair = _combine(values, np.arctan2(de, dn), packing)
             pair *= np.concatenate(weights)[:, None, None]
             if not tents:
                 for i in range(packing.shape[0]):
-                    for c in range(3):
+                    for c in range(width):
                         out[:, i, c] += np.bincount(rec, pair[:, i, c], minlength=n)
                 continue
             phi = _barycentric(parent, points)
             for j in range(3):
                 for i in range(packing.shape[0]):
-                    for c in range(3):
+                    for c in range(width):
                         out[:, j, i, c] += np.bincount(rec, phi[:, j] * pair[:, i, c], minlength=n)
         return out
 
@@ -485,6 +581,38 @@ def _combine(values, azimuth, packing):
         out[:, i, 1] = ur * cos1 - ut * sin1
         out[:, i, 2] = -uz
     return out
+
+
+def tent_levelset(vertices, x, y, z, near, out, components, kernel, gain, min_points,
+                  interfaces, poisson):
+    """Add each of a triangle's three tents' half-space fields at the points ``near`` into ``out[near]``.
+
+    A linear tent is ``int_0^1 [tent >= t] dt`` and the set ``tent >= t`` is the triangle
+    shrunk toward its vertex by ``1 - t``, so a tent's field is a 1-D integral of
+    constant-slip dislocations, each exact, taken by Gauss-Legendre in ``t`` with
+    ``ceil(gain L / d) + 1`` points for a receiver ``d`` from the triangle (at least
+    ``min_points``, at most :data:`TENT_MAX_POINTS`), split where a shrinking triangle
+    stops crossing an interface. Each shrunk triangle is cut at ``interfaces`` and each
+    piece takes ``poisson(mid-depth)``. ``kernel`` is
+    :func:`~slipsolve._tde.tde_disp_hs_unit` or :func:`~slipsolve._tde.tde_strain_hs_unit`;
+    ``out`` is ``(npts, 3, ncomp, 3 or 6)``, axis 1 the tent of vertex 0, 1, 2.
+    """
+    area = 0.5 * np.linalg.norm(np.cross(vertices[1] - vertices[0], vertices[2] - vertices[0]))
+    size = np.sqrt(2.0 * area)
+    distance = _distance_to_triangle(vertices, np.column_stack([x[near], y[near], z[near]]))
+    points = np.clip(np.ceil(float(gain) * size / np.maximum(distance, 1e-3 * size)) + 1,
+                     int(min_points), TENT_MAX_POINTS).astype(int)
+    for count in np.unique(points):
+        at = near[points == count]
+        for j in range(3):
+            levels, weights = _tent_levels(vertices, j, interfaces, int(count))
+            for level, weight in zip(levels, weights):
+                shrunk = vertices[j] + (1.0 - level) * (vertices - vertices[j])
+                cut = split_by_layers(shrunk, interfaces)
+                nu = poisson(np.array([mid for _, mid in cut]))
+                for (tri, _), nu_piece in zip(cut, nu):
+                    u = kernel(x[at], y[at], z[at], *tri, nu_piece)[components]
+                    out[at, j] += weight * np.moveaxis(u, -1, 0)
 
 
 def tensor_packing(moment, lam, mu):

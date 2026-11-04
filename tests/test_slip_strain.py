@@ -339,10 +339,16 @@ def test_a_moment_tensor_packs_like_its_dislocation():
 # -- the stored strain tables (RemainderTables(strain=True)) ---------------------------------
 @pytest.fixture(scope="module")
 def strain_tables():
+    """The two-layer crust on ``test_slip_layered_tde.py``'s grids with strain, but 1 km apart at depth.
+
+    The strain needs the finer deep spacing: at that file's 3 km the remainder's strain
+    was 8e-2 of itself off at the median (2026-11-04), second order in the spacing.
+    """
     tops, _, _ = wn.layer_stack(TWO_LAYERS)
-    z = wn.depth_grid(tops, z_max=30e3, first=20.0, growth=2.0, spacing=1500.0, deep_spacing=8000.0)
-    return wn.RemainderTables.compute(TWO_LAYERS, z=z, r=wn.distance_grid(per_decade=10), n_k=2048,
-                                      surface_z=z, surface_r=wn.distance_grid(per_decade=10),
+    z = wn.depth_grid(tops, z_max=40e3, first=10.0, growth=1.6, spacing=400.0, deep_spacing=1000.0)
+    return wn.RemainderTables.compute(TWO_LAYERS, z=z, r=wn.distance_grid(per_decade=20), n_k=2048,
+                                      z_max=40e3, surface_z=wn.surface_depth_grid(tops, fine_to=20e3,
+                                                                                  z_max=40e3),
                                       strain=True)
 
 
@@ -355,8 +361,8 @@ def test_the_strain_tables_hold_the_transformed_derivatives(strain_tables):
     U, V, W, dU, dV, dW = wn.kernels(tops, lam, mu, t.z[j], t.z, k, derivatives=True)
     columns = wn.strain_columns(U, V, W, dU, dV, dW, k, dln, t.r)
     assert np.allclose(t.strain[:, j], np.moveaxis(columns, 1, 0), rtol=1e-12, atol=0)
-    plain = wn.RemainderTables.compute(TWO_LAYERS, z=t.z, r=t.r, n_k=2048, surface_z=t.z,
-                                       surface_r=t.r)
+    plain = wn.RemainderTables.compute(TWO_LAYERS, z=t.z, r=t.r, n_k=2048, z_max=40e3,
+                                       surface_z=t.surface["z"], surface_r=t.surface["r"])
     assert np.array_equal(plain.values, t.values) and not plain.has_strain
     assert len(wn.STRAIN_KEYS) == 27 and wn.STRAIN_KEYS[0] == ("dr", "ss", "uz")
     assert wn.STRAIN_KEYS[20] == ("/r", "ss", "ur-2ut")
@@ -379,3 +385,163 @@ def test_strain_tables_survive_a_round_trip(strain_tables, tmp_path):
     back = wn.RemainderTables.load(strain_tables.save(tmp_path / "tables.npz"))
     assert back.has_strain and np.array_equal(back.strain, strain_tables.strain)
     assert "strain" in repr(back)
+
+
+# -- the strain of fault elements and tents at depth (LayeredTDE.strain): the operator E ----
+from slipsolve._tde import _element_basis  # noqa: E402
+from slipsolve.layered import _triangle_quadrature  # noqa: E402
+from slipsolve.layered_tde import LayeredTDE, split_by_layers  # noqa: E402
+
+#: ``test_slip_layered_tde.py``'s triangles: one crossing the 2 km interface, one below it.
+CROSSING = np.array([[0.0, 0.0, -500.0], [3000.0, 300.0, -800.0], [1200.0, 1500.0, -4200.0]])
+BELOW = np.array([[0.0, 0.0, -4000.0], [1000.0, 100.0, -4200.0], [400.0, 600.0, -5100.0]])
+
+
+def _around(vertices, n, near, far, seed):
+    """Points at depth from ``near`` to ``far`` triangle sizes of a triangle's centroid."""
+    rng = np.random.default_rng(seed)
+    size = _size(vertices)
+    dirs = rng.normal(size=(n, 3))
+    dirs /= np.linalg.norm(dirs, axis=1)[:, None]
+    pts = vertices.mean(axis=0) + dirs * size * np.geomspace(near, far, n)[:, None]
+    pts[:, 2] = -np.abs(pts[:, 2]) - 100.0
+    return pts
+
+
+def _point_source_strain(vertices, x, y, z, remainder, order):
+    """Strain of unit strike-, dip- and tensile-slip by point sources of exact kernels: ``(npts, 3, 6)``.
+
+    Each piece of the triangle (split at the interface, as the engine splits it) on its own
+    rule; every (point, receiver) pair transformed at its own distance, no tables.
+    """
+    tops, lam, mu = wn.layer_stack(TWO_LAYERS)
+    k, dln = wn.wavenumbers(n=2048)
+    vnorm, vstrike, vdip = _element_basis(*vertices)
+    packing = np.array([moment_packing(vnorm, d) for d in (vstrike, vdip, vnorm)])
+    out = np.zeros((x.size, 3, 6))
+    for tri, _ in split_by_layers(vertices, tops[1:]):
+        points, share = _triangle_quadrature(*tri, order)
+        area = 0.5 * np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0]))
+        for p, w in zip(points, share * area):
+            for i in range(x.size):
+                r = np.array([np.hypot(x[i] - p[0], y[i] - p[1])])
+                kern = wn.kernels(tops, lam, mu, -p[2], [-z[i]], k, remainder=remainder,
+                                  derivatives=True)
+                values = wn.transform(*kern[:3], k, dln, r)[0]
+                columns = wn.strain_columns(*kern, k, dln, r)[0]
+                azimuth = np.array([np.arctan2(x[i] - p[0], y[i] - p[1])])
+                out[i] += w * combine_strain(values, columns, azimuth, packing)[0]
+    return out
+
+
+def test_a_one_layer_crust_is_the_half_space_strain():
+    """The remainder of a uniform crust is zero, strain included: the TDE strain alone."""
+    tops, _, _ = wn.layer_stack(ONE_LAYER)
+    z = wn.depth_grid(tops, z_max=40e3, first=50.0, growth=2.0, spacing=2000.0, deep_spacing=8000.0)
+    tables = wn.RemainderTables.compute(ONE_LAYER, z=z, r=wn.distance_grid(per_decade=5), n_k=256,
+                                        surface_z=z, surface_r=wn.distance_grid(per_decade=5),
+                                        strain=True)
+    assert np.all(tables.strain == 0.0)
+    pts = _around(BELOW, 10, 0.5, 20.0, seed=1)
+    got = LayeredTDE(tables).element_strain(BELOW, *pts.T)
+    want = np.moveaxis(tde_strain_hs_unit(*pts.T, *BELOW, float(ONE_LAYER.poisson())), -1, 0)
+    assert np.allclose(got, want, rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize("vertices", [BELOW, CROSSING], ids=["below", "crossing"])
+def test_the_three_tents_add_up_to_the_element_strain(strain_tables, vertices):
+    """``sum_j tent_j = 1`` on the triangle, so the tents' strains add up to the element's.
+
+    This is the level-set rule's accuracy (:data:`~slipsolve.layered_tde.STRAIN_TENT_GAIN`):
+    measured at most 9e-5 of each point's peak from 0.6 to 30 sizes (2026-11-04), where
+    displacement's rule (two points far away) left 5e-3 at 3 sizes.
+    """
+    engine = LayeredTDE(strain_tables)
+    pts = _around(vertices, 40, 0.6, 30.0, seed=2)
+    tents = engine.tent_strain(vertices, *pts.T, components=(0, 1, 2))
+    whole = engine.element_strain(vertices, *pts.T)
+    error = np.abs(tents.sum(axis=1) - whole).max(axis=(1, 2)) / np.abs(whole).max(axis=(1, 2))
+    assert error.max() < 3e-4
+
+
+@pytest.mark.parametrize("vertices", [BELOW, CROSSING], ids=["below", "crossing"])
+def test_far_away_the_strain_is_the_point_source_sum(strain_tables, vertices):
+    """Half-space TDE strain plus the tabulated remainder against the whole layered kernel's point sources.
+
+    ⚠️ Receivers are kept 1.5 km or more in depth from every point of the triangle: the
+    whole kernel at nearly the source's depth barely decays in wavenumber, and the
+    strain's extra power of ``k`` spoils FFTLog's cancellation at 25 km (a receiver 1 km
+    deep beside the crossing triangle read 100x its neighbours, 2026-11-04). The engine
+    never meets this: its remainder decays by the images. The bar is the coarse test
+    tables' (displacement's is 5e-3 on the same tables).
+    """
+    engine = LayeredTDE(strain_tables)
+    top, bottom = -vertices[:, 2].min(), -vertices[:, 2].max()
+    depths = [d for d in (500.0, 6500.0, 9000.0) if d < top - 1500.0 or d > bottom + 1500.0]
+    x = np.array([15e3, -12e3, 3e3])[:len(depths)]
+    y = np.array([4e3, 9e3, -18e3])[:len(depths)]
+    z = -np.array(depths)
+    got = engine.element_strain(vertices, x, y, z)
+    want = _point_source_strain(vertices, x, y, z, remainder=False, order=4)
+    for c in range(3):
+        assert np.abs(got[:, c] - want[:, c]).max() < 5e-3 * np.abs(want[:, c]).max()
+
+
+def test_the_strain_needs_strain_tables():
+    tops, _, _ = wn.layer_stack(ONE_LAYER)
+    z = wn.depth_grid(tops, z_max=40e3, first=50.0, growth=2.0, spacing=2000.0, deep_spacing=8000.0)
+    tables = wn.RemainderTables.compute(ONE_LAYER, z=z, r=wn.distance_grid(per_decade=5), n_k=256,
+                                        surface_z=z, surface_r=wn.distance_grid(per_decade=5))
+    with pytest.raises(ValueError, match="strain=True"):
+        LayeredTDE(tables).element_strain(BELOW, [5e3], [5e3], [-3e3])
+
+
+def test_the_strain_matrix_has_element_and_node_columns(strain_tables):
+    """``LayeredTDE.strain``: strike columns then dip columns, an element's own or a node's tents."""
+    from slipsolve import FaultMesh, FaultTrace
+    from slipsolve.basis import make_basis
+
+    trace = FaultTrace.from_lonlat(np.array([-80.0, -79.92]), np.array([8.0, 8.0]))
+    frame = trace.local_frame()
+    mesh = FaultMesh.curved(trace, frame, uniform_dip=70.0, max_depth=6e3, edge_length=3e3)
+    engine = LayeredTDE(strain_tables)
+    xs, ys = trace.from_curvilinear(np.array([2e3, 4.5e3, 7e3]), np.array([-5e3, 6e3, 9e3]), frame)
+    zs = np.array([-3000.0, -1200.0, -7500.0])
+    n_el = mesh.n_elements
+    element = engine.strain(mesh, xs, ys, zs)
+    assert element.shape == (3, 6, 2 * n_el)
+    k = n_el // 2
+    own = engine.element_strain(mesh.vertices[k], xs, ys, zs, components=(0, 1))
+    assert np.array_equal(element[:, :, k], own[:, 0]) and np.array_equal(element[:, :, n_el + k], own[:, 1])
+    basis = make_basis(mesh, "node")
+    nodal = engine.strain(mesh, xs, ys, zs, basis=basis)
+    n = basis.n_basis
+    assert nodal.shape == (3, 6, 2 * n)
+    # The tents sum to one on every element, so all nodes' columns sum to all elements'.
+    for half_n, half_e in ((slice(0, n), slice(0, n_el)), (slice(n, 2 * n), slice(n_el, 2 * n_el))):
+        total_n, total_e = nodal[:, :, half_n].sum(axis=-1), element[:, :, half_e].sum(axis=-1)
+        assert np.abs(total_n - total_e).max() < 3e-4 * np.abs(total_e).max()
+
+
+@pytest.mark.parametrize("vertices", [BELOW, CROSSING], ids=["below", "crossing"])
+def test_the_tabulated_remainder_strain_is_the_remainders(strain_tables, vertices):
+    """The remainder alone -- the element's strain less its pieces' half-space strain -- against exact kernels.
+
+    This is all the tables touch, and their grids bound it, at second order in the
+    spacing. Measured at 1-12 sizes (2026-11-04), median / max of the remainder's own
+    peak: 31 depths and 20 distances a decade 8e-2 / 0.27; 66 and 30, 1.6e-2 / 0.1; 133
+    and 40, 2.6e-3 / 1.7e-2. The quadrature tolerance (3e-3 or 3e-4) changed nothing.
+    On this fixture 0.05-0.10.
+    """
+    engine = LayeredTDE(strain_tables)
+    pts = _around(vertices, 4, 1.5, 6.0, seed=3)
+    pieces = split_by_layers(vertices, strain_tables.tops[1:])
+    nu = strain_tables.poisson(np.array([mid for _, mid in pieces]))
+    halfspace = sum(np.moveaxis(tde_strain_hs_unit(*pts.T, *tri, n), -1, 0)
+                    for (tri, _), n in zip(pieces, nu))
+    got = engine.element_strain(vertices, *pts.T) - halfspace
+    want = _point_source_strain(vertices, *pts.T, remainder=True, order=4)
+    error = np.abs(got - want).max(axis=(1, 2)) / np.abs(want).max(axis=(1, 2))
+    # This fixture's grids give 0.05-0.10 (below the interface); an error in the strain
+    # path (a sign, a pattern, a frame) is O(1).
+    assert error.max() < 0.2
