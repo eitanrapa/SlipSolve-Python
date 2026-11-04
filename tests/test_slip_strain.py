@@ -545,3 +545,23 @@ def test_the_tabulated_remainder_strain_is_the_remainders(strain_tables, vertice
     # This fixture's grids give 0.05-0.10 (below the interface); an error in the strain
     # path (a sign, a pattern, a frame) is O(1).
     assert error.max() < 0.2
+
+
+def test_many_triangles_strain_matches_cutde():
+    """The batched strain (one difference stencil a point for all triangles) against ``cutde``.
+
+    Measured 3e-8 to 7e-8 of each point's peak (2026-11-04), as good as the scalar kernel.
+    """
+    hs = pytest.importorskip("cutde.halfspace")
+    from slipsolve._tde import tde_strain_hs_unit_many
+
+    tris = np.array([TRIANGLES["dipping"], TRIANGLES["vertical"], TRIANGLES["shallow_dip"]])
+    rng = np.random.default_rng(1)
+    pts = np.column_stack([rng.uniform(-20e3, 20e3, 150), rng.uniform(-20e3, 20e3, 150),
+                           -np.abs(rng.uniform(0.0, 15e3, 150))])
+    pts[:25, 2] = 0.0
+    many = tde_strain_hs_unit_many(*pts.T, tris, NU)
+    for i, tri in enumerate(tris):
+        theirs = np.transpose(hs.strain_matrix(pts, tri[None], NU)[:, :, 0, :], (2, 1, 0))
+        scale = np.abs(theirs).max(axis=(0, 1))
+        assert (np.abs(many[i] - theirs).max(axis=(0, 1)) / scale).max() < 1e-6

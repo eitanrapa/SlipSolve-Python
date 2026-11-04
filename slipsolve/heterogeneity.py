@@ -30,6 +30,20 @@ integrated exactly by :func:`~slipsolve.layered_tde.tent_levelset`. The remainde
 volume rule of the tables' point moment sources -- not face dislocations, which on a
 voxel whose face lies on a layer interface would sit where the remainder is singular.
 
+**Limits, as built (2026-11-04).**
+
+- A voxel's strain is collocated at its centre and taken as uniform, so voxels keep at
+  least a voxel clear of the fault (:meth:`VoxelModel.check_clearance`); a contrast across
+  the fault itself is :mod:`slipsolve.bimaterial`'s.
+- The grid is regular: ``Gamma`` is assembled by translation, one source per depth row.
+- ⚠️ A receiver exactly on a voxel face gets NaN on the face's edges and one side's limit
+  inside it, without the interior term: keep samples off voxel faces. Receivers within a
+  few percent of a size of a face are resolved by the split level integral
+  (:func:`~slipsolve.layered_tde.tent_levelset`).
+- The layered remainder is table-limited, at second order in the tables' grids (strain is
+  more demanding than displacement); the strain-bearing tables want ~200 m in depth.
+- ``Gamma`` and its LU are dense: ~10k voxels on 128 GB, ~5-6k on 64 GB.
+
 The design, the tests and the measurements are in ``HETEROGENEOUS_3D_PLAN.local.md``.
 """
 
@@ -52,10 +66,21 @@ VOXEL_TOLERANCE = 3e-3
 #: Most Gauss-Legendre points per axis of the remainder's volume rule.
 VOXEL_MAX_ORDER = 12
 
+#: The far path's points per axis by distance from the voxel's centre, in voxel sizes: three
+#: inside the first, two inside the second, one beyond. A tensor Gauss-Legendre rule on a cube
+#: converges far faster than the triangle rule the near path borrows. Measured (2026-11-04,
+#: whole surface table, surface and 3-4 km voxels, against 8 points an axis): one point
+#: 9e-3-2.1e-2 at 4 sizes, 3.2-3.6e-3 at 10, 9e-4 at 20; two points 1.2-4.7e-4 at 4-10 sizes;
+#: three 8e-5-2e-4. The triangle rule asked for six an axis at 4 sizes.
+FAR_ORDER_SIZES = (6.0, 15.0)
+
 #: The faces' tent rule, displacement and strain alike: the strain tents' (gain 4, at least
 #: 3 points). With the displacement tents' (gain 2, at least 2), a voxel's displacement
 #: 1-2.5 sizes away was 1.3e-3 off exact point moment sources where its strain was 1e-4
-#: (2026-11-04): the two-point floor's ``~0.05 (L/d)^2``.
+#: (2026-11-04): the two-point floor's ``~0.05 (L/d)^2``. Receivers the rule would give more
+#: than the cap take the split level integral (``tent_levelset(split=True)``): 1% of a size
+#: from a face, displacement 1.4e-2 -> 8e-5 and strain 0.26 -> 4.5e-3 against a 400-point
+#: rule; 3%, 3.7e-3 -> 4e-6 and 5.6e-2 -> 1.4e-4.
 VOXEL_TENT_GAIN = STRAIN_TENT_GAIN
 VOXEL_TENT_MIN_POINTS = STRAIN_TENT_MIN_POINTS
 
@@ -227,7 +252,7 @@ class VoxelSource:
             frame = np.stack([vstrike, vdip, vnorm])                      # TDE components
             tents = np.zeros((x.size, 3, 3, width))
             tent_levelset(tri, x, y, z, everyone, tents, [0, 1, 2], kernel, gain, minimum,
-                          (), poisson)
+                          (), poisson, split=True, batched=True)
             # Burgers vector eps* . (v_j - x0) at each vertex, in the triangle's components
             burgers = np.einsum("kab,jb->kja", self.eigenstrain, tri - self.centre)
             coefficients = np.einsum("kja,ca->kjc", burgers, frame)
@@ -248,11 +273,14 @@ class VoxelSource:
         :meth:`LayeredTDE._orders`' rule with the cube root of the volume as the size: the
         larger of the distance to the centre and, in the voxel's own layer, the distance
         to the nearest image across its interfaces. ``whole`` (surface receivers far
-        away) takes the distance alone, the point-source rule.
+        away) takes :data:`FAR_ORDER_SIZES`.
         """
         tables = self.engine.tables
         distance = np.sqrt((x - self.centre[0]) ** 2 + (y - self.centre[1]) ** 2
                            + (z - self.centre[2]) ** 2)
+        if whole:
+            near, middle = (f * self.size for f in FAR_ORDER_SIZES)
+            return np.where(distance < near, 3, np.where(distance < middle, 2, 1)).astype(int)
         scale = distance
         if not whole:
             z_c, z_r = -self.centre[2], -z
@@ -330,6 +358,33 @@ class VoxelSource:
                 f"mu {self.mu / 1e9:.2f} GPa>")
 
 
+class Box:
+    """An axis-aligned box: ``x`` and ``y`` ``(low, high)`` in the local frame, ``depth`` ``(top, bottom)``."""
+
+    def __init__(self, x, y, depth):
+        self.x, self.y, self.depth = (tuple(float(v) for v in r) for r in (x, y, depth))
+
+    def contains(self, x, y, depth):
+        return ((x > self.x[0]) & (x < self.x[1]) & (y > self.y[0]) & (y < self.y[1])
+                & (depth > self.depth[0]) & (depth < self.depth[1]))
+
+
+class Prism:
+    """A vertical prism: a polygon in map view (``(n, 2)`` east, north) between two depths."""
+
+    def __init__(self, polygon, depth):
+        from matplotlib.path import Path as _Path
+
+        self.polygon = np.asarray(polygon, dtype=float)
+        self.path = _Path(self.polygon)
+        self.depth = tuple(float(v) for v in depth)
+
+    def contains(self, x, y, depth):
+        x, y, depth = (np.asarray(a, dtype=float) for a in (x, y, depth))
+        inside = self.path.contains_points(np.column_stack([x.ravel(), y.ravel()])).reshape(x.shape)
+        return inside & (depth > self.depth[0]) & (depth < self.depth[1])
+
+
 def stiffness_block(dlam, dmu):
     """The ``6 x 6`` map from strain components to moment-density components of ``dC : eps``.
 
@@ -398,6 +453,40 @@ class VoxelModel:
         #: the order of the operators' blocks.
         self.index = np.argwhere(self.active)
         self.centres = np.column_stack([gx[self.active], gy[self.active], -gz[self.active]])
+
+    @classmethod
+    def from_bodies(cls, tables, x_edges, y_edges, z_edges, bodies, tol=1e-9, frame=None):
+        """A model whose voxels take the moduli of the bodies holding their centres.
+
+        ``bodies`` is a list of ``(shape, moduli)``; later bodies override earlier ones, and a
+        voxel in none keeps the reference. A shape is a :class:`Box` or a :class:`Prism`;
+        ``moduli`` is ``(lam, mu)`` in Pa, or a callable ``f(depth) -> (lam, mu)``, or the
+        string ``"scale"`` with a ``(lam factor, mu factor)`` pair as a third element. A body
+        is a staircase of whole voxels: for a sharp boundary, put voxel edges on it.
+        """
+        bodies = list(bodies)
+
+        def moduli(x, y, depth):
+            layer = tables.layer(depth)
+            lam = tables.lam[layer].astype(float).copy()
+            mu = tables.mu[layer].astype(float).copy()
+            for body in bodies:
+                shape, value = body[0], body[1]
+                inside = shape.contains(x, y, depth)
+                if not inside.any():
+                    continue
+                if isinstance(value, str) and value == "scale":
+                    f_lam, f_mu = body[2]
+                    lam[inside] = tables.lam[layer[inside]] * f_lam
+                    mu[inside] = tables.mu[layer[inside]] * f_mu
+                elif callable(value):
+                    a, b = value(depth[inside])
+                    lam[inside], mu[inside] = a, b
+                else:
+                    lam[inside], mu[inside] = value
+            return lam, mu
+
+        return cls(tables, x_edges, y_edges, z_edges, moduli, tol=tol, frame=frame)
 
     @property
     def n_active(self):
@@ -589,10 +678,21 @@ class HeterogeneousEngine:
         self._e = {}
 
     # -- the voxel operators --------------------------------------------------------
+    def _timed(self, label, build):
+        import time
+
+        t0 = time.time()
+        out = build()
+        if self.log:
+            self.log(f"{label} [{time.time() - t0:.0f}s]")
+        return out
+
     @property
     def gamma(self):
         if self._gamma is None:
-            self._gamma = strain_operator(self.voxels, self.base, log=self.log)
+            n = self.voxels.n_active
+            self._gamma = self._timed(f"Gamma: {6 * n} x {6 * n}",
+                                      lambda: strain_operator(self.voxels, self.base))
         return self._gamma
 
     def system(self):
@@ -604,14 +704,16 @@ class HeterogeneousEngine:
         if self._lu is None:
             import scipy.linalg as sla
 
-            self._lu = sla.lu_factor(self.system())
+            self._lu = self._timed(f"LU of I + Gamma D ({6 * self.voxels.n_active} unknowns)",
+                                   lambda: sla.lu_factor(self.system(), overwrite_a=True))
         return self._lu
 
     def _strain_at_voxels(self, mesh, basis):
         key = (mesh.digest(), getattr(basis, "name", "element"))
         if key not in self._e:
             c = self.voxels.centres
-            e = self.base.strain(mesh, c[:, 0], c[:, 1], c[:, 2], basis=basis)    # (n, 6, cols)
+            e = self._timed(f"E: strain of {mesh.n_elements} elements at {c.shape[0]} voxel centres",
+                            lambda: self.base.strain(mesh, c[:, 0], c[:, 1], c[:, 2], basis=basis))
             self._e[key] = e.reshape(-1, e.shape[-1])
         return self._e[key]
 
@@ -627,7 +729,8 @@ class HeterogeneousEngine:
     def _surface(self, x, y, look):
         key = _digest(x, y, *(look if look is not None else ()))
         if key not in self._h:
-            self._h[key] = los_operator(self.voxels, self.base, x, y, look)
+            self._h[key] = self._timed(f"H: {np.size(x)} surface points x {self.voxels.n_active} voxels",
+                                       lambda: los_operator(self.voxels, self.base, x, y, look))
         return self._h[key]
 
     # -- the engine protocol ----------------------------------------------------------
@@ -676,6 +779,6 @@ class HeterogeneousEngine:
         return f"<HeterogeneousEngine {self.voxels!r} on {self.base!r}, order {self.order}>"
 
 
-__all__ = ["HeterogeneousEngine", "VoxelSource", "VoxelModel", "strain_operator", "los_operator",
+__all__ = ["Box", "HeterogeneousEngine", "Prism", "VoxelSource", "VoxelModel", "strain_operator", "los_operator",
            "stiffness_block", "unit_moments", "to_voigt", "from_voigt", "compliance", "FAR_VOXEL",
            "STRAIN_COMPONENTS"]

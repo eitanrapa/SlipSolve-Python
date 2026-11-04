@@ -192,6 +192,50 @@ def tde_strain_hs_unit(x, y, z, p1, p2, p3, nu=0.25, step=STRAIN_STEP):
                      sym[:, 0, 1], sym[:, 0, 2], sym[:, 1, 2]], axis=1)
 
 
+def tde_strain_hs_unit_many(x, y, z, triangles, nu=0.25, step=STRAIN_STEP, h=None):
+    """:func:`tde_strain_hs_unit` for many triangles at once: ``(n_triangles, 3, 6, npts)``.
+
+    One central-difference stencil per point serves every triangle, through
+    :func:`tde_disp_hs_unit_many`. Its step is ``h`` (metres, per point) or ``step`` times
+    the point's distance to the nearest of the triangles: no more than each triangle's own
+    step, so truncation only falls and round-off grows by at most the ratio of distances.
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    z = np.asarray(z, dtype=float).ravel()
+    tris = np.asarray(triangles, dtype=float).reshape(-1, 3, 3)
+    if np.any(z > 0) or np.any(tris[:, :, 2] > 0):
+        raise ValueError("Half-space solution: z coordinates must be <= 0")
+    n = x.size
+    if h is None:
+        points = np.column_stack([x, y, z])
+        h = float(step) * np.min([distance_to_triangle(t, points) for t in tris], axis=0)
+    h = np.asarray(h, dtype=float).ravel() * np.ones(n)
+    scale = np.maximum(np.abs(np.column_stack([x, y, z])).max(axis=1), np.abs(tris).max())
+    h = np.where(h > STRAIN_MIN_STEP_ULPS * np.spacing(scale), h, np.nan)
+    central = np.flatnonzero(z + np.nan_to_num(h) <= 0.0)
+    below = np.setdiff1d(np.arange(n), central, assume_unique=True)
+    xs = [x + h, x - h, x, x, x, x[central], x[below], x[below]]
+    ys = [y, y, y + h, y - h, y, y[central], y[below], y[below]]
+    zs = [z, z, z, z, z - h, z[central] + h[central], z[below], z[below] - 2.0 * h[below]]
+    sizes = [n, n, n, n, n, central.size, below.size, below.size]
+    stencil = [np.concatenate(v) for v in (xs, ys, zs)]
+    finite = np.isfinite(stencil[0]) & np.isfinite(stencil[1]) & np.isfinite(stencil[2])
+    u = np.full((tris.shape[0], 3, 3, finite.size), np.nan)
+    if finite.any():
+        u[..., finite] = tde_disp_hs_unit_many(*(v[finite] for v in stencil), tris, nu)
+    xp, xm, yp, ym, zm, zp, z0, zmm = np.split(u, np.cumsum(sizes)[:-1], axis=-1)
+    grad = np.empty((tris.shape[0], 3, 3, 3, n))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        grad[:, :, :, 0] = (xp - xm) / (2.0 * h)
+        grad[:, :, :, 1] = (yp - ym) / (2.0 * h)
+        grad[:, :, :, 2, central] = (zp - zm[..., central]) / (2.0 * h[central])
+        grad[:, :, :, 2, below] = (3.0 * z0 - 4.0 * zm[..., below] + zmm) / (2.0 * h[below])
+    sym = 0.5 * (grad + np.swapaxes(grad, 2, 3))
+    return np.stack([sym[:, :, 0, 0], sym[:, :, 1, 1], sym[:, :, 2, 2],
+                     sym[:, :, 0, 1], sym[:, :, 0, 2], sym[:, :, 1, 2]], axis=2)
+
+
 def distance_to_triangle(triangle, points):
     """Each point's distance to the nearest point of the triangle, ``(npoints,)``.
 
@@ -221,6 +265,185 @@ def barycentric(triangle, points):
     rhs = np.stack([(points - v0) @ e1, (points - v0) @ e2])
     a, b = np.linalg.solve(gram, rhs)
     return np.column_stack([1.0 - a - b, a, b])
+
+
+def tde_disp_hs_unit_many(x, y, z, triangles, nu=0.25):
+    """:func:`tde_disp_hs_unit` for many triangles at once: ``(n_triangles, 3, 3, npts)``.
+
+    ``triangles`` is ``(n_triangles, 3, 3)`` (vertices, east/north/up) and ``nu`` one value or
+    one per triangle. The same algebra as the scalar code, every operation on
+    ``(n_triangles, npts)`` arrays: the scalar code costs ~10 ms a call in numpy overhead
+    whatever the number of points, and a tent's level-set integral makes dozens of calls
+    on a handful of receivers. The two angular configurations are one pass (the
+    configuration only flips the sign of each side vector) and so are the free-surface
+    correction's two branches (they differ only in the angle). Equal to the scalar code
+    to rounding (``tests/test_slip_tde.py``).
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
+    z = np.asarray(z, dtype=float).ravel()
+    tris = np.asarray(triangles, dtype=float).reshape(-1, 3, 3)
+    n_tri = tris.shape[0]
+    nu = np.broadcast_to(np.asarray(nu, dtype=float).ravel(), (n_tri,)) if np.size(nu) > 1 \
+        else np.full(n_tri, float(np.asarray(nu).ravel()[0]))
+    if np.any(z > 0) or np.any(tris[:, :, 2] > 0):
+        raise ValueError("Half-space solution: z coordinates must be <= 0")
+    out = np.zeros((n_tri, 3, 3, x.size))
+    live = ~np.all(tris[:, :, 2] == 0, axis=1)        # a triangle in the free surface radiates nothing
+    if not live.any():
+        return out
+    tri, nu_l = tris[live], nu[live]
+    image = tri.copy()
+    image[:, :, 2] = -image[:, :, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        total = (_disp_fs_many(x, y, z, tri, nu_l) + _disp_fs_many(x, y, z, image, nu_l)
+                 + _disp_har_func_many(x, y, z, tri, nu_l))
+    out[live] = total
+    return out
+
+
+def _element_basis_many(tris, image=False):
+    """:func:`_element_basis` for ``(n, 3, 3)`` triangles: three ``(n, 3)`` arrays."""
+    p1, p2, p3 = tris[:, 0], tris[:, 1], tris[:, 2]
+    vnorm = np.cross(p2 - p1, p3 - p1)
+    vnorm = vnorm / np.linalg.norm(vnorm, axis=1, keepdims=True)
+    vstrike = np.cross(np.array([0.0, 0.0, 1.0]), vnorm)
+    flat = np.linalg.norm(vstrike, axis=1) == 0
+    if flat.any():
+        vstrike[flat] = np.array([0.0, 1.0, 0.0]) * vnorm[flat, 2:3]
+        if image:
+            flip = flat & (p1[:, 2] > 0)
+            vstrike[flip] = -vstrike[flip]
+    vstrike = vstrike / np.linalg.norm(vstrike, axis=1, keepdims=True)
+    vdip = np.cross(vnorm, vstrike)
+    return vnorm, vstrike, vdip
+
+
+_UNIT_BX = np.array([0.0, 0.0, 1.0])[:, None, None]  # (strike, dip, tensile) slips: tensile drives bx
+_UNIT_BY = np.array([1.0, 0.0, 0.0])[:, None, None]  # strike drives by
+_UNIT_BZ = np.array([0.0, 1.0, 0.0])[:, None, None]  # dip drives bz
+
+
+def _disp_fs_many(x, y, z, tris, nu):
+    """:func:`_disp_fs_m` for unit slips and many triangles: ``(n_tri, 3 slips, 3 ENU, npts)``."""
+    vnorm, vstrike, vdip = _element_basis_many(tris, image=True)
+    at = np.stack([vnorm, vstrike, vdip], axis=1)                    # rows: the TD frame
+    p1, p2, p3 = tris[:, 0], tris[:, 1], tris[:, 2]
+    rel = np.stack([x, y, z])[None] - p2[:, :, None]                 # (n_tri, 3, npts)
+    xt, yt, zt = np.moveaxis(np.einsum("tij,tjn->tin", at, rel), 1, 0)
+    q1 = np.einsum("tij,tj->ti", at, p1 - p2)
+    q3 = np.einsum("tij,tj->ti", at, p3 - p2)
+    e12 = -q1 / np.linalg.norm(q1, axis=1, keepdims=True)
+    e13 = (q3 - q1) / np.linalg.norm(q3 - q1, axis=1, keepdims=True)
+    e23 = q3 / np.linalg.norm(q3, axis=1, keepdims=True)
+    a_ang = np.arccos(np.clip((e12 * e13).sum(axis=1), -1.0, 1.0))[:, None]
+    b_ang = np.arccos(np.clip(-(e12 * e23).sum(axis=1), -1.0, 1.0))[:, None]
+    c_ang = np.arccos(np.clip((e23 * e13).sum(axis=1), -1.0, 1.0))[:, None]
+    trimode = _trimodefinder_many(yt, zt, xt, q1[:, 1:], np.zeros_like(q1[:, 1:]), q3[:, 1:])
+    sign = np.where(trimode == -1, -1.0, 1.0)
+    nu_c = nu[:, None]
+    u = v = w = 0.0
+    for angle, vertex, side, flip in ((a_ang, q1, e13, -1.0), (b_ang, None, e12, 1.0),
+                                      (c_ang, q3, e23, 1.0)):
+        sy = flip * sign * side[:, 1, None]
+        sz = flip * sign * side[:, 2, None]
+        dy = yt if vertex is None else yt - vertex[:, 1, None]
+        dz = zt if vertex is None else zt - vertex[:, 2, None]
+        y1 = sz * dy - sy * dz
+        z1 = sy * dy + sz * dz
+        by1 = sz * _UNIT_BY - sy * _UNIT_BZ
+        bz1 = sy * _UNIT_BY + sz * _UNIT_BZ
+        uu, v0, w0 = _ang_dis_disp(xt, y1, z1, -np.pi + angle, _UNIT_BX, by1, bz1, nu_c)
+        u = u + uu
+        v = v + (sz * v0 + sy * w0)
+        w = w + (-sy * v0 + sz * w0)
+    a = np.stack([-xt, q1[:, 1, None] - yt, q1[:, 2, None] - zt])
+    b = np.stack([-xt, -yt, -zt])
+    c = np.stack([-xt, q3[:, 1, None] - yt, q3[:, 2, None] - zt])
+    na = np.sqrt((a * a).sum(axis=0))
+    nb = np.sqrt((b * b).sum(axis=0))
+    nc = np.sqrt((c * c).sum(axis=0))
+    fi_n = (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]))
+    fi_d = na * nb * nc + (a * b).sum(axis=0) * nc + (a * c).sum(axis=0) * nb + (b * c).sum(axis=0) * na
+    fi_n = np.where(fi_n == 0, -0.0, fi_n)
+    fi = -2.0 * np.arctan2(fi_n, fi_d) / (4.0 * np.pi)
+    u = _UNIT_BX * fi + u                                              # (3 slips, n_tri, npts)
+    v = _UNIT_BY * fi + v
+    w = _UNIT_BZ * fi + w
+    on_side = trimode == 0
+    if on_side.any():
+        u = np.where(on_side, np.nan, u)
+        v = np.where(on_side, np.nan, v)
+        w = np.where(on_side, np.nan, w)
+    enu = (vnorm.T[:, None, :, None] * u[None] + vstrike.T[:, None, :, None] * v[None]
+           + vdip.T[:, None, :, None] * w[None])                       # (3 ENU, 3 slips, n_tri, npts)
+    return np.transpose(enu, (2, 1, 0, 3))
+
+
+def _trimodefinder_many(x, y, z, p1, p2, p3):
+    """:func:`_trimodefinder` with ``(n_tri, npts)`` points and ``(n_tri, 2)`` vertices."""
+    p1x, p1y = p1[:, 0, None], p1[:, 1, None]
+    p2x, p2y = p2[:, 0, None], p2[:, 1, None]
+    p3x, p3y = p3[:, 0, None], p3[:, 1, None]
+    det = (p2y - p3y) * (p1x - p3x) + (p3x - p2x) * (p1y - p3y)
+    a = ((p2y - p3y) * (x - p3x) + (p3x - p2x) * (y - p3y)) / det
+    b = ((p3y - p1y) * (x - p3x) + (p1x - p3x) * (y - p3y)) / det
+    c = 1.0 - a - b
+    trimode = np.ones(x.shape, dtype=int)
+    trimode[(a <= 0) & (b > c) & (c > a)] = -1
+    trimode[(b <= 0) & (c > a) & (a > b)] = -1
+    trimode[(c <= 0) & (a > b) & (b > c)] = -1
+    trimode[(a == 0) & (b >= 0) & (c >= 0)] = 0
+    trimode[(a >= 0) & (b == 0) & (c >= 0)] = 0
+    trimode[(a >= 0) & (b >= 0) & (c == 0)] = 0
+    trimode[(trimode == 0) & (z != 0)] = 1
+    return trimode
+
+
+def _disp_har_func_many(x, y, z, tris, nu):
+    """:func:`_disp_har_func_m` for unit slips and many triangles: ``(n_tri, 3 slips, 3 ENU, npts)``."""
+    vnorm, vstrike, vdip = _element_basis_many(tris, image=False)
+    burgers = np.stack([vstrike, vdip, vnorm])                        # (3 slips, n_tri, 3 ENU)
+    total = 0.0
+    for ia, ib in ((0, 1), (1, 2), (2, 0)):
+        total = total + _ang_setup_fsc_many(x, y, z, burgers, tris[:, ia], tris[:, ib], nu)
+    return total
+
+
+def _ang_setup_fsc_many(x, y, z, burgers, pa, pb, nu):
+    """:func:`_ang_setup_fsc_m` for many sides: ``(n_tri, 3 slips, 3 ENU, npts)``.
+
+    The side's frame is the reflection ``[[c, s, 0], [s, -c, 0], [0, 0, -1]]`` with ``(c, s)``
+    its horizontal direction: symmetric, so the same matrix maps both ways (which is why the
+    scalar port's ``column_stack`` agrees with the reference's transposed matrix).
+    """
+    side = pb - pa
+    length = np.linalg.norm(side, axis=1)
+    beta = np.arccos(np.clip(-side[:, 2] / length, -1.0, 1.0))
+    eps = np.finfo(float).eps
+    vertical = (np.abs(beta) < eps) | (np.abs(np.pi - beta) < eps)
+    horizontal = np.hypot(side[:, 0], side[:, 1])
+    safe = np.where(vertical, 1.0, horizontal)
+    c = np.where(vertical, 1.0, side[:, 0] / safe)[:, None]
+    s = np.where(vertical, 0.0, side[:, 1] / safe)[:, None]
+    rx, ry, rz = x[None] - pa[:, 0, None], y[None] - pa[:, 1, None], z[None] - pa[:, 2, None]
+    y1a, y2a, y3a = c * rx + s * ry, s * rx - c * ry, -rz
+    y1b, y2b, y3b = y1a - horizontal[:, None], y2a, y3a + side[:, 2, None]
+    b1 = (c[None] * burgers[:, :, 0, None] + s[None] * burgers[:, :, 1, None])    # (3 slips, n_tri, 1)
+    b2 = (s[None] * burgers[:, :, 0, None] - c[None] * burgers[:, :, 1, None])
+    b3 = -burgers[:, :, 2, None]
+    beta_c = beta[:, None]
+    angle = np.where(beta_c * y1a >= 0, -np.pi + beta_c, beta_c)                   # (n_tri, npts)
+    nu_c = nu[:, None]
+    va = _ang_dis_disp_fsc(y1a, y2a, y3a, angle, b1, b2, b3, nu_c, -pa[:, 2, None])
+    vb = _ang_dis_disp_fsc(y1b, y2b, y3b, angle, b1, b2, b3, nu_c, -pb[:, 2, None])
+    d1, d2, d3 = (vb[i] - va[i] for i in range(3))
+    keep = (~vertical)[None, :, None]
+    enu = np.stack([np.where(keep, c[None] * d1 + s[None] * d2, 0.0),
+                    np.where(keep, s[None] * d1 - c[None] * d2, 0.0),
+                    np.where(keep, -d3, 0.0)])                                  # (3 ENU, 3 slips, n_tri, npts)
+    return np.transpose(enu, (2, 1, 0, 3))
 
 
 def _rotate_m(a, u, v, w):

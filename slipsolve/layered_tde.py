@@ -30,7 +30,8 @@ least accurate place in the model.
 
 import numpy as np
 
-from ._tde import _element_basis, tde_disp_hs, tde_disp_hs_unit, tde_strain_hs_unit
+from ._tde import (STRAIN_STEP, _element_basis, tde_disp_hs, tde_disp_hs_unit,
+                   tde_disp_hs_unit_many, tde_strain_hs_unit, tde_strain_hs_unit_many)
 from ._tde import barycentric as _barycentric
 from ._tde import distance_to_triangle as _distance_to_triangle
 from .greens import _as_points, _require_finite
@@ -411,9 +412,9 @@ class LayeredTDE:
         packing = self._packing(vertices)[components]
         pieces = split_by_layers(vertices, self._interfaces)
         out = np.zeros((x.size, 3, len(components), 6))
-        self._tent_halfspace(vertices, x, y, z, np.arange(x.size), out, components,
-                             tde_strain_hs_unit, gain=STRAIN_TENT_GAIN,
-                             min_points=STRAIN_TENT_MIN_POINTS)
+        tent_levelset(vertices, x, y, z, np.arange(x.size), out, components, tde_strain_hs_unit,
+                      STRAIN_TENT_GAIN, STRAIN_TENT_MIN_POINTS, self._interfaces,
+                      self.tables.poisson, batched=True)
         out += self._remainder(pieces, packing, x, y, z, parent=vertices, strain=True)
         return out
 
@@ -584,7 +585,7 @@ def _combine(values, azimuth, packing):
 
 
 def tent_levelset(vertices, x, y, z, near, out, components, kernel, gain, min_points,
-                  interfaces, poisson):
+                  interfaces, poisson, split=False, batched=False):
     """Add each of a triangle's three tents' half-space fields at the points ``near`` into ``out[near]``.
 
     A linear tent is ``int_0^1 [tent >= t] dt`` and the set ``tent >= t`` is the triangle
@@ -596,12 +597,44 @@ def tent_levelset(vertices, x, y, z, near, out, components, kernel, gain, min_po
     piece takes ``poisson(mid-depth)``. ``kernel`` is
     :func:`~slipsolve._tde.tde_disp_hs_unit` or :func:`~slipsolve._tde.tde_strain_hs_unit`;
     ``out`` is ``(npts, 3, ncomp, 3 or 6)``, axis 1 the tent of vertex 0, 1, 2.
+
+    ``split`` treats receivers the rule would give more than :data:`TENT_MAX_POINTS` (closer
+    than about ``gain / TENT_MAX_POINTS`` sizes) one at a time, splitting the level integral
+    where the shrinking triangle passes them: its moving edge at ``t* = tent_j`` of the
+    receiver's projection, each moving vertex where it comes closest. The integrand has a
+    near-jump there, of width ``height / size``, which a capped rule cannot resolve and each
+    piece's end-clustered nodes can (:data:`SPLIT_POINTS` a piece).
+
+    ``batched`` evaluates every shrunk piece of a receiver group in one call of the
+    triangle-vectorised kernels (:func:`~slipsolve._tde.tde_disp_hs_unit_many`,
+    :func:`~slipsolve._tde.tde_strain_hs_unit_many`), instead of three calls a level: the
+    scalar kernels cost ~10 ms a call in overhead whatever the number of receivers. Equal
+    to the scalar path to rounding for displacement; for strain the difference step is the
+    receiver's distance to the parent triangle (not to each piece), so the two agree to the
+    differences' own accuracy (~1e-7).
     """
+    if batched:
+        _tent_levelset_batched(vertices, x, y, z, near, out, components, kernel, gain, min_points,
+                               interfaces, poisson, split)
+        return
     area = 0.5 * np.linalg.norm(np.cross(vertices[1] - vertices[0], vertices[2] - vertices[0]))
     size = np.sqrt(2.0 * area)
     distance = _distance_to_triangle(vertices, np.column_stack([x[near], y[near], z[near]]))
-    points = np.clip(np.ceil(float(gain) * size / np.maximum(distance, 1e-3 * size)) + 1,
-                     int(min_points), TENT_MAX_POINTS).astype(int)
+    requested = np.ceil(float(gain) * size / np.maximum(distance, 1e-3 * size)) + 1
+    points = np.clip(requested, int(min_points), TENT_MAX_POINTS).astype(int)
+    alone = (requested > TENT_MAX_POINTS) if split else np.zeros(near.size, bool)
+    for i in near[alone]:
+        receiver = np.array([x[i], y[i], z[i]])
+        for j in range(3):
+            levels, weights = _tent_levels_split(vertices, j, interfaces, receiver, SPLIT_POINTS)
+            for level, weight in zip(levels, weights):
+                shrunk = vertices[j] + (1.0 - level) * (vertices - vertices[j])
+                cut = split_by_layers(shrunk, interfaces)
+                nu = poisson(np.array([mid for _, mid in cut]))
+                for (tri, _), nu_piece in zip(cut, nu):
+                    u = kernel(x[i:i + 1], y[i:i + 1], z[i:i + 1], *tri, nu_piece)[components]
+                    out[i, j] += weight * u[..., 0]
+    near, points = near[~alone], points[~alone]
     for count in np.unique(points):
         at = near[points == count]
         for j in range(3):
@@ -725,6 +758,103 @@ def _tent_levels(vertices, j, interfaces, count):
     weights = np.concatenate([(b - a) * w for a, b in zip(edges[:-1], edges[1:])])
     return levels, weights
 
+
+#: Most triangle-receiver pairs (times the strain's difference stencil) in one batched call.
+BATCH_PAIRS = 2_000_000
+
+
+def _tent_levelset_batched(vertices, x, y, z, near, out, components, kernel, gain, min_points,
+                           interfaces, poisson, split):
+    """:func:`tent_levelset` with every shrunk piece of a receiver group in one batched call."""
+    strain = kernel is tde_strain_hs_unit
+    if not strain and kernel is not tde_disp_hs_unit:
+        raise ValueError("batched tents take tde_disp_hs_unit or tde_strain_hs_unit")
+    area = 0.5 * np.linalg.norm(np.cross(vertices[1] - vertices[0], vertices[2] - vertices[0]))
+    size = np.sqrt(2.0 * area)
+    distance = _distance_to_triangle(vertices, np.column_stack([x[near], y[near], z[near]]))
+    requested = np.ceil(float(gain) * size / np.maximum(distance, 1e-3 * size)) + 1
+    points = np.clip(requested, int(min_points), TENT_MAX_POINTS).astype(int)
+    alone = (requested > TENT_MAX_POINTS) if split else np.zeros(near.size, bool)
+
+    def pieces(level_sets):
+        tris, nus, tents, weights = [], [], [], []
+        for j, (levels, w) in enumerate(level_sets):
+            for level, weight in zip(levels, w):
+                shrunk = vertices[j] + (1.0 - level) * (vertices - vertices[j])
+                cut = split_by_layers(shrunk, interfaces)
+                nu = poisson(np.array([mid for _, mid in cut]))
+                for (tri, _), nu_piece in zip(cut, nu):
+                    tris.append(tri)
+                    nus.append(nu_piece)
+                    tents.append(j)
+                    weights.append(weight)
+        return np.array(tris), np.array(nus), np.array(tents), np.array(weights)
+
+    def accumulate(at, tris, nus, tents, weights, d_parent):
+        stencil = 8 if strain else 1
+        chunk = max(1, int(BATCH_PAIRS // max(1, at.size * stencil)))
+        for start in range(0, tris.shape[0], chunk):
+            sl = slice(start, start + chunk)
+            if strain:
+                field = tde_strain_hs_unit_many(x[at], y[at], z[at], tris[sl], nus[sl],
+                                                h=STRAIN_STEP * d_parent)
+            else:
+                field = tde_disp_hs_unit_many(x[at], y[at], z[at], tris[sl], nus[sl])
+            field = field[:, components]                                # (t, ncomp, width, n_at)
+            for j in range(3):
+                pick = tents[sl] == j
+                if pick.any():
+                    out[at, j] += np.einsum("t,tcwn->ncw", weights[sl][pick], field[pick])
+
+    for k in np.flatnonzero(alone):
+        i = near[k]
+        receiver = np.array([x[i], y[i], z[i]])
+        sets = [_tent_levels_split(vertices, j, interfaces, receiver, SPLIT_POINTS) for j in range(3)]
+        accumulate(np.array([i]), *pieces(sets), distance[k:k + 1])
+    keep = ~alone
+    for count in np.unique(points[keep]):
+        group = keep & (points == count)
+        sets = [_tent_levels(vertices, j, interfaces, int(count)) for j in range(3)]
+        accumulate(near[group], *pieces(sets), distance[group])
+
+
+def _tent_levels_split(vertices, j, interfaces, receiver, count):
+    """:func:`_tent_levels` for one receiver, also split where the shrinking triangle passes it.
+
+    The level-``t`` triangle's moving edge is the level line ``tent_j = t``, so it crosses the
+    receiver's projection at ``t* = tent_j(projection)``; its moving vertex ``k`` comes closest
+    at ``1 - (p - v_j) . (v_k - v_j) / |v_k - v_j|^2``. ``count`` points on each piece.
+    """
+    from ._tde import barycentric
+
+    v = np.asarray(vertices, dtype=float)
+    normal = np.cross(v[1] - v[0], v[2] - v[0])
+    normal /= np.linalg.norm(normal)
+    projection = receiver - ((receiver - v[0]) @ normal) * normal
+    cuts = [float(barycentric(v, projection[None])[0, j])]
+    for k in range(3):
+        if k != j:
+            edge = v[k] - v[j]
+            cuts.append(1.0 - float((receiver - v[j]) @ edge / (edge @ edge)))
+    base, _ = _tent_levels(vertices, j, interfaces, 1)       # one point a piece: recover the kinks
+    edges = [0.0, 1.0] + [c for c in cuts if 1e-9 < c < 1.0 - 1e-9]
+    depth = -v[:, 2]
+    for k in range(3):
+        if k == j or depth[k] == depth[j]:
+            continue
+        for z_i in np.asarray(interfaces, dtype=float):
+            u = (z_i - depth[j]) / (depth[k] - depth[j])
+            if 1e-9 < u < 1.0 - 1e-9:
+                edges.append(1.0 - u)
+    edges = np.unique(edges)
+    t, w = _gauss01(count)
+    levels = np.concatenate([a + (b - a) * t for a, b in zip(edges[:-1], edges[1:])])
+    weights = np.concatenate([(b - a) * w for a, b in zip(edges[:-1], edges[1:])])
+    return levels, weights
+
+
+#: Gauss-Legendre points on each piece of a split level integral (:func:`tent_levelset`).
+SPLIT_POINTS = 16
 
 _GAUSS = {}
 

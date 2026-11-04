@@ -158,19 +158,19 @@ def test_gamma_by_translation_is_gamma_pair_by_pair(coarse_tables):
     assert np.abs(gamma - want).max() < 1e-9 * np.abs(want).max()
 
 
-def _small_problem(tables):
+def _small_problem(tables, max_depth=3e3, reach=12e3, n=20):
     from slipsolve import FaultMesh, FaultTrace
     from slipsolve.basis import make_basis
 
     trace = FaultTrace.from_lonlat(np.array([-80.0, -79.95]), np.array([8.0, 8.0]))
     frame = trace.local_frame()
-    mesh = FaultMesh.curved(trace, frame, uniform_dip=90.0, max_depth=3e3, edge_length=2e3)
+    mesh = FaultMesh.curved(trace, frame, uniform_dip=90.0, max_depth=max_depth, edge_length=2e3)
     px, py = trace.to_local(frame)
     cx, cy = 0.5 * (px[0] + px[-1]), 0.5 * (py[0] + py[-1])
     rng = np.random.default_rng(3)
-    x = cx + rng.uniform(-12e3, 12e3, 20)
-    y = cy + rng.uniform(-12e3, 12e3, 20)
-    look = (np.full(20, 0.6), np.full(20, -0.1), np.full(20, 0.79))
+    x = cx + rng.uniform(-reach, reach, n)
+    y = cy + rng.uniform(-reach, reach, n)
+    look = (np.full(n, 0.6), np.full(n, -0.1), np.full(n, 0.79))
     return mesh, make_basis(mesh, "node"), (cx, cy), x, y, look
 
 
@@ -208,3 +208,219 @@ def test_born_is_first_order_in_the_contrast(coarse_tables):
     gap_large = np.abs(corrections[(0.10, "full")] - born_large).max()
     assert 3.5 < gap_large / gap_small < 4.5
     assert gap_small < 0.2 * np.abs(born_small).max()
+
+
+def test_a_split_level_integral_resolves_receivers_next_to_a_face(monkeypatch):
+    """Receivers 1-3% of a size from a triangle: the capped rule misses, the split matches 400 points.
+
+    Measured (2026-11-04) against a 400-point rule, displacement / strain: 1% of a size 1.4e-2 / 0.26
+    capped, 8e-5 / 4.5e-3 split; 3%, 3.7e-3 / 5.6e-2 and 4e-6 / 1.4e-4.
+    """
+    import slipsolve.layered_tde as lt
+    from slipsolve._tde import tde_disp_hs_unit, tde_strain_hs_unit
+
+    tri = np.array([[0.0, 0.0, -3000.0], [1200.0, 0.0, -3000.0], [0.0, 0.0, -4000.0]])
+    normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+    normal /= np.linalg.norm(normal)
+    size = np.sqrt(np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0])))
+    rng = np.random.default_rng(5)
+    pts = rng.dirichlet(np.ones(3), size=3) @ tri + 0.02 * size * normal
+
+    def poisson(d):
+        return np.full(np.shape(d), 0.25)
+
+    for kernel, width, bar in ((tde_disp_hs_unit, 3, 1e-3), (tde_strain_hs_unit, 6, 1e-2)):
+        out = {}
+        for label, cap, split in (("capped", 24, False), ("split", 24, True), ("reference", 400, False)):
+            monkeypatch.setattr(lt, "TENT_MAX_POINTS", cap)
+            field = np.zeros((3, 3, 3, width))
+            lt.tent_levelset(tri, *pts.T, np.arange(3), field, [0, 1, 2], kernel, 4.0, 3, (), poisson,
+                             split=split)
+            out[label] = field
+        scale = np.abs(out["reference"]).max()
+        assert np.abs(out["split"] - out["reference"]).max() < bar * scale
+        assert np.abs(out["capped"] - out["reference"]).max() > 3 * np.abs(out["split"] - out["reference"]).max()
+
+
+# -- one voxel against exact answers ---------------------------------------------------------------
+ONE_LAYER = VelocityModel.uniform(vp=6000.0, vs=3464.1016, rho=2700.0)
+
+
+@pytest.fixture(scope="module")
+def uniform_tables():
+    """A uniform crust: the remainder is zero, so a voxel is its faces; fine surface tables for the far path."""
+    tops, _, _ = wn.layer_stack(ONE_LAYER)
+    z = wn.depth_grid(tops, z_max=40e3, first=50.0, growth=2.0, spacing=2000.0, deep_spacing=8000.0)
+    return wn.RemainderTables.compute(ONE_LAYER, z=z, r=wn.distance_grid(per_decade=8), n_k=512,
+                                      z_max=40e3,
+                                      surface_z=wn.surface_depth_grid(tops, fine_to=20e3, z_max=40e3,
+                                                                      spacing=100.0),
+                                      strain=True)
+
+
+def test_a_voxel_split_in_two_is_the_voxel(uniform_tables):
+    """Outside both halves their sum is the whole: each half's extra Burgers vector is uniform on a closed surface."""
+    engine = LayeredTDE(uniform_tables)
+    whole = VoxelSource(engine, (0.0, 2000.0), (0.0, 1000.0), (3000.0, 4000.0))
+    left = VoxelSource(engine, (0.0, 1000.0), (0.0, 1000.0), (3000.0, 4000.0))
+    right = VoxelSource(engine, (1000.0, 2000.0), (0.0, 1000.0), (3000.0, 4000.0))
+    pts = np.array([[4500.0, 300.0, -2000.0], [-1500.0, 2500.0, -4200.0], [1200.0, -2200.0, -3500.0],
+                    [800.0, 400.0, 0.0]])
+    for field in ("displacement", "strain"):
+        a = getattr(whole, field)(*pts.T)
+        b = getattr(left, field)(*pts.T) + getattr(right, field)(*pts.T)
+        assert np.abs(a - b).max() < 3e-4 * np.abs(a).max(), field
+
+
+def test_a_voxel_is_its_point_moments(uniform_tables):
+    """Against a volume integral of exact point moment sources (direct transforms, no tables).
+
+    Receivers a voxel size or more above or below it, where the whole kernel decays in
+    wavenumber. Measured (2026-11-04) displacement 2e-5 to 8e-5, strain 1e-4 to 1.8e-4.
+    """
+    from slipsolve.layered_tde import _combine, _gauss01, combine_strain, tensor_packing
+
+    engine = LayeredTDE(uniform_tables)
+    v = VoxelSource(engine, (-500.0, 500.0), (-400.0, 600.0), (3000.0, 4000.0))
+    pts = np.array([[700.0, -900.0, -1500.0], [-1600.0, 1200.0, -1800.0], [300.0, 2000.0, -6500.0]])
+    tops, lam, mu = wn.layer_stack(ONE_LAYER)
+    k, dln = wn.wavenumbers(n=2048)
+    packing = tensor_packing(unit_moments(), v.lam, v.mu)
+    t, w = _gauss01(5)
+    grid = np.stack(np.meshgrid(*[v.lo[i] + (v.hi[i] - v.lo[i]) * t for i in range(3)], indexing="ij"), -1)
+    weights = np.einsum("i,j,k->ijk", w, w, w).ravel() * v.volume
+    disp = np.zeros((3, 6, 3))
+    strain = np.zeros((3, 6, 6))
+    for q, wq in zip(grid.reshape(-1, 3), weights):
+        kern = wn.kernels(tops, lam, mu, -q[2], -pts[:, 2], k, remainder=False, derivatives=True)
+        for i, (x, y, z) in enumerate(pts):
+            r = np.array([np.hypot(x - q[0], y - q[1])])
+            az = np.array([np.arctan2(x - q[0], y - q[1])])
+            one = tuple(a[i:i + 1] for a in kern)
+            values = wn.transform(*one[:3], k, dln, r)[0]
+            disp[i] += wq * _combine(values, az, packing)[0]
+            strain[i] += wq * combine_strain(values, wn.strain_columns(*one, k, dln, r)[0], az, packing)[0]
+    for got, want in ((v.displacement(*pts.T), disp), (v.strain(*pts.T), strain)):
+        error = np.abs(got - want).max(axis=(1, 2)) / np.abs(want).max(axis=(1, 2))
+        assert error.max() < 1e-3
+
+
+def test_far_surface_receivers_take_point_sources_of_the_same_field(uniform_tables):
+    """A surface voxel seen from 4.5-12 sizes: the whole-table point sources against its faces."""
+    engine = LayeredTDE(uniform_tables)
+    near = VoxelSource(engine, (0.0, 1000.0), (0.0, 1000.0), (0.0, 1000.0), far=None)
+    far = VoxelSource(engine, (0.0, 1000.0), (0.0, 1000.0), (0.0, 1000.0))
+    angle = np.linspace(0.0, 2 * np.pi, 7)[:-1]
+    reach = np.repeat([5.0, 8.0, 12.0], angle.size) * 1e3
+    x = 500.0 + reach * np.cos(np.tile(angle, 3))
+    y = 500.0 + reach * np.sin(np.tile(angle, 3))
+    z = np.zeros(x.size)
+    assert far._far(x, y, z).all()
+    a, b = near.displacement(x, y, z), far.displacement(x, y, z)
+    for i in range(x.size):
+        assert np.abs(a[i] - b[i]).max() < 5e-3 * np.abs(a[i]).max()
+
+
+def test_the_engine_inverts_and_a_saved_model_refuses_to_forward(coarse_tables, tmp_path):
+    """``SlipInversion`` takes the engine like any other; a reloaded model cannot rebuild it (no tables saved)."""
+    from slipsolve import FaultTrace, SlipInversion, SlipModel
+    from slipsolve.sampling import Observations
+    import xarray as xr
+
+    t = coarse_tables
+    mesh, basis, (cx, cy), x, y, look = _small_problem(t)
+    v = VoxelModel(t, cx + np.arange(-6e3, 6001.0, 3e3), cy + np.arange(4e3, 10001.0, 3e3), [5e3, 8e3],
+                   _scaled(t, 0.7, 0.7, lambda x, y, d: np.ones_like(x, bool)))
+    engine = HeterogeneousEngine(LayeredTDE(t), v)
+    truth = np.concatenate([np.full(basis.n_basis, -1.0), np.zeros(basis.n_basis)])
+    los = engine.los_matrix(mesh, x, y, *look, basis=basis) @ truth
+    ds = xr.Dataset({"los": ("obs", los), "weight": ("obs", np.ones(x.size)),
+                     "x": ("obs", x), "y": ("obs", y), "look_e": ("obs", look[0]),
+                     "look_n": ("obs", look[1]), "look_u": ("obs", look[2]),
+                     "track": ("obs", np.array(["T"] * x.size))})
+    obs = Observations(ds)
+    inv = SlipInversion(mesh, obs, engine=engine, basis="node")
+    assert np.allclose(inv.g @ truth, los)
+    model = inv.solve(smoothing=1e-6, method="active_set")
+    assert model.options["bimaterial"]["kind"] == "heterogeneous"
+    assert model.rigidity_factor is None
+    path = model.save(tmp_path / "het.slip.zip")
+    back = SlipModel.load(path)
+    assert back.rigidity_factor is None
+    with pytest.raises(Exception):
+        back.forward(x, y)
+
+
+# -- the arbiter: a layered band recovered from the reference plus voxels ---------------------------
+def _crust(band=None):
+    """``TWO_LAYERS``, or with a band ``(top, bottom, mu factor, lam factor)`` cut into its half-space."""
+    if band is None:
+        return TWO_LAYERS
+    top, bottom, f_mu, f_lam = band
+    vp2, vs2, rho2 = 6100.0, 3500.0, 2750.0
+    mu2, lam2 = rho2 * vs2 ** 2, rho2 * (vp2 ** 2 - 2.0 * vs2 ** 2)
+    vs3 = np.sqrt(f_mu * mu2 / rho2)
+    vp3 = np.sqrt((f_lam * lam2 + 2.0 * f_mu * mu2) / rho2)
+    return VelocityModel([0.0, 2000.0, 2000.0, top, top, bottom, bottom, 60e3],
+                         [3750.0, 3750.0, vp2, vp2, vp3, vp3, vp2, vp2],
+                         [1950.0, 1950.0, vs2, vs2, vs3, vs3, vs2, vs2],
+                         [2370.0, 2370.0, rho2, rho2, rho2, rho2, rho2, rho2])
+
+
+def _slab_tables(model, strain):
+    tops, _, _ = wn.layer_stack(model)
+    z = wn.depth_grid(tops, z_max=40e3, first=10.0, growth=1.6, spacing=400.0, deep_spacing=1000.0)
+    return wn.RemainderTables.compute(model, z=z, r=wn.distance_grid(per_decade=20), n_k=2048, z_max=40e3,
+                                      surface_z=wn.surface_depth_grid(tops, fine_to=20e3, z_max=40e3),
+                                      strain=strain)
+
+
+def test_a_layered_band_is_recovered_from_the_reference_and_voxels():
+    """Crust B (a soft band in the half-space) solved exactly by its own tables, against crust A plus voxels.
+
+    The band (5-9 km, ``mu x 0.5``, ``lambda x 0.6``: Poisson's ratio changes too) is laterally
+    infinite in B and +-16 km of 2 km voxels here, with the samples within +-8 km: samples
+    over band material the voxels lack lose their local effect (with voxels to +-16 km and
+    samples to +-25 km the full solve stayed 14-17% off whatever the band and the voxel size,
+    2026-11-04). This pins the sign of the moment density, the stiffness block, the packing and
+    the operators together: a sign error is a 2x error.
+    """
+    band = (5000.0, 9000.0, 0.5, 0.6)
+    A, B = _slab_tables(_crust(), True), _slab_tables(_crust(band), False)
+    mesh, basis, (cx, cy), x, y, look = _small_problem(A, max_depth=2.9e3, reach=8e3, n=30)
+    base = LayeredTDE(A)
+    g_ref = base.los_matrix(mesh, x, y, *look, basis=basis)
+    effect = LayeredTDE(B).los_matrix(mesh, x, y, *look, basis=basis) - g_ref
+    lam_b, mu_b = wn.layer_stack(_crust(band))[1][2], wn.layer_stack(_crust(band))[2][2]
+    v = VoxelModel(A, cx + np.arange(-16e3, 16001.0, 2e3), cy + np.arange(-16e3, 16001.0, 2e3),
+                   [5e3, 7e3, 9e3], lambda xx, yy, dd: (np.full(xx.shape, lam_b), np.full(xx.shape, mu_b)))
+    v.check_clearance(mesh)
+    rms = {}
+    shared = None
+    for order in ("full", "born1"):
+        engine = HeterogeneousEngine(base, v, order=order)
+        if shared is not None:
+            engine._gamma, engine._e, engine._h = shared
+        correction = engine.los_matrix(mesh, x, y, *look, basis=basis) - g_ref
+        shared = (engine.gamma, engine._e, engine._h)
+        rms[order] = (np.sqrt(np.mean(correction ** 2)) / np.sqrt(np.mean(effect ** 2)),
+                      np.sqrt(np.mean((correction - effect) ** 2)) / np.sqrt(np.mean(effect ** 2)))
+    print({k: tuple(round(float(a), 3) for a in val) for k, val in rms.items()})
+    ratio, error = rms["full"]
+    assert 0.8 < ratio < 1.2 and error < 0.25
+    assert rms["born1"][1] > error
+
+
+def test_bodies_set_the_voxels_whose_centres_they_hold(coarse_tables):
+    from slipsolve.heterogeneity import Box, Prism
+
+    t = coarse_tables
+    basin = Prism([[0.0, 0.0], [4e3, 0.0], [4e3, 4e3], [0.0, 4e3]], (0.0, 2e3))
+    block = Box((2e3, 6e3), (2e3, 6e3), (2e3, 6e3))
+    v = VoxelModel.from_bodies(t, np.arange(0.0, 8001.0, 2e3), np.arange(0.0, 8001.0, 2e3), [0.0, 2e3, 4e3, 6e3],
+                               [(basin, (5e9, 4e9)), (block, "scale", (1.2, 0.8))])
+    assert v.n_active == 4 + 4 * 2
+    soft = v.mu[:2, :2, 0]
+    assert np.all(soft == 4e9) and np.all(v.lam[:2, :2, 0] == 5e9)
+    assert np.allclose(v.mu[1:3, 1:3, 1:3], 0.8 * t.mu[1])
+    assert np.all(~v.active[3, 3, :])

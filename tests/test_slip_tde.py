@@ -261,3 +261,41 @@ def test_matches_cutde():
 
         scale = np.abs(theirs).max()
         np.testing.assert_allclose(mine, theirs, atol=1e-12 * scale, rtol=0)
+
+
+def test_many_triangles_at_once_are_each_triangle():
+    """``tde_disp_hs_unit_many`` against the scalar code, triangle by triangle, to rounding.
+
+    Dipping, vertical, buried, surface-reaching, horizontal (both windings) and random triangles,
+    one Poisson ratio each; receivers at depth and at the surface. NaN where the scalar code
+    gives NaN (on a triangle's side). Measured 1.7e-14 (2026-11-04).
+    """
+    from slipsolve._tde import tde_disp_hs_unit, tde_disp_hs_unit_many
+
+    rng = np.random.default_rng(0)
+    tris = [np.array([[0.0, 0.0, -5e3], [8e3, 1e3, -5e3], [4e3, -2e3, -12e3]]),
+            np.array([[0.0, 0.0, 0.0], [4e3, 0.0, 0.0], [0.0, 0.0, -4e3]]),
+            np.array([[0.0, 0.0, -2e3], [4e3, 0.0, -2e3], [4e3, 0.0, -6e3]]),
+            np.array([[0.0, 0.0, -4e3], [2e3, 0.0, -4e3], [0.0, 2e3, -4e3]]),
+            np.array([[0.0, 0.0, -4e3], [0.0, 2e3, -4e3], [2e3, 0.0, -4e3]]),
+            np.array([[1e3, 0.0, 0.0], [1e3, 1e3, 0.0], [1e3, 1e3, -1e3]]),
+            np.array([[0.0, 0.0, 0.0], [1e3, 0.0, 0.0], [0.0, 1e3, 0.0]])]       # in the free surface: zero
+    for _ in range(5):
+        t = rng.uniform(-6e3, 6e3, (3, 3))
+        t[:, 2] = -np.abs(t[:, 2]) - 100.0
+        tris.append(t)
+    tris = np.array(tris)
+    nu = rng.uniform(0.2, 0.3, len(tris))
+    x, y = rng.uniform(-15e3, 15e3, (2, 300))
+    z = -np.abs(rng.uniform(0.0, 10e3, 300))
+    z[:60] = 0.0
+    many = tde_disp_hs_unit_many(x, y, z, tris, nu)
+    assert many.shape == (len(tris), 3, 3, 300)
+    for i, (tri, n) in enumerate(zip(tris, nu)):
+        one = tde_disp_hs_unit(x, y, z, *tri, n)
+        np.testing.assert_array_equal(np.isnan(many[i]), np.isnan(one))
+        ok = np.isfinite(one)
+        if not ok.any() or np.abs(one[ok]).max() == 0:
+            assert np.all(many[i][ok] == 0)
+            continue
+        assert np.abs(many[i][ok] - one[ok]).max() < 1e-12 * np.abs(one[ok]).max()
