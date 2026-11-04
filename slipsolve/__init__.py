@@ -74,6 +74,7 @@ from .edgrn import EdgrnTables, VelocityModel, run_edgrn, write_edgrn_input
 from .evidence import GeometryEvidence, smoothing_precision
 from .frame import LocalFrame
 from .greens import HalfSpaceTDE
+from .heterogeneity import HeterogeneousEngine, VoxelModel
 from .inversion import SlipInversion, SlipModel
 from .layered import LayeredPointSource
 from .layered_tde import LayeredTDE
@@ -125,6 +126,7 @@ __all__ = [
     "FaultTrace",
     "GeometryEvidence",
     "HalfSpaceTDE",
+    "HeterogeneousEngine",
     "LayeredPointSource",
     "LayeredTDE",
     "LocalFrame",
@@ -138,6 +140,7 @@ __all__ = [
     "SlipModel",
     "SweepResult",
     "VelocityModel",
+    "VoxelModel",
     "adapt_layout",
     "bound_fraction",
     "calibrate",

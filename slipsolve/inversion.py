@@ -1005,7 +1005,7 @@ class SlipModel:
         if hasattr(engine, "rigidity_factor"):
             return engine.rigidity_factor(self.mesh)
         described = (getattr(self, "options", None) or {}).get("bimaterial")
-        if described:
+        if described and "contrast" in described:
             from .bimaterial import RigidityContrast
 
             return RigidityContrast.from_dict(described["contrast"]).element_factor(self.mesh)
