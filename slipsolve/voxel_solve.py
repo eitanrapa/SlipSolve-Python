@@ -111,7 +111,7 @@ class ConvolutionGamma:
                 for task, future in zip(tasks, futures):
                     place(task, future.result())
         if log:
-            log(f"Gamma kernels: {nz} rows x {di.size} offsets a pair, {nx} x {nx} -> {px} x {py} padded, "
+            log(f"Gamma kernels: {nz} rows x {di.size} offsets a pair, {nx} x {ny} -> {px} x {py} padded, "
                 f"{self.nbytes / 1e9:.2f} GB [{time.time() - t0:.0f}s]")
         #: Each voxel's own ``6 x 6`` block of ``Gamma`` (``[a, b]``), its row's zero offset.
         self.self_blocks = row_self[self.iz]

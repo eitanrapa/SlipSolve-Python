@@ -511,6 +511,42 @@ def test_far_away_the_point_source_path_is_the_dislocation_path(strain_tables, v
         assert (np.abs(a - b).max(axis=axes) / np.abs(b).max(axis=axes)).max() < 1.5e-3
 
 
+def test_the_collapsed_gauss_rule_is_exact_below_degree_2n():
+    """``n x n`` points integrate every monomial of degree < 2n over the triangle; one point is the centroid."""
+    from math import factorial
+
+    from slipsolve.layered_tde import _rule_gauss
+
+    for n in (1, 2, 3, 5):
+        bary, w = _rule_gauss(n)
+        assert bary.shape == (n * n, 3) and np.isclose(w.sum(), 1.0) and np.allclose(bary.sum(axis=1), 1.0)
+        x, y = bary[:, 1], bary[:, 2]
+        for i in range(2 * n):
+            for j in range(2 * n - i):
+                exact = 2.0 * factorial(i) * factorial(j) / factorial(i + j + 2)
+                assert abs(np.sum(w * x ** i * y ** j) - exact) < 1e-14
+    assert np.allclose(_rule_gauss(1)[0], 1.0 / 3.0)
+
+
+@pytest.mark.parametrize("vertices", [BELOW, CROSSING], ids=["below", "crossing"])
+def test_the_far_rules_agree(strain_tables, vertices):
+    """The far path's collapsed Gauss rule against the composite rule it replaced (2026-11-05).
+
+    On the Venezuela v3 tables both sit within the tables' ~1e-3 floor of a converged rule
+    (Gauss 1e-4 to 1.3e-3, composite 5e-5 to 8e-4) at 4-45 sizes, the Gauss rule 1-9x faster.
+    """
+    pts = _around(vertices, 12, 4.5, 30.0, seed=9)
+    gauss, composite = LayeredTDE(strain_tables), LayeredTDE(strain_tables, far_rule="composite")
+    assert gauss.far_rule == "gauss"
+    for f in (lambda e: e.tent_strain(vertices, *pts.T, components=(0, 1, 2)),
+              lambda e: e.element_strain(vertices, *pts.T)):
+        a, b = f(gauss), f(composite)
+        axes = tuple(range(1, a.ndim))
+        assert (np.abs(a - b).max(axis=axes) / np.abs(b).max(axis=axes)).max() < 1.5e-3
+    with pytest.raises(ValueError, match="far_rule"):
+        LayeredTDE(strain_tables, far_rule="midpoint")
+
+
 def test_the_strain_needs_strain_tables():
     tops, _, _ = wn.layer_stack(ONE_LAYER)
     z = wn.depth_grid(tops, z_max=40e3, first=50.0, growth=2.0, spacing=2000.0, deep_spacing=8000.0)

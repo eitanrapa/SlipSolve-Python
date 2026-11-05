@@ -65,6 +65,19 @@ MAX_ORDER = 30
 #: sizes holds 5e-4, so 1e-3.
 STRAIN_FAR_TOLERANCE = 1e-3
 
+#: The strain far path's Gauss rule (``far_rule="gauss"``, :func:`_rule_gauss`): ``n`` points a
+#: side, ``n`` the least with ``C (a / 2R)**(2 n)`` within :data:`STRAIN_FAR_TOLERANCE`, ``R`` from the
+#: centroid of a triangle of longest edge ``a`` (the 1-D rule's error for a kernel singular ``R``
+#: away), and never fewer than :data:`TRIANGLE_FAR_MIN_ORDER`. ``C`` is empirical: on the v3 tables
+#: (2026-11-05) a tent's strain at 4-12 sizes of a triangle with an edge in the surface needed
+#: ``n = 3`` to reach the tables' own ~1e-3 floor (``n = 2`` left 4-5e-3), so ``n = 3`` inside
+#: ~11 sizes and 2 beyond.
+TRIANGLE_FAR_CONSTANT = 300.0
+
+#: One point (the centroid) gives each tent a third of the element with its first moment
+#: wrong: 8e-2 to 3e-1 of a tent's strain at 4-45 sizes (2026-11-05). So at least ``2 x 2``.
+TRIANGLE_FAR_MIN_ORDER = 2
+
 #: Most Gauss-Legendre points in a tent's level-set integral (see :meth:`LayeredTDE.tent_field`).
 TENT_MAX_POINTS = 24
 
@@ -183,7 +196,8 @@ class LayeredTDE:
     #: projected from element means.
     supports_basis = True
 
-    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR, quadratic=True):
+    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR, quadratic=True,
+                 far_rule="gauss"):
         self.tables = tables
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
@@ -204,6 +218,13 @@ class LayeredTDE:
         #: -0.0001 and its slip by 1 mm at most
         #: (``venezuela_seven_scene_run_production/check_quadratic_rule.py``).
         self.quadratic = bool(quadratic)
+        if far_rule not in ("gauss", "composite"):
+            raise ValueError(f"far_rule must be 'gauss' or 'composite', got {far_rule!r}")
+        #: The rule :meth:`strain`'s far path integrates its point sources with: a collapsed
+        #: Gauss-Jacobi rule of ``n x n`` points (:func:`_rule_gauss`, its order from a geometric
+        #: error model, the default since 2026-11-05), or ``"composite"``, the sub-triangle rule
+        #: exact for quadratics at the point-source rule's orders (every earlier ``E``).
+        self.far_rule = far_rule
         #: The surface layer's, for the engine protocol; each piece uses its own.
         self.nu = float(tables.poisson(0.0))
         #: Depths (m) where the crust steps. An element crossing one is cut there,
@@ -558,14 +579,18 @@ class LayeredTDE:
             # The rule exact for quadratics: the sub-triangle centroids split an element's
             # remainder among its tents with an error first order in size / distance
             # (_rule_quadratic). Displacement takes the centroids only with quadratic=False.
-            quadratic = np.full(n, bool(strain) or self.quadratic)
+            kind = np.full(n, int(bool(strain) or self.quadratic))   # 0 centroids, 1 quadratic, 2 Gauss
             if halfspace is not None:
-                orders = np.where(far, self._point_orders(tri, size, x, y, z, STRAIN_FAR_TOLERANCE), orders)
+                if self.far_rule == "gauss":
+                    orders = np.where(far, self._gauss_orders(tri, x, y, z), orders)
+                    kind = np.where(far, 2, kind)
+                else:
+                    orders = np.where(far, self._point_orders(tri, size, x, y, z, STRAIN_FAR_TOLERANCE), orders)
             rec, points, weights = [], [], []
-            key = 2 * orders + quadratic                  # displacement: the orders alone
+            key = 3 * orders + kind                       # displacement: the orders alone
             for k in np.unique(key):
                 at = np.flatnonzero(key == k)
-                bary, share = _rule_quadratic(int(k // 2)) if k % 2 else _rule(int(k // 2))
+                bary, share = _RULE_KINDS[int(k % 3)](int(k // 3))
                 rec.append(np.repeat(at, share.size))
                 points.append(np.tile(bary @ tri, (at.size, 1)))
                 weights.append(np.tile(share * area, at.size))
@@ -612,6 +637,17 @@ class LayeredTDE:
                     for c in range(width):
                         out[:, j, i, c] += np.bincount(rec, phi[:, j] * pair[:, i, c], minlength=n)
         return out
+
+    def _gauss_orders(self, tri, x, y, z, tolerance=STRAIN_FAR_TOLERANCE):
+        """Points a side of :func:`_rule_gauss` for far receivers: the least ``n`` with
+        ``C (a / 2R)**(2n)`` within ``tolerance`` (:data:`TRIANGLE_FAR_CONSTANT`)."""
+        side = float(max(np.linalg.norm(tri[1] - tri[0]), np.linalg.norm(tri[2] - tri[1]),
+                         np.linalg.norm(tri[0] - tri[2])))
+        centroid = tri.mean(axis=0)
+        reach = np.sqrt((x - centroid[0]) ** 2 + (y - centroid[1]) ** 2 + (z - centroid[2]) ** 2)
+        ratio = np.maximum(2.0 * reach / side, 1.5)
+        n = np.ceil(np.log(TRIANGLE_FAR_CONSTANT / tolerance) / (2.0 * np.log(ratio)))
+        return np.clip(n, TRIANGLE_FAR_MIN_ORDER, self.max_order).astype(int)
 
     def _point_orders(self, tri, size, x, y, z, tolerance=None):
         """The point-source rule of :class:`~slipsolve.layered.LayeredPointSource` for the whole field."""
@@ -738,7 +774,7 @@ def engine_pool(engine, workers):
     from concurrent.futures import ProcessPoolExecutor
 
     options = dict(tolerance=engine.tolerance, max_order=engine.max_order, far=engine.strain_far,
-                   quadratic=engine.quadratic)
+                   quadratic=engine.quadratic, far_rule=engine.far_rule)
     return ProcessPoolExecutor(int(workers), initializer=_start_worker, initargs=(str(path), options))
 
 
@@ -1085,6 +1121,33 @@ def _rule_quadratic(order):
         bary = np.concatenate([mix @ np.stack(sub) for sub in subs])
         _RULES[key] = (bary, np.full(bary.shape[0], 1.0 / bary.shape[0]))
     return _RULES[key]
+
+
+def _rule_gauss(order):
+    """A collapsed Gauss rule of ``order x order`` points on the triangle: barycentric rows, cached.
+
+    The square ``(u, v)`` maps onto the triangle as ``(1 - u, u (1 - v), u v)``, with the
+    Jacobian ``2 u``; Gauss-Jacobi points in ``u`` (weight ``u``) and Gauss-Legendre in ``v``. A
+    product Gauss rule, so its error falls geometrically with the order for a kernel smooth
+    over the triangle (``C (a / 2R)**(2n)``, :data:`TRIANGLE_FAR_CONSTANT`), where the composite
+    rules fall as ``order**-2``. It integrates every polynomial of degree below ``2 n`` exactly;
+    one point is the centroid, which is NOT enough for a tent (:data:`TRIANGLE_FAR_MIN_ORDER`).
+    """
+    key = ("gauss", order)
+    if key not in _RULES:
+        from scipy.special import roots_jacobi
+
+        n = int(order)
+        xu, wu = roots_jacobi(n, 0.0, 1.0)                     # weight (1 + x) on [-1, 1]
+        u, wu = 0.5 * (xu + 1.0), wu / wu.sum()
+        v, wv = _gauss01(n)
+        uu, vv = (a.ravel() for a in np.meshgrid(u, v, indexing="ij"))
+        bary = np.column_stack([1.0 - uu, uu * (1.0 - vv), uu * vv])
+        _RULES[key] = (bary, np.outer(wu, wv).ravel())
+    return _RULES[key]
+
+
+_RULE_KINDS = (_rule, _rule_quadratic, _rule_gauss)
 
 
 def _refuse_nodal(basis):
