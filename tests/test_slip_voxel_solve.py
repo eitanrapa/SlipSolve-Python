@@ -83,11 +83,11 @@ def test_gmres_restarts_converges_and_refuses():
         gmres(lambda v: a @ v, b, tol=1e-12, restart=5, max_iter=10)
 
 
-def test_the_fft_engine_is_the_dense_engine(coarse_tables):
-    """``HeterogeneousEngine(solver="fft")``: the dense engine's G to the solve's tolerance."""
+def test_the_fft_engine_is_the_dense_engine(coarse_tables, tmp_path):
+    """``HeterogeneousEngine(solver="fft")``: the dense engine's G to the solve's tolerance, H streamed in blocks."""
     from slipsolve import FaultMesh, FaultTrace
 
-    tables = coarse_tables
+    tables = wn.RemainderTables.load(coarse_tables.save(tmp_path / "coarse.npz"))
     base = LayeredTDE(tables)
     trace = FaultTrace.from_lonlat(np.array([-80.05, -79.95]), np.array([8.0, 8.0]))
     frame = trace.local_frame()
@@ -101,11 +101,31 @@ def test_the_fft_engine_is_the_dense_engine(coarse_tables):
     rng = np.random.default_rng(5)
     x, y = rng.uniform(-9e3, 9e3, 25), y0 + rng.uniform(-9e3, 9e3, 25)
     look = (np.full(25, 0.6), np.full(25, -0.1), np.full(25, 0.79))
-    dense = HeterogeneousEngine(base, vox).los_matrix(mesh, x, y, *look)
-    fft = HeterogeneousEngine(base, vox, solver="fft")
-    got = fft.los_matrix(mesh, x, y, *look)
+    reference = HeterogeneousEngine(base, vox)
+    dense = reference.los_matrix(mesh, x, y, *look)
     g0 = base.los_matrix(mesh, x, y, *look)
-    assert np.abs(got - dense).max() < 1e-5 * np.abs(dense - g0).max()
-    assert fft.describe()["solver"] == "fft"
+    for fft in (HeterogeneousEngine(base, vox, solver="fft", h_chunk=7),
+                HeterogeneousEngine(base, vox, solver="fft", h_chunk=6, workers=2)):
+        got = fft.los_matrix(mesh, x, y, *look)
+        assert np.abs(got - dense).max() < 1e-5 * np.abs(dense - g0).max()
+        enu, enu_dense = fft.displacement(mesh, x, y), reference.displacement(mesh, x, y)
+        assert np.abs(enu - enu_dense).max() < 1e-5 * np.abs(enu_dense - base.displacement(mesh, x, y)).max()
+        assert not fft._h and fft.describe()["solver"] == "fft"
+        fft.close()
     with pytest.raises(ValueError, match="solver"):
         HeterogeneousEngine(base, vox, solver="cg")
+
+
+def test_a_subset_of_the_surface_operator_is_its_columns(coarse_tables):
+    """``los_operator(subset=)`` gives exactly those voxels' columns of the whole operator."""
+    from slipsolve.heterogeneity import los_operator
+
+    engine = LayeredTDE(coarse_tables)
+    vox = _model(coarse_tables)
+    rng = np.random.default_rng(3)
+    x, y = rng.uniform(-8e3, 12e3, 15), rng.uniform(-5e3, 14e3, 15)
+    look = (np.full(15, 0.6), np.full(15, -0.1), np.full(15, 0.79))
+    whole = los_operator(vox, engine, x, y, look)
+    subset = np.array([2, 5, 6, 20, 41])
+    cols = (6 * subset[:, None] + np.arange(6)).ravel()
+    np.testing.assert_array_equal(los_operator(vox, engine, x, y, look, subset=subset), whole[:, cols])

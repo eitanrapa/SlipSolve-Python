@@ -83,6 +83,10 @@ VOXEL_FAR_CONSTANT = 8.0
 #: Most (receiver, point) pairs the volume rule handles at once.
 VOXEL_FAR_BATCH = 400_000
 
+#: Voxels in a block of ``H`` when :class:`HeterogeneousEngine` streams it (``solver="fft"``):
+#: 17k samples x 6 x 1000 voxels is 0.8 GB a block.
+H_CHUNK = 1000
+
 #: Relative accuracy the remainder's volume rule aims for, as
 #: :data:`~slipsolve.layered_tde.REMAINDER_TOLERANCE`.
 VOXEL_TOLERANCE = 3e-3
@@ -892,17 +896,19 @@ def _los_share(bounds, x, y, z, look):
     return out
 
 
-def los_operator(voxels, engine, x, y, look=None, workers=None):
+def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
     """``H``, ``(npts, 6 n)``: line of sight at surface points per unit moment density in each voxel.
 
     ``look`` is ``(look_e, look_n, look_u)``; without it, east/north/up, ``(npts, 3, 6 n)``.
-    ``workers`` > 1 shares the voxels among that many processes.
+    ``workers`` > 1 shares the voxels among that many processes. ``subset`` (indices of active
+    voxels, increasing) gives only their columns, ``6 len(subset)`` of them, in that order.
     """
     from .layered_tde import engine_pool
 
     x, y, z = _as_points(x, y, None)
     _refuse_on_faces(voxels, x, y, z)
-    n = voxels.n_active
+    voxel_ids = np.arange(voxels.n_active) if subset is None else np.asarray(subset, dtype=int)
+    n = voxel_ids.size
     if look is not None:
         look = np.stack([np.asarray(v, dtype=float).ravel() for v in look], axis=1)
         out = np.zeros((x.size, 6 * n))
@@ -913,12 +919,13 @@ def los_operator(voxels, engine, x, y, look=None, workers=None):
         count = pool.pool._max_workers if hasattr(pool, "pool") else int(workers)
         shares = [s for s in np.array_split(np.arange(n), 4 * count) if s.size]
         with pool:
-            futures = [pool.submit(_los_share, [voxels.bounds(i) for i in share], x, y, z, look) for share in shares]
+            futures = [pool.submit(_los_share, [voxels.bounds(i) for i in voxel_ids[share]], x, y, z, look)
+                       for share in shares]
             for share, future in zip(shares, futures):
                 cols = slice(6 * share[0], 6 * (share[-1] + 1))
                 out[..., cols] = future.result()
     for i in range(n if pool is None else 0):
-        u = VoxelSource(engine, *voxels.bounds(i)).displacement(x, y, z)   # (npts, 6, 3)
+        u = VoxelSource(engine, *voxels.bounds(voxel_ids[i])).displacement(x, y, z)   # (npts, 6, 3)
         if look is not None:
             out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
         else:
@@ -970,11 +977,13 @@ class HeterogeneousEngine:
     ``solver="fft"`` never forms ``Gamma``: it applies it as one lateral convolution per pair
     of depth rows and solves by GMRES (:mod:`slipsolve.voxel_solve`), in memory ``O(n)`` in the
     voxels rather than ``O(n^2)``; the dense LU (``"dense"``) is exact and faster while it fits.
+    Nor does it keep ``H`` (samples x 6 voxels, 50 GB at 17k samples and 61k voxels): it applies
+    it to the solved moment density ``h_chunk`` voxels at a time, recomputed per sample set.
     """
 
     supports_basis = True
 
-    def __init__(self, base, voxels, order="full", log=None, workers=None, solver="dense"):
+    def __init__(self, base, voxels, order="full", log=None, workers=None, solver="dense", h_chunk=H_CHUNK):
         if not base.tables.has_strain:
             raise ValueError("the base engine's tables need strain=True")
         if voxels.tables is not base.tables:
@@ -984,6 +993,8 @@ class HeterogeneousEngine:
         if solver not in ("dense", "fft"):
             raise ValueError(f"solver must be 'dense' or 'fft', got {solver!r}")
         self.solver = solver
+        #: Voxels a block of ``H`` holds when ``solver="fft"`` streams it.
+        self.h_chunk = int(h_chunk)
         self._system = None
         self.base = base
         self.voxels = voxels
@@ -1093,6 +1104,50 @@ class HeterogeneousEngine:
                                                             workers=self._workers()))
         return self._h[key]
 
+    def _apply_h(self, x, y, look, m):
+        """``H @ m``: from the kept ``H`` (dense), or streamed ``h_chunk`` voxels at a time (fft)."""
+        if self.solver != "fft":
+            h = self._surface(x, y, look)
+            return h @ m if look is not None else np.einsum("pcv,vk->pck", h, m)
+        import time
+
+        from .layered_tde import engine_pool
+
+        t0 = time.time()
+        n = self.voxels.n_active
+        npts = np.size(x)
+        out = np.zeros((npts, m.shape[1]) if look is not None else (npts, 3, m.shape[1]))
+        chunks = [c for c in np.array_split(np.arange(n), max(1, -(-n // self.h_chunk))) if c.size]
+
+        def add(chunk, h):
+            rows = (6 * chunk[:, None] + np.arange(6)[None, :]).ravel()
+            if look is not None:
+                out[...] += h @ m[rows]
+            else:
+                out[...] += np.einsum("pcv,vk->pck", h, m[rows])
+
+        pool = engine_pool(self.base, self._workers())
+        px, py, pz = _as_points(x, y, None)
+        _refuse_on_faces(self.voxels, px, py, pz)
+        lk = None if look is None else np.stack([np.asarray(v, dtype=float).ravel() for v in look], axis=1)
+        if pool is None:
+            for chunk in chunks:
+                add(chunk, los_operator(self.voxels, self.base, x, y, look, subset=chunk))
+        else:
+            from concurrent.futures import as_completed
+
+            with pool:
+                futures = {pool.submit(_los_share, [self.voxels.bounds(i) for i in chunk], px, py, pz, lk): chunk
+                           for chunk in chunks}
+                for future in as_completed(futures):
+                    h = future.result()
+                    if not np.isfinite(h).all():
+                        raise ValueError("a surface point got a non-finite voxel field; on or within rounding of a voxel face?")
+                    add(futures[future], h)
+        if self.log:
+            self.log(f"H streamed: {npts} surface points x {n} voxels in {len(chunks)} blocks [{time.time() - t0:.0f}s]")
+        return out
+
     # -- the engine protocol ----------------------------------------------------------
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
         """Line-of-sight design matrix, ``(npts, 2 * n_parameters)``; surface points only."""
@@ -1100,8 +1155,8 @@ class HeterogeneousEngine:
         if self.voxels.n_active == 0:
             return g0
         self._surface_only(z)
-        h = self._surface(x, y, (look_e, look_n, look_u))
-        return g0 - h @ (self.voxels.stiffness() @ self.voxel_strain(mesh, basis))
+        m = self.voxels.stiffness() @ self.voxel_strain(mesh, basis)
+        return g0 - self._apply_h(x, y, (look_e, look_n, look_u), m)
 
     def displacement(self, mesh, x, y, z=None, basis=None):
         """East/north/up displacement per unit slip, ``(npts, 3, 2 * n_parameters)``; surface points only."""
@@ -1109,9 +1164,8 @@ class HeterogeneousEngine:
         if self.voxels.n_active == 0:
             return g0
         self._surface_only(z)
-        h = self._surface(x, y, None)                                   # (npts, 3, 6 n)
         m = self.voxels.stiffness() @ self.voxel_strain(mesh, basis)    # (6 n, cols)
-        return g0 - np.einsum("pcv,vk->pck", h, m)
+        return g0 - self._apply_h(x, y, None, m)
 
     def forward(self, mesh, slip, x, y, look=None, z=None, basis=None):
         slip = np.asarray(slip, dtype=float)
