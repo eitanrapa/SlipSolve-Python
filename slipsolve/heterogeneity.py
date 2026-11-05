@@ -36,10 +36,11 @@ voxel whose face lies on a layer interface would sit where the remainder is sing
   least a voxel clear of the fault (:meth:`VoxelModel.check_clearance`); a contrast across
   the fault itself is :mod:`slipsolve.bimaterial`'s.
 - The grid is regular: ``Gamma`` is assembled by translation, one source per depth row.
-- ⚠️ A receiver exactly on a voxel face gets NaN on the face's edges and one side's limit
-  inside it, without the interior term: keep samples off voxel faces. Receivers within a
-  few percent of a size of a face are resolved by the split level integral
-  (:func:`~slipsolve.layered_tde.tent_levelset`).
+- A receiver exactly on a voxel face is singular (NaN on the face's edges, one side's limit
+  inside it): :func:`los_operator` refuses one, naming it (:meth:`VoxelModel.on_faces`,
+  2026-11-04), and refuses any non-finite field. Receivers within a few percent of a size of
+  a face are resolved by the split level integral (:func:`~slipsolve.layered_tde.tent_levelset`).
+- A voxel longer than :data:`MAX_ASPECT` times its shortest side is summed as near-cubic pieces.
 - The layered remainder is table-limited, at second order in the tables' grids (strain is
   more demanding than displacement); the strain-bearing tables want ~200 m in depth.
 - ``Gamma`` and its LU are dense: ~10k voxels on 128 GB, ~5-6k on 64 GB.
@@ -76,6 +77,21 @@ VOXEL_MAX_ORDER = 12
 #: 7.84 x 0.5 x 0.5 km one 9.8%, where 16 and 32 pieces agreed to 7e-4 and 3e-4. A cube, and
 #: anything up to this aspect, is computed as before, bit for bit.
 MAX_ASPECT = 2.0
+
+
+def _piece_counts(sides):
+    """Near-cubic pieces along each side of a voxel with these ``sides`` (:data:`MAX_ASPECT`): odd, 1 for a cube."""
+    sides = np.asarray(sides, dtype=float)
+    counts = np.ceil(sides / (MAX_ASPECT * sides.min()) - 1e-9).astype(int)
+    return np.where(counts % 2 == 0, counts + 1, counts)
+
+
+def _cells(v, start, step, n, tol):
+    """The (at most two) grid cells holding each value, edges included within ``tol``: ``(lo, hi, inside)``."""
+    lo = np.floor((v - tol - start) / step).astype(int)
+    hi = np.floor((v + tol - start) / step).astype(int)
+    inside = (v >= start - tol) & (v <= start + n * step + tol)
+    return np.clip(lo, 0, n - 1), np.clip(hi, 0, n - 1), inside
 
 #: The far path's points per axis by distance from the voxel's centre, in voxel sizes: three
 #: inside the first, two inside the second, one beyond. A tensor Gauss-Legendre rule on a cube
@@ -201,9 +217,7 @@ class VoxelSource:
         self.size = self.volume ** (1.0 / 3.0)
         self.free_surface = top == 0.0
         self.faces = _faces(self.lo, self.hi, self.free_surface)
-        sides = self.hi - self.lo
-        counts = np.ceil(sides / (MAX_ASPECT * sides.min()) - 1e-9).astype(int)
-        counts = np.where(counts % 2 == 0, counts + 1, counts)
+        counts = _piece_counts(self.hi - self.lo)
         #: Near-cubic pieces whose fields sum to this voxel's (:data:`MAX_ASPECT`); None for a
         #: voxel computed whole.
         self.pieces = None
@@ -542,6 +556,57 @@ class VoxelModel:
         out[ok] = self.mu[ix[ok], iy[ok], iz[ok]]
         return out
 
+    def on_faces(self, x, y, z=None, tol=None):
+        """Points on a face of an active voxel, where its field is singular: a boolean mask.
+
+        Every face counts -- a voxel's own, one shared by two active voxels, and those between
+        the near-cubic pieces a long voxel is summed from (:data:`MAX_ASPECT`) -- except a top
+        face in the free surface, which is not modelled: a surface point over a surface voxel is
+        fine. ``tol`` (m) defaults to 1e-6 of the smallest voxel side.
+        """
+        x = np.asarray(x, dtype=float).ravel()
+        y = np.asarray(y, dtype=float).ravel()
+        depth = np.zeros(x.size) if z is None else -np.asarray(z, dtype=float).ravel()
+        out = np.zeros(x.size, bool)
+        if self.n_active == 0:
+            return out
+        x0, y0 = float(self.x_edges[0]), float(self.y_edges[0])
+        dx, dy = (float(e[1] - e[0]) for e in (self.x_edges, self.y_edges))
+        nx, ny, _ = self.shape
+        thick = np.diff(self.z_edges)
+        tol = 1e-6 * min(dx, dy, float(thick.min())) if tol is None else float(tol)
+        ix_lo, ix_hi, in_x = _cells(x, x0, dx, nx, tol)
+        jy_lo, jy_hi, in_y = _cells(y, y0, dy, ny, tol)
+        for k in range(self.shape[2]):
+            act = self.active[:, :, k]
+            top, bottom = float(self.z_edges[k]), float(self.z_edges[k + 1])
+            rows = (depth >= top - tol) & (depth <= bottom + tol)
+            if not (act.any() and rows.any()):
+                continue
+            cx, cy, cz = _piece_counts([dx, dy, bottom - top])
+            # planes across x: x0 + m dx / cx; a cell boundary (m % cx == 0) has the cells on both sides
+            for coord, start, step, count, n_cells, other_lo, other_hi, other_in, swap_axes in (
+                    (x, x0, dx, cx, nx, jy_lo, jy_hi, in_y, False),
+                    (y, y0, dy, cy, ny, ix_lo, ix_hi, in_x, True)):
+                sub = step / count
+                m = np.rint((coord - start) / sub).astype(int)
+                near = rows & other_in & (np.abs(coord - (start + m * sub)) <= tol) & (m >= 0) & (m <= n_cells * count)
+                left = np.clip(np.where(m % count == 0, m // count - 1, m // count), 0, n_cells - 1)
+                right = np.clip(m // count, 0, n_cells - 1)
+                hit = np.zeros(x.size, bool)
+                for a in (left, right):
+                    for b in (other_lo, other_hi):
+                        hit |= act[b, a] if swap_axes else act[a, b]
+                out |= near & hit
+            # planes across depth: top + m thickness / cz; the free surface is not a face
+            sub = (bottom - top) / cz
+            m = np.rint((depth - top) / sub).astype(int)
+            near = (rows & in_x & in_y & (np.abs(depth - (top + m * sub)) <= tol) & (m >= 0) & (m <= cz)
+                    & ~((m == 0) & (top == 0.0)))
+            hit = act[ix_lo, jy_lo] | act[ix_lo, jy_hi] | act[ix_hi, jy_lo] | act[ix_hi, jy_hi]
+            out |= near & hit
+        return out
+
     def check_clearance(self, mesh, buffer=None, samples=24):
         """Refuse an active voxel within ``buffer`` (default: one voxel size) of the fault mesh.
 
@@ -637,6 +702,7 @@ def los_operator(voxels, engine, x, y, look=None):
     ``look`` is ``(look_e, look_n, look_u)``; without it, east/north/up, ``(npts, 3, 6 n)``.
     """
     x, y, z = _as_points(x, y, None)
+    _refuse_on_faces(voxels, x, y, z)
     n = voxels.n_active
     if look is not None:
         look = np.stack([np.asarray(v, dtype=float).ravel() for v in look], axis=1)
@@ -649,7 +715,21 @@ def los_operator(voxels, engine, x, y, look=None):
             out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
         else:
             out[:, :, 6 * i:6 * i + 6] = np.moveaxis(u, 2, 1)
+    bad = ~np.isfinite(out.reshape(x.size, -1)).all(axis=1)
+    if bad.any():
+        raise ValueError(f"{int(bad.sum())} point(s) got a non-finite voxel field, indices "
+                         f"{np.flatnonzero(bad)[:10].tolist()}; a point on or within rounding of a voxel face?")
     return out
+
+
+def _refuse_on_faces(voxels, x, y, z):
+    """Raise, naming them, if any points lie on a voxel face (:meth:`VoxelModel.on_faces`)."""
+    bad = voxels.on_faces(x, y, z)
+    if bad.any():
+        i = np.flatnonzero(bad)
+        raise ValueError(f"{i.size} point(s) lie on voxel faces, where the field is singular: indices "
+                         f"{i[:10].tolist()}{' ...' if i.size > 10 else ''}, the first at x {x[i[0]]:.3f}, "
+                         f"y {y[i[0]]:.3f}, z {z[i[0]]:.3f} m; shift the voxel grid or the points")
 
 
 def _digest(*arrays):

@@ -468,3 +468,29 @@ def test_a_long_thin_voxel_is_the_sum_of_its_cubes(uniform_tables):
     got = long.strain(*pts.T)
     want = sum(c.strain(*pts.T) for c in cubes)
     assert (np.abs(got - want).max(axis=(1, 2)) / np.abs(want).max(axis=(1, 2))).max() < 3e-3
+
+
+def test_points_on_voxel_faces_are_found_and_refused(uniform_tables):
+    """A point on a voxel face is singular. `on_faces` finds it -- a voxel's own faces, the faces between a long
+    voxel's pieces, a horizontal face between rows -- and the operator refuses it, naming it. A surface point over a
+    surface voxel is not on a face (the top face is the free surface's)."""
+    from slipsolve.heterogeneity import los_operator
+
+    lam0, mu0 = float(uniform_tables.lam[0]), float(uniform_tables.mu[0])
+    lam = np.full((3, 1, 2), lam0)
+    mu = np.full((3, 1, 2), mu0)
+    lam[[0, 2]], mu[[0, 2]] = 0.5 * lam0, 0.5 * mu0            # columns 0 and 2 soft, column 1 the reference's
+    vox = VoxelModel(uniform_tables, [0.0, 1000.0, 2000.0, 3000.0], [0.0, 3000.0], [0.0, 1000.0, 2000.0],
+                     lam=lam, mu=mu)                         # 1 x 3 x 1 km voxels: three pieces along y
+    cases = [((0.0, 1500.0, 0.0), True),                     # a soft voxel's outer face, at the surface
+             ((1000.0, 1500.0, 0.0), True),                  # its face against the reference column
+             ((1500.0, 1500.0, 0.0), False),                 # inside the reference column
+             ((500.0, 1000.0, 0.0), True),                   # between two of its pieces
+             ((500.0, 1500.0, 0.0), False),                  # over it, mid-piece: the top is the free surface
+             ((500.0, 1500.0, -1000.0), True),               # the face between its two rows
+             ((500.0, 1001.0, 0.0), False),                  # 1 m off the piece face
+             ((3000.0001, 1500.0, -500.0), True)]            # within rounding of the last soft voxel's face
+    pts = np.array([c[0] for c in cases])
+    np.testing.assert_array_equal(vox.on_faces(*pts.T), [c[1] for c in cases])
+    with pytest.raises(ValueError, match="lie on voxel faces"):
+        los_operator(vox, LayeredTDE(uniform_tables), [1000.0, 9000.0], [1500.0, 9000.0])
