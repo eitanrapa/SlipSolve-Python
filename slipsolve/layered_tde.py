@@ -395,12 +395,18 @@ class LayeredTDE:
             out = np.zeros((x.size, 6, 2 * n))
             verts, tris = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
             with pool:
-                # interleaved shares, one a worker: the elements near the points cost the most
+                # many contiguous chunks, handed out as workers free up: an element's cost varies a
+                # hundredfold (a long one is near every point); each returns only its own columns
+                from concurrent.futures import as_completed
+
                 count = pool.pool._max_workers if isinstance(pool, _Borrowed) else int(workers)
-                shares = [np.arange(i, mesh.n_elements, count) for i in range(count)]
-                futures = [pool.submit(_strain_share, k, verts[k], tris[k], x, y, z, nodal, n) for k in shares if k.size]
-                for future in futures:
-                    out += future.result()
+                chunks = [k for k in np.array_split(np.arange(mesh.n_elements), 16 * count) if k.size]
+                futures = [pool.submit(_strain_share, k, verts[k], tris[k], x, y, z, nodal, n) for k in chunks]
+                for future in as_completed(futures):
+                    cols, part = future.result()
+                    k = cols.size
+                    out[:, :, cols] += part[:, :, :k]
+                    out[:, :, n + cols] += part[:, :, k:]
             _require_finite(out, mesh, x, y, z)
             return out
         if not nodal:
@@ -737,20 +743,24 @@ def engine_pool(engine, workers):
 
 
 def _strain_share(elements, vertices, triangles, x, y, z, nodal, n):
-    """A worker's share of :meth:`LayeredTDE.strain`: its elements' contributions, ``(npts, 6, 2 n)``."""
+    """A worker's chunk of :meth:`LayeredTDE.strain`: ``(columns, part)``, ``part`` ``(npts, 6, 2 k)``
+    for the ``k`` columns (nodes, or elements) its elements touch: strike columns, then dip."""
     engine = worker_engine()
-    out = np.zeros((x.size, 6, 2 * n))
-    for e, v, tri in zip(elements, vertices, triangles):
+    cols = np.unique(np.asarray(triangles).ravel()) if nodal else np.asarray(elements)
+    k = cols.size
+    out = np.zeros((x.size, 6, 2 * k))
+    for i, (v, tri) in enumerate(zip(vertices, triangles)):
         if nodal:
             tents = engine.tent_strain(v, x, y, z, components=(0, 1))
             for j, node in enumerate(tri):
-                out[:, :, node] += tents[:, j, 0]
-                out[:, :, n + node] += tents[:, j, 1]
+                c = int(np.searchsorted(cols, node))
+                out[:, :, c] += tents[:, j, 0]
+                out[:, :, k + c] += tents[:, j, 1]
         else:
             eps = engine.element_strain(v, x, y, z, components=(0, 1))
-            out[:, :, e] += eps[:, 0]
-            out[:, :, n + e] += eps[:, 1]
-    return out
+            out[:, :, i] += eps[:, 0]
+            out[:, :, k + i] += eps[:, 1]
+    return cols, out
 
 
 def tent_levelset(vertices, x, y, z, near, out, components, kernel, gain, min_points,
