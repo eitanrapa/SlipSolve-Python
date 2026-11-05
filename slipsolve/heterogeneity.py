@@ -587,10 +587,8 @@ class VoxelModel:
                 raise ValueError(f"{name}_edges must be uniform and increasing")
         if z_edges[0] < 0 or np.any(np.diff(z_edges) <= 0):
             raise ValueError("z_edges are depths: >= 0 and increasing")
-        added = [t for t in tables.tops[1:] if z_edges[0] + 1e-6 < t < z_edges[-1] - 1e-6
-                 and not np.any(np.isclose(z_edges, t, rtol=0, atol=1e-6))]
+        self.z_edges, added = _with_interfaces(tables, z_edges)
         self.inserted = list(added)
-        self.z_edges = np.unique(np.concatenate([z_edges, added])) if added else z_edges
         self.shape = (self.x_edges.size - 1, self.y_edges.size - 1, self.z_edges.size - 1)
         cx = 0.5 * (self.x_edges[1:] + self.x_edges[:-1])
         cy = 0.5 * (self.y_edges[1:] + self.y_edges[:-1])
@@ -606,9 +604,16 @@ class VoxelModel:
         layer = tables.layer(gz)
         self.lam0 = tables.lam[layer]
         self.mu0 = tables.mu[layer]
+        self.tol = float(tol)
+        self._grid = (gx, gy, gz)
+        self._refresh()
+
+    def _refresh(self):
+        """Departures, the active set, its indices and centres, from :attr:`lam` and :attr:`mu`."""
+        gx, gy, gz = self._grid
         self.dlam = self.lam - self.lam0
         self.dmu = self.mu - self.mu0
-        self.active = (np.abs(self.dlam) + np.abs(self.dmu)) > float(tol) * self.mu0
+        self.active = (np.abs(self.dlam) + np.abs(self.dmu)) > self.tol * self.mu0
         #: ``(n_active, 3)`` grid indices and east/north/up centres of the active voxels, in
         #: the order of the operators' blocks.
         self.index = np.argwhere(self.active)
@@ -647,6 +652,73 @@ class VoxelModel:
             return lam, mu
 
         return cls(tables, x_edges, y_edges, z_edges, moduli, tol=tol, frame=frame)
+
+    @classmethod
+    def from_crust1(cls, tables, x_edges, y_edges, z_edges, crust, frame, tol=1e-9):
+        """Voxels with CRUST1.0's moduli (:class:`~slipsolve.crust1.Crust1`) over the tables' reference.
+
+        Each voxel takes the thickness-weighted mean of ``lambda`` and ``mu`` over its depth range
+        (below the rock surface: water and ice dropped) in the 1-degree cell holding its centre;
+        ``frame`` (the :class:`~slipsolve.frame.LocalFrame` of the edges) places the centres.
+        The tables' interfaces are inserted into ``z_edges`` first, as the constructor does. Every
+        voxel departs from a 1-D reference somewhere, so the model fills the grid: it is meant for
+        ``HeterogeneousEngine(solver="fft")``. Voxels through the fault must then be returned to the
+        reference (:meth:`keep_clear`).
+        """
+        z_edges, _ = _with_interfaces(tables, np.asarray(z_edges, dtype=float))
+        cx = 0.5 * (np.asarray(x_edges, dtype=float)[1:] + np.asarray(x_edges, dtype=float)[:-1])
+        cy = 0.5 * (np.asarray(y_edges, dtype=float)[1:] + np.asarray(y_edges, dtype=float)[:-1])
+        gx, gy = np.meshgrid(cx, cy, indexing="ij")
+        lon, lat = (np.asarray(v) for v in frame.to_lonlat(gx, gy))
+        lam, mu = crust.average(lon[:, :, None], lat[:, :, None], z_edges[None, None, :-1], z_edges[None, None, 1:])
+        return cls(tables, x_edges, y_edges, z_edges, lam, mu, tol=tol, frame=frame)
+
+    @classmethod
+    def from_grid(cls, tables, x_edges, y_edges, z_edges, lon, lat, depth, vp, vs, rho, frame, samples=8, tol=1e-9):
+        """Voxels from a model on a regular grid (a tomography): ``vp``, ``vs``, ``rho`` (SI) on ``(lon, lat, depth)``.
+
+        ``lon`` and ``lat`` in degrees and ``depth`` in metres below the surface, each increasing;
+        the three arrays ``(nlon, nlat, ndepth)``. At each voxel's centre (``frame`` places it) the
+        model is trilinear at ``samples`` depths spread evenly over the voxel's range, and
+        ``lambda = rho (vp^2 - 2 vs^2)``, ``mu = rho vs^2`` are averaged over them. Refuses a voxel
+        outside the grid.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+
+        z_edges, _ = _with_interfaces(tables, np.asarray(z_edges, dtype=float))
+        cx = 0.5 * (np.asarray(x_edges, dtype=float)[1:] + np.asarray(x_edges, dtype=float)[:-1])
+        cy = 0.5 * (np.asarray(y_edges, dtype=float)[1:] + np.asarray(y_edges, dtype=float)[:-1])
+        gx, gy = np.meshgrid(cx, cy, indexing="ij")
+        plon, plat = (np.asarray(v) for v in frame.to_lonlat(gx, gy))
+        axes = tuple(np.asarray(a, dtype=float) for a in (lon, lat, depth))
+        t = (np.arange(int(samples)) + 0.5) / int(samples)
+        sample_depth = z_edges[:-1, None] + np.diff(z_edges)[:, None] * t[None, :]           # (nz, samples)
+        outside = ((plon < axes[0][0]) | (plon > axes[0][-1]) | (plat < axes[1][0]) | (plat > axes[1][-1])).any()
+        if outside or sample_depth.min() < axes[2][0] or sample_depth.max() > axes[2][-1]:
+            raise ValueError("the voxels reach outside the model's grid: extend the grid or shrink the voxels")
+        shape = gx.shape + sample_depth.shape
+        query = np.stack(np.broadcast_arrays(plon[:, :, None, None], plat[:, :, None, None],
+                                             sample_depth[None, None]), axis=-1).reshape(-1, 3)
+        fields = [RegularGridInterpolator(axes, np.asarray(a, dtype=float))(query).reshape(shape) for a in (vp, vs, rho)]
+        p, s, r = fields
+        mu = (r * s ** 2).mean(axis=-1)
+        lam = (r * p ** 2).mean(axis=-1) - 2.0 * mu
+        return cls(tables, x_edges, y_edges, z_edges, lam, mu, tol=tol, frame=frame)
+
+    def keep_clear(self, mesh, buffer=None, samples=24):
+        """Return active voxels within ``buffer`` of the fault to the reference; how many, ``int``.
+
+        For a model that fills the region (:meth:`from_crust1`, :meth:`from_grid`): the voxels the
+        fault passes through or near cannot carry a departure (:meth:`check_clearance`), so their
+        departure is dropped. ``buffer`` defaults to a voxel size, as there.
+        """
+        hit, _ = self._near_fault(mesh, buffer, samples)
+        if hit.size:
+            ix, iy, iz = self.index[hit].T
+            self.lam[ix, iy, iz] = self.lam0[ix, iy, iz]
+            self.mu[ix, iy, iz] = self.mu0[ix, iy, iz]
+            self._refresh()
+        return int(hit.size)
 
     @property
     def n_active(self):
@@ -747,17 +819,32 @@ class VoxelModel:
         so it can read high by up to the sample spacing; voxels whose centre is farther
         than ``buffer`` plus their half-diagonal are cleared without it.
         """
-        from ._tde import distance_to_triangle
-
         if self.n_active == 0:
             return True
         if contact:
             return self._check_contact(mesh)
+        hit, distance = self._near_fault(mesh, buffer, samples)
+        if hit.size:
+            k = hit[int(np.argmin(distance))]
+            raise ValueError(f"active voxel {tuple(self.index[k])} lies {distance.min():.0f} m from the "
+                             f"fault, within {self._buffer(buffer):.0f} m; keep the heterogeneity a voxel clear of it")
+        return True
+
+    def _buffer(self, buffer):
+        dz = np.diff(self.z_edges)[self.index[:, 2]]
+        size = float(np.cbrt(float(np.diff(self.x_edges[:2])[0]) * float(np.diff(self.y_edges[:2])[0]) * dz.min()))
+        return size if buffer is None else float(buffer)
+
+    def _near_fault(self, mesh, buffer, samples):
+        """Active voxels within ``buffer`` of the fault mesh and their distances, ``(indices, metres)``."""
+        from ._tde import distance_to_triangle
+
+        if self.n_active == 0:
+            return np.zeros(0, int), np.zeros(0)
         dz = np.diff(self.z_edges)[self.index[:, 2]]
         dx = float(np.diff(self.x_edges[:2])[0])
         dy = float(np.diff(self.y_edges[:2])[0])
-        size = float(np.cbrt(dx * dy * dz.min()))
-        buffer = size if buffer is None else float(buffer)
+        buffer = self._buffer(buffer)
         half = 0.5 * np.sqrt(dx * dx + dy * dy + dz * dz)
         lo = np.column_stack([self.x_edges[self.index[:, 0]], self.y_edges[self.index[:, 1]],
                               -self.z_edges[self.index[:, 2] + 1]])
@@ -767,18 +854,16 @@ class VoxelModel:
         i, j = np.meshgrid(np.arange(n + 1), np.arange(n + 1), indexing="ij")
         keep = i + j <= n
         bary = np.column_stack([i[keep], j[keep], n - i[keep] - j[keep]]) / n
+        closest = np.full(self.n_active, np.inf)
         for tri in np.asarray(mesh.vertices):
             near = np.flatnonzero(distance_to_triangle(tri, self.centres) - half < buffer)
             if not near.size:
                 continue
             points = bary @ tri                                             # (m, 3)
             gap = np.maximum(np.maximum(lo[near, None, :] - points[None], points[None] - hi[near, None, :]), 0.0)
-            distance = np.linalg.norm(gap, axis=2).min(axis=1)
-            if np.any(distance < buffer):
-                k = near[int(np.argmin(distance))]
-                raise ValueError(f"active voxel {tuple(self.index[k])} lies {distance.min():.0f} m from the "
-                                 f"fault, within {buffer:.0f} m; keep the heterogeneity a voxel clear of it")
-        return True
+            closest[near] = np.minimum(closest[near], np.linalg.norm(gap, axis=2).min(axis=1))
+        hit = np.flatnonzero(closest < buffer)
+        return hit, closest[hit]
 
     def _check_contact(self, mesh):
         """``check_clearance(contact=True)``: no triangle of the fault may enter an active voxel's interior."""
@@ -808,6 +893,13 @@ class VoxelModel:
         return (f"<VoxelModel {self.shape[0]}x{self.shape[1]}x{self.shape[2]}, {self.n_active} active; "
                 f"mu {self.mu[self.active].min() / 1e9 if self.n_active else 0:.2f}-"
                 f"{self.mu[self.active].max() / 1e9 if self.n_active else 0:.2f} GPa>")
+
+
+def _with_interfaces(tables, z_edges):
+    """``z_edges`` with every interface of the tables strictly inside them inserted: ``(edges, inserted)``."""
+    added = [t for t in tables.tops[1:] if z_edges[0] + 1e-6 < t < z_edges[-1] - 1e-6
+             and not np.any(np.isclose(z_edges, t, rtol=0, atol=1e-6))]
+    return (np.unique(np.concatenate([z_edges, added])) if added else z_edges), added
 
 
 def _steps(voxels):
