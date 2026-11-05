@@ -272,3 +272,28 @@ def test_surface_points_on_a_cell_edge_are_found(coarse_tables):
     assert found.tolist() == [True, False]
     with pytest.raises(ValueError, match="voxel face"):
         los_operator(cells, LayeredTDE(tables), np.array([on[0]]), np.array([on[1]]))
+
+
+def test_the_face_guard_sees_the_pieces_of_a_flat_cell(coarse_tables):
+    """A surface point inside a flat cell, on the face its midpoint pieces share (from the midpoint of the fault-side
+    surface edge straight across), is refused: the case benchmark 11 hit at 1 km layers. A point beside it is not."""
+    from slipsolve.fault_cells import _leaf_prisms
+
+    tables = coarse_tables
+    trace, mesh = _vertical_mesh()
+
+    def soft(x, y, depth, distance, side):
+        layer = tables.layer(depth)
+        return 0.6 * tables.lam[layer], 0.6 * tables.mu[layer]
+
+    cells = FaultCells(tables, mesh, [300.0], soft, sides=(1,))         # 300 m thin: every top cell is pieced
+    k = next(i for i in cells.ids if (np.abs(cells.inner[i][:, 2]) < 1e-6).sum() == 2)
+    a3, b3 = cells.inner[k], cells.outer[k]
+    top = np.flatnonzero(np.abs(a3[:, 2]) < 1e-6)
+    assert len(_leaf_prisms(a3, b3)) > 1
+    m_in, m_out = a3[top].mean(axis=0)[:2], b3[top].mean(axis=0)[:2]
+    on = 0.5 * (m_in + m_out)                                              # inside the cell, on its pieces' face
+    along = (a3[top[1]] - a3[top[0]])[:2]
+    off = on + 0.13 * along                                                # inside the cell, on no face
+    found = cells.on_faces(np.array([on[0], off[0]]), np.array([on[1], off[1]]), np.zeros(2))
+    assert found.tolist() == [True, False]

@@ -133,3 +133,35 @@ def test_a_subset_of_the_surface_operator_is_its_columns(coarse_tables):
     want = whole[:, cols]
     np.testing.assert_allclose(los_operator(vox, engine, x, y, look, subset=subset), want, rtol=1e-12,
                                atol=1e-12 * np.abs(want).max())
+
+
+def test_the_threaded_batched_product_is_the_serial_one():
+    """``batched_matmul`` over a thread pool equals numpy's serial batched product, and leaves BLAS's threads as found."""
+    from slipsolve.voxel_solve import _blas_control, batched_matmul
+
+    rng = np.random.default_rng(5)
+    a = rng.normal(size=(40, 9, 12, 12)) + 1j * rng.normal(size=(40, 9, 12, 12))
+    b = rng.normal(size=(40, 9, 12, 5)) + 1j * rng.normal(size=(40, 9, 12, 5))
+    control = _blas_control()
+    before = None if control is None else control[0]()
+    np.testing.assert_allclose(batched_matmul(a, b, threads=4), np.matmul(a, b), rtol=1e-14, atol=1e-14)
+    np.testing.assert_array_equal(batched_matmul(a, b, threads=1), np.matmul(a, b))
+    if control is not None:
+        assert control[0]() == before
+        seen = []
+        import slipsolve.voxel_solve as vs
+
+        real = vs.ThreadPoolExecutor
+
+        class Spy(real):
+            def __init__(self, n, *args, **kwargs):
+                seen.append(n)
+                super().__init__(n, *args, **kwargs)
+
+        vs.ThreadPoolExecutor = Spy
+        try:
+            batched_matmul(a, b, threads=3)
+            batched_matmul(a, b, threads=1)
+        finally:
+            vs.ThreadPoolExecutor = real
+        assert seen == [3]                     # the count asked for; one thread means no pool

@@ -161,6 +161,27 @@ class PrismSource(VoxelSource):
                 f"{'' if self.pieces is None else f', {len(self.pieces)} pieces'}>")
 
 
+def _leaf_prisms(a, b, splits=0):
+    """The pieces :class:`PrismSource` computes a prism ``a -> b`` as, by its own rule, as ``[(inner, outer), ...]``:
+    geometry only, for the face guard (a flat cell's midpoint pieces have faces of their own inside it)."""
+    if splits >= MAX_SPLITS:
+        return [(a, b)]
+    longest = max(np.linalg.norm(a[(i + 1) % 3] - a[i]) for i in range(3))
+    thickness = float(np.linalg.norm(b - a, axis=1).mean())
+    if longest > MAX_ASPECT * thickness:
+        ma = [(a[i] + a[(i + 1) % 3]) / 2 for i in range(3)]
+        mb = [(b[i] + b[(i + 1) % 3]) / 2 for i in range(3)]
+        subs = [((a[0], ma[0], ma[2]), (b[0], mb[0], mb[2])), ((ma[0], a[1], ma[1]), (mb[0], b[1], mb[1])),
+                ((ma[2], ma[1], a[2]), (mb[2], mb[1], b[2])), ((ma[0], ma[1], ma[2]), (mb[0], mb[1], mb[2]))]
+        return [leaf for i, o in subs for leaf in _leaf_prisms(np.array(i), np.array(o), splits + 1)]
+    if thickness > MAX_ASPECT * longest:
+        m = int(np.ceil(thickness / (MAX_ASPECT * longest)))
+        t = np.linspace(0.0, 1.0, m + 1)
+        return [leaf for k in range(m) for leaf in _leaf_prisms((1 - t[k]) * a + t[k] * b,
+                                                                (1 - t[k + 1]) * a + t[k + 1] * b, splits + 1)]
+    return [(a, b)]
+
+
 def _prism_centroids(inner, outer):
     """Volumes ``(n,)`` and centroids ``(n, 3)`` of many prisms, exactly (the order-3 mapped rule)."""
     vols, cents = np.empty(inner.shape[0]), np.empty((inner.shape[0], 3))
@@ -260,8 +281,9 @@ class PrismCells:
         return True
 
     def on_faces(self, x, y, z=None, tol=None):
-        """Surface points on an active cell's face: within ``tol`` (default 1e-6 of the cell's size) of one of its
-        edges or corners in the surface plane, where its field is singular. Points at depth are not tested."""
+        """Surface points on a face of an active cell or of one of the pieces it is computed as (:func:`_leaf_prisms`):
+        within ``tol`` (default 1e-6 of the cell's size) of an edge or corner in the surface plane, where the field
+        is singular. Points at depth are not tested."""
         x, y = np.asarray(x, dtype=float).ravel(), np.asarray(y, dtype=float).ravel()
         z = np.zeros(x.size) if z is None else np.asarray(z, dtype=float).ravel()
         out = np.zeros(x.size, bool)
@@ -270,21 +292,22 @@ class PrismCells:
             return out
         p = np.column_stack([x[surface], y[surface]])
         for k in self.ids:
-            corners = np.vstack([self.inner[k], self.outer[k]])
-            at = np.abs(corners[:, 2]) < 1e-6
-            if not at.any():
+            if not (np.abs(np.r_[self.inner[k][:, 2], self.outer[k][:, 2]]) < 1e-6).any():
                 continue
             size = float(self.volumes[k]) ** (1.0 / 3.0)
             eps = (1e-6 * size) if tol is None else float(tol)
-            pts = corners[at, :2]
-            hit = (np.linalg.norm(p[:, None, :] - pts[None], axis=2) < eps).any(axis=1)
-            idx = np.flatnonzero(at)
-            for a in range(idx.size):                       # every pair of surface corners spans a candidate edge
-                for b in range(a + 1, idx.size):
-                    u, v = pts[a], pts[b]
-                    d = v - u
-                    t = np.clip(((p - u) @ d) / max(d @ d, 1e-30), 0.0, 1.0)
-                    hit |= np.linalg.norm(p - (u + t[:, None] * d), axis=1) < eps
+            hit = np.zeros(p.shape[0], bool)
+            for a3, b3 in _leaf_prisms(self.inner[k], self.outer[k]):
+                corners = np.vstack([a3, b3])
+                at = np.abs(corners[:, 2]) < 1e-6
+                pts = corners[at, :2]
+                hit |= (np.linalg.norm(p[:, None, :] - pts[None], axis=2) < eps).any(axis=1)
+                for i in range(len(pts)):                   # every pair of surface corners spans a candidate edge
+                    for j in range(i + 1, len(pts)):
+                        u, v = pts[i], pts[j]
+                        d = v - u
+                        t = np.clip(((p - u) @ d) / max(d @ d, 1e-30), 0.0, 1.0)
+                        hit |= np.linalg.norm(p - (u + t[:, None] * d), axis=1) < eps
             out[surface[hit]] = True
         return out
 

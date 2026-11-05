@@ -1395,19 +1395,23 @@ class HeterogeneousEngine:
     # -- the engine protocol ----------------------------------------------------------
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
         """Line-of-sight design matrix, ``(npts, 2 * n_parameters)``; surface points only."""
+        if self.voxels.n_active:
+            self._surface_only(z)
+            _refuse_on_faces(self.voxels, *_as_points(x, y, None))   # before E, Gamma and the solve, not after
         g0 = self.base.los_matrix(mesh, x, y, look_e, look_n, look_u, z=z, basis=basis)
         if self.voxels.n_active == 0:
             return g0
-        self._surface_only(z)
         m = self.voxels.stiffness() @ self.voxel_strain(mesh, basis)
         return g0 - self._apply_h(x, y, (look_e, look_n, look_u), m)
 
     def displacement(self, mesh, x, y, z=None, basis=None):
         """East/north/up displacement per unit slip, ``(npts, 3, 2 * n_parameters)``; surface points only."""
+        if self.voxels.n_active:
+            self._surface_only(z)
+            _refuse_on_faces(self.voxels, *_as_points(x, y, None))   # before E, Gamma and the solve, not after
         g0 = self.base.displacement(mesh, x, y, z=z, basis=basis)
         if self.voxels.n_active == 0:
             return g0
-        self._surface_only(z)
         m = self.voxels.stiffness() @ self.voxel_strain(mesh, basis)    # (6 n, cols)
         return g0 - self._apply_h(x, y, None, m)
 

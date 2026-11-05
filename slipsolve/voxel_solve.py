@@ -14,7 +14,9 @@ per source row, at every lateral offset of the active voxels' bounding box (the 
 evaluates only the offsets that occur between active voxels). So the two paths differ only
 by the FFT's rounding and the solve's tolerance (``tests/test_slip_voxel_solve.py``).
 """
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import scipy.fft as sfft
@@ -34,6 +36,61 @@ GMRES_MAX_ITER = 400
 #: Right-hand sides solved together (one FFT product serves the block).
 SOLVE_BLOCK = 32
 
+#: Threads the kernels' batched product is split over, in chunks of frequencies (None: every CPU). numpy runs a
+#: batched ``matmul`` one small product at a time, effectively on one thread whatever BLAS's own count: measured
+#: 2026-11-05 on the Venezuela CRUST1.0 grid (5,280 frequencies of 90 x 90, 16-64 columns), 17-20 ms a column with BLAS
+#: at one or four threads, 3.6-4.3 ms on 6 pool threads and 2.3-3.2 ms on 12 with BLAS at ONE thread each. With BLAS
+#: multithreaded inside the pool it ran slower (13-75 ms, OpenBLAS's concurrent calls), so the pool holds BLAS at one
+#: thread while it runs (:func:`_blas_control`); without that control the product stays serial.
+PRODUCT_THREADS = None
+
+
+def _blas_control():
+    """OpenBLAS's ``(get, set)`` thread-count functions, found through ctypes among the loaded libraries, or None."""
+    import ctypes
+
+    try:
+        lib = ctypes.CDLL(None)
+        get, put = lib.openblas_get_num_threads, lib.openblas_set_num_threads
+    except (OSError, AttributeError):
+        return None
+    get.restype, get.argtypes = ctypes.c_int, []
+    put.restype, put.argtypes = None, [ctypes.c_int]
+    return get, put
+
+
+def batched_matmul(a, b, threads=PRODUCT_THREADS):
+    """``a @ b`` over their leading axes (both C-contiguous), split in chunks of the leading axes over a thread pool.
+
+    Each chunk is numpy's own ``matmul`` on one BLAS thread (the count is restored after), so the result is the
+    serial product's, chunk by chunk. Serial when ``threads`` is 1, the leading axes are short, or BLAS's thread count
+    cannot be controlled (:func:`_blas_control`).
+    """
+    threads = (os.cpu_count() or 1) if threads is None else int(threads)
+    lead = a.shape[:-2]
+    n = int(np.prod(lead)) if lead else 1
+    control = _blas_control() if threads > 1 and n >= 2 * threads else None
+    if control is None:
+        return np.matmul(a, b)
+    af = a.reshape(n, *a.shape[-2:])
+    bf = b.reshape(n, *b.shape[-2:])
+    out = np.empty(lead + (a.shape[-2], b.shape[-1]), dtype=np.result_type(a, b))
+    of = out.reshape(n, *out.shape[-2:])
+    edges = np.linspace(0, n, threads + 1).astype(int)
+
+    def work(k):
+        np.matmul(af[edges[k]:edges[k + 1]], bf[edges[k]:edges[k + 1]], out=of[edges[k]:edges[k + 1]])
+
+    get, put = control
+    before = get()
+    put(1)
+    try:
+        with ThreadPoolExecutor(threads) as pool:
+            list(pool.map(work, range(threads)))
+    finally:
+        put(before)
+    return out
+
 
 class ConvolutionGamma:
     """``Gamma`` of a :class:`~slipsolve.heterogeneity.VoxelModel` as one 2-D convolution per pair of depth rows.
@@ -46,15 +103,17 @@ class ConvolutionGamma:
     ``py >= 2 ny - 1`` the padded lateral sizes.
 
     ``workers`` > 1 computes the kernels' pairs of rows in that many processes
-    (:func:`~slipsolve.layered_tde.engine_pool`); ``fft_workers`` threads the transforms.
+    (:func:`~slipsolve.layered_tde.engine_pool`); ``fft_workers`` threads the transforms and ``product_threads`` the
+    kernels' batched product (:func:`batched_matmul`; None: every CPU).
     """
 
-    def __init__(self, voxels, engine, log=None, workers=None, fft_workers=-1):
+    def __init__(self, voxels, engine, log=None, workers=None, fft_workers=-1, product_threads=PRODUCT_THREADS):
         from .heterogeneity import _voxel_task
         from .layered_tde import engine_pool
 
         self.voxels = voxels
         self.fft_workers = fft_workers
+        self.product_threads = product_threads
         n = voxels.n_active
         if n == 0:
             raise ValueError("no active voxels")
@@ -138,7 +197,7 @@ class ConvolutionGamma:
         grid[self.ix[:, None], self.iy[:, None], self.channel] = m
         spectrum = sfft.rfftn(grid, s=(px, py), axes=(0, 1), workers=self.fft_workers)
         del grid
-        product = np.matmul(self.kernels, spectrum)                               # (px, py', 6 nz, k)
+        product = batched_matmul(self.kernels, spectrum, getattr(self, "product_threads", PRODUCT_THREADS))
         del spectrum
         field = sfft.irfftn(product, s=(px, py), axes=(0, 1), workers=self.fft_workers)
         out = field[self.ix[:, None], self.iy[:, None], self.channel]              # (n, 6, k)
@@ -212,6 +271,12 @@ def gmres(operator, b, tol=GMRES_TOLERANCE, restart=GMRES_RESTART, max_iter=GMRE
     converged. A column stops when its residual is within ``tol`` of its right-hand side's
     norm (a zero column gives zero); one still above it after ``max_iter`` products raises,
     naming how far it got. Arnoldi by modified Gram-Schmidt, Givens rotations per column.
+
+    The live columns are kept contiguous: a column that converges inside a cycle is finished
+    there (its correction added to ``x``) and dropped from the cycle's arrays, so the
+    orthogonalisation runs on views. Indexing the live columns out of the full arrays at every
+    step cost three times the FFT products on the CRUST1.0 grid (2026-11-05: 20 s of a 34 s
+    solve of 32 columns, 195k unknowns); the iterates are the same.
     """
     b = np.asarray(b, dtype=float)
     n, k = b.shape
@@ -220,9 +285,18 @@ def gmres(operator, b, tol=GMRES_TOLERANCE, restart=GMRES_RESTART, max_iter=GMRE
     target = tol * norm_b
     products = np.zeros(k, dtype=int)
     todo = np.flatnonzero(norm_b > 0.0)
+
+    def finish(basis, h, g, steps, cols):
+        for c in range(cols.size):
+            s = int(steps[c])
+            if s:
+                y = np.linalg.solve(np.triu(h[:s, :s, c]), g[:s, c])
+                x[:, cols[c]] += np.tensordot(y, basis[:s, :, c], axes=(0, 0))
+
     while todo.size:
-        r = b[:, todo] - (operator(x[:, todo]) if np.any(x[:, todo]) else 0.0)
-        products[todo] += int(np.any(x[:, todo]))
+        started = np.any(x[:, todo])
+        r = b[:, todo] - operator(x[:, todo]) if started else b[:, todo].copy()
+        products[todo] += int(started)
         beta = np.linalg.norm(r, axis=0)
         done = beta <= target[todo]
         if done.all():
@@ -234,50 +308,57 @@ def gmres(operator, b, tol=GMRES_TOLERANCE, restart=GMRES_RESTART, max_iter=GMRE
             raise RuntimeError(f"GMRES: column {worst} took {products[worst]} products and is at a relative "
                                f"residual {np.max(beta / norm_b[todo]):.1e}, not {tol:g}")
         m = todo.size
-        basis = np.zeros((restart + 1, n, m))
-        basis[0] = r / beta
+        cols, aim, scale = todo.copy(), target[todo], beta.copy()
+        basis = np.empty((restart + 1, n, m))
+        np.divide(r, beta, out=basis[0])
+        del r
         h = np.zeros((restart + 1, restart, m))
         cs = np.zeros((restart, m))
         sn = np.zeros((restart, m))
         g = np.zeros((restart + 1, m))
         g[0] = beta
-        live = np.ones(m, bool)
-        steps = np.zeros(m, dtype=int)
+        tmp = np.empty((n, m))
         for j in range(restart):
-            idx = np.flatnonzero(live)
-            if idx.size == 0:
-                break
-            w = operator(basis[j][:, idx])
-            products[todo[idx]] += 1
+            w = operator(basis[j])
+            products[cols] += 1
             for i in range(j + 1):
-                hij = np.einsum("nm,nm->m", basis[i][:, idx], w)
-                w -= basis[i][:, idx] * hij
-                h[i, j, idx] = hij
+                hij = np.einsum("nm,nm->m", basis[i], w)
+                np.multiply(basis[i], hij, out=tmp)
+                w -= tmp
+                h[i, j] = hij
             hnext = np.linalg.norm(w, axis=0)
-            h[j + 1, j, idx] = hnext
-            basis[j + 1][:, idx] = w / np.where(hnext > 0.0, hnext, 1.0)
+            h[j + 1, j] = hnext
+            np.divide(w, np.where(hnext > 0.0, hnext, 1.0), out=basis[j + 1])
+            del w
             for i in range(j):                                       # earlier rotations on the new column
-                a, c = h[i, j, idx], h[i + 1, j, idx]
-                h[i, j, idx] = cs[i, idx] * a + sn[i, idx] * c
-                h[i + 1, j, idx] = -sn[i, idx] * a + cs[i, idx] * c
-            a, c = h[j, j, idx], h[j + 1, j, idx]
+                a, c = h[i, j].copy(), h[i + 1, j].copy()
+                h[i, j] = cs[i] * a + sn[i] * c
+                h[i + 1, j] = -sn[i] * a + cs[i] * c
+            a, c = h[j, j], h[j + 1, j]
             rho = np.hypot(a, c)
             rho = np.where(rho > 0.0, rho, 1.0)
-            cs[j, idx], sn[j, idx] = a / rho, c / rho
-            h[j, j, idx] = rho
-            h[j + 1, j, idx] = 0.0
-            g[j + 1, idx] = -sn[j, idx] * g[j, idx]
-            g[j, idx] = cs[j, idx] * g[j, idx]
-            steps[idx] = j + 1
-            converged = (np.abs(g[j + 1, idx]) <= target[todo[idx]]) | (hnext <= 1e-14 * beta[idx])
-            live[idx[converged]] = False
-        for c in range(m):
-            s = steps[c]
-            if s == 0:
-                continue
-            y = np.linalg.solve(np.triu(h[:s, :s, c]), g[:s, c])
-            x[:, todo[c]] += basis[:s, :, c].T @ y
+            cs[j], sn[j] = a / rho, c / rho
+            h[j, j] = rho
+            h[j + 1, j] = 0.0
+            g[j + 1] = -sn[j] * g[j]
+            g[j] = cs[j] * g[j]
+            converged = (np.abs(g[j + 1]) <= aim) | (hnext <= 1e-14 * scale)
+            if converged.any() and j + 1 < restart:
+                finish(basis, h, g, np.where(converged, j + 1, 0), cols)
+                keep = ~converged
+                if not keep.any():
+                    cols = cols[:0]
+                    break
+                kept = np.empty((restart + 1, n, int(keep.sum())))
+                kept[:j + 2] = basis[:j + 2][:, :, keep]
+                basis = kept
+                h, cs, sn, g = h[:, :, keep], cs[:, keep], sn[:, keep], g[:, keep]
+                cols, aim, scale = cols[keep], aim[keep], scale[keep]
+                tmp = np.empty((n, cols.size))
+        else:
+            j = restart - 1
+        finish(basis, h, g, np.full(cols.size, j + 1), cols)
     return x, products
 
 
-__all__ = ["ConvolutionGamma", "StrainSystem", "gmres", "GMRES_TOLERANCE", "SOLVE_BLOCK"]
+__all__ = ["ConvolutionGamma", "StrainSystem", "batched_matmul", "gmres", "GMRES_TOLERANCE", "SOLVE_BLOCK"]
