@@ -183,7 +183,7 @@ class LayeredTDE:
     #: projected from element means.
     supports_basis = True
 
-    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR, quadratic=False):
+    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR, quadratic=True):
         self.tables = tables
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
@@ -194,13 +194,15 @@ class LayeredTDE:
         #: :meth:`strain`'s far path, at any depth; it needs no surface field.
         self.strain_far = None if far is None else float(far)
         #: Integrate the displacement's remainder (and its far path) with the rule exact for
-        #: quadratics (:func:`_rule_quadratic`) instead of sub-triangle centroids. Off by
-        #: default, which keeps production's Green's functions bit for bit; strain always
-        #: uses it. The centroids split an element's remainder among its tents with an error
-        #: first order in size / distance: on model 4e's mesh and samples (v2 tables,
-        #: 2026-11-04) a nodal LOS column was 5e-4 to 1.6e-3 (rms) off its converged value,
-        #: a single tent up to 8.8e-3 (deeper nodes worse); with this rule 8e-6 to 3e-5, at
-        #: the same cost.
+        #: quadratics (:func:`_rule_quadratic`) instead of sub-triangle centroids; strain
+        #: always does. The default since 2026-11-04; ``quadratic=False`` gives the Green's
+        #: functions of every model made before then, bit for bit. The centroids split an
+        #: element's remainder among its tents with an error first order in size / distance:
+        #: on model 4e's mesh and samples (v2 tables) a nodal LOS column was 5e-4 to 1.6e-3
+        #: (rms) off its converged value, a single tent up to 8.8e-3 (deeper nodes worse);
+        #: with this rule 8e-6 to 3e-5, at the same cost. 4e re-solved with it moved Mw by
+        #: -0.0001 and its slip by 1 mm at most
+        #: (``venezuela_seven_scene_run_production/check_quadratic_rule.py``).
         self.quadratic = bool(quadratic)
         #: The surface layer's, for the engine protocol; each piece uses its own.
         self.nu = float(tables.poisson(0.0))
@@ -530,10 +532,9 @@ class LayeredTDE:
             size = np.sqrt(2.0 * area)
             orders = (self._point_orders(tri, size, x, y, z) if whole
                       else self._orders(tri, size, x, y, z))
-            # Strain takes the rule exact for quadratics everywhere: the sub-triangle
-            # centroids split an element's remainder among its tents with an error first
-            # order in size / distance (_rule_quadratic). Displacement keeps the centroids
-            # unless the engine was made with quadratic=True.
+            # The rule exact for quadratics: the sub-triangle centroids split an element's
+            # remainder among its tents with an error first order in size / distance
+            # (_rule_quadratic). Displacement takes the centroids only with quadratic=False.
             quadratic = np.full(n, bool(strain) or self.quadratic)
             if halfspace is not None:
                 orders = np.where(far, self._point_orders(tri, size, x, y, z, STRAIN_FAR_TOLERANCE), orders)

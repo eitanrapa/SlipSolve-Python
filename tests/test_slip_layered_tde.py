@@ -248,15 +248,16 @@ def test_far_surface_receivers_take_point_sources_of_the_same_field(two_layer_ta
 
 
 def test_the_quadratic_rule_splits_the_remainder_among_the_tents(two_layer_tables):
-    """``quadratic=True``: the remainder (and far path) by a rule exact for quadratics, so each tent gets its share.
+    """The default (``quadratic=True``): the remainder and far path by a rule exact for quadratics.
 
-    The default sub-triangle centroids give each far-away tent a third of the element, an error
-    first order in size / distance. Measured against the converged tents (2026-11-04, these
-    tables, surface, 1.5-30 sizes): default 2e-3 to 1.8e-2 of a tent's peak, quadratic at most
-    2e-4. The default stays the default, so production's Green's functions do not move.
+    The sub-triangle centroids (``quadratic=False``, every model before 2026-11-04) give each
+    far-away tent a third of the element, an error first order in size / distance. Measured
+    against the converged tents (these tables, surface, 1.5-30 sizes): centroids 2e-3 to
+    1.8e-2 of a tent's peak, the quadratic rule at most 2e-4.
     """
-    reference = LayeredTDE(two_layer_tables, tolerance=1e-7, quadratic=True)
-    default, quadratic = LayeredTDE(two_layer_tables), LayeredTDE(two_layer_tables, quadratic=True)
+    reference = LayeredTDE(two_layer_tables, tolerance=1e-7)
+    default, centroids = LayeredTDE(two_layer_tables), LayeredTDE(two_layer_tables, quadratic=False)
+    assert default.quadratic and not centroids.quadratic
     for v in (BELOW, CROSSING):
         size = np.sqrt(np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0])))
         angle = np.linspace(0.0, 2 * np.pi, 7)[:-1]
@@ -267,6 +268,6 @@ def test_the_quadratic_rule_splits_the_remainder_among_the_tents(two_layer_table
         want = reference.tent_field(v, x, y, z, components=(0, 1, 2))
         peak = np.abs(want).max(axis=(1, 2, 3))
         error = {name: (np.abs(e.tent_field(v, x, y, z, components=(0, 1, 2)) - want).max(axis=(1, 2, 3)) / peak).max()
-                 for name, e in (("default", default), ("quadratic", quadratic))}
-        assert error["quadratic"] < 5e-4
-        assert error["default"] > 5.0 * error["quadratic"]
+                 for name, e in (("default", default), ("centroids", centroids))}
+        assert error["default"] < 5e-4
+        assert error["centroids"] > 5.0 * error["default"]

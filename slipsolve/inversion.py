@@ -22,7 +22,10 @@ never exists. ``scipy.optimize.lsq_linear`` accepts a ``LinearOperator`` with
 
 ``solve(method="active_set")`` solves the same bounded problem in its normal
 equations instead, exactly, by primal-dual active set (:func:`box_qp`); see
-:data:`METHODS` for when that is faster and when it is refused.
+:data:`METHODS` for when that is faster and when it is refused. A refused answer
+falls back to ``"lsq_linear_dense"`` (the stacked system as a dense matrix, solved to
+within a micron of the minimiser) on problems up to :data:`EXACT_FALLBACK_MAX_PARAMS`
+parameters, and to ``"lsq_linear"`` above.
 
 Solver honesty matters more than usual in this problem. Runtime depends far more
 on conditioning than on size, and an iteration-capped solve returns a
@@ -265,12 +268,20 @@ DEFAULT_LSMR_TOL = "auto"
 #:   always used (that CV's scores matched ``lsq_linear`` re-solves' to
 #:   0.0002 mm).
 #:
+#: * ``"lsq_linear_dense"``: the stacked system as a DENSE matrix, ``lsq_linear``
+#:   with exact inner solves (``lsq_solver="exact"``) to :data:`EXACT_FALLBACK_TOL`,
+#:   which ends within a micron of the minimiser (a trust region nears a bound
+#:   asymptotically) where ``lsmr``'s inexact steps stop short. Its cost grows as
+#:   rows x parameters**2 per iteration, so it is for small problems.
+#:
 #: Normal equations square the condition number, so an active-set answer is
-#: refused, with a warning and a fallback to ``lsq_linear``, if its free block
-#: is worse conditioned than :data:`ACTIVE_SET_MAX_COND`, if its KKT residual
-#: exceeds :data:`ACTIVE_SET_MAX_KKT`, if a free block is not positive
-#: definite, or if the active set cycles.
-METHODS = ("lsq_linear", "active_set")
+#: refused, with a warning, if its free block is worse conditioned than
+#: :data:`ACTIVE_SET_MAX_COND`, if its KKT residual exceeds
+#: :data:`ACTIVE_SET_MAX_KKT`, if a free block is not positive definite, or if the
+#: active set cycles or does not settle. The fallback is ``"lsq_linear_dense"`` on
+#: problems up to :data:`EXACT_FALLBACK_MAX_PARAMS` parameters and
+#: ``"lsq_linear"`` above.
+METHODS = ("lsq_linear", "active_set", "lsq_linear_dense")
 
 #: Largest 1-norm condition number an active-set solve's free block may have.
 #: The answer's relative error is bounded by about this times machine epsilon.
@@ -279,6 +290,22 @@ ACTIVE_SET_MAX_COND = 1e12
 #: Largest gradient an active-set answer may leave on a free parameter,
 #: relative to the largest gradient at zero slip.
 ACTIVE_SET_MAX_KKT = 1e-8
+
+#: Most parameters for which a refused active-set answer falls back to
+#: ``"lsq_linear_dense"`` rather than ``"lsq_linear"``. Primal-dual active set has no
+#: convergence guarantee when the normal matrix is not an M-matrix, and weak
+#: smoothing makes it wander: on ``tests/test_slip_points.py``'s two-fault problem
+#: (305 parameters, smoothing 0.02, normal matrix condition 1.3e13) it never settled,
+#: and ``lsq_linear`` then stopped 84 above the minimum (each fault's potency 12-20%
+#: high, against 1.5% at the minimiser), at a place that differed between machines.
+#: The dense solve reached the minimum (BVLS's to 3e-11) in 7 s there; it grows as
+#: rows x parameters**2 an iteration, so production-size problems keep ``lsq_linear``,
+#: which stops 0.01 mm short at production smoothing.
+EXACT_FALLBACK_MAX_PARAMS = 1000
+
+#: ``"lsq_linear_dense"``'s tolerance on the relative change in cost. At 1e-10 it
+#: stopped 2.8e-4 above the minimum on that problem, at 1e-13 on it.
+EXACT_FALLBACK_TOL = 1e-13
 
 
 class SlipInversion:
@@ -499,12 +526,14 @@ class SlipInversion:
               method="lsq_linear"):
         """Solve for slip at one smoothing weight; returns a :class:`SlipModel`.
 
-        ``method`` is ``"lsq_linear"`` (the default) or ``"active_set"``; see
-        :data:`METHODS`. Both solve the same bounded problem. ``max_iter`` caps
-        the trust-region iterations of the first and the active-set steps of the
-        second. ``tol`` and ``lsmr_tol`` are ``lsq_linear``'s alone. The model's
-        ``options["method"]`` records the solver that produced it, which is
-        ``"lsq_linear"`` when an active-set answer was refused.
+        ``method`` is ``"lsq_linear"`` (the default), ``"active_set"`` or
+        ``"lsq_linear_dense"``; see :data:`METHODS`. All solve the same bounded
+        problem. ``max_iter`` caps the trust-region iterations of the first and the
+        active-set steps of the second; the dense solve takes at least
+        ``50 x parameters``. ``tol`` and ``lsmr_tol`` are ``lsq_linear``'s alone. The
+        model's ``options["method"]`` records the solver that produced it: when an
+        active-set answer was refused, ``"lsq_linear_dense"`` up to
+        :data:`EXACT_FALLBACK_MAX_PARAMS` parameters and ``"lsq_linear"`` above.
 
         ``lsmr_tol`` is the inner least-squares tolerance; see
         :data:`DEFAULT_LSMR_TOL` for why the default is ``"auto"`` and not
@@ -544,9 +573,16 @@ class SlipInversion:
 
         result = None
         if method == "active_set":
-            result = self._solve_active_set(scaled_smooth, boundary, lo, hi,
-                                            max_iter, verbose)
-        if result is None:
+            result, problem = self._solve_active_set(scaled_smooth, boundary, lo, hi,
+                                                     max_iter, verbose)
+            if result is None:
+                method = ("lsq_linear_dense" if self.n_param <= EXACT_FALLBACK_MAX_PARAMS
+                          else "lsq_linear")
+                warnings.warn(f"the active-set solve was refused ({problem}); solved "
+                              f"with {method} instead", RuntimeWarning, stacklevel=2)
+        if method == "lsq_linear_dense":
+            result = self._solve_lsq_dense(scaled_smooth, boundary, lo, hi, max_iter, verbose)
+        elif result is None:
             method = "lsq_linear"
             result = self._solve_lsq(scaled_smooth, boundary, lo, hi, max_iter,
                                      tol, lsmr_tol, verbose)
@@ -596,6 +632,24 @@ class SlipInversion:
             lsmr_tol=lsmr_tol, verbose=verbose,
         )
 
+    def _solve_lsq_dense(self, smooth, boundary, lo, hi, max_iter, verbose):
+        """``method="lsq_linear_dense"``: the stacked system as a dense matrix, solved to within a micron of the minimiser.
+
+        ``lsq_linear``'s trust region with exact inner solves (``lsq_solver="exact"``),
+        at :data:`EXACT_FALLBACK_TOL`; it works on the stacked system, whose condition
+        number is the square root of the normal equations'.
+        """
+        design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
+        stacked = np.vstack([self.whiten(design), smooth.toarray(), boundary.toarray()])
+        rhs = np.concatenate([
+            self.whiten(self.d),
+            np.zeros(smooth.shape[0]),
+            np.zeros(boundary.shape[0]),
+        ])
+        return lsq_linear(stacked, rhs, bounds=(lo, hi), method="trf", lsq_solver="exact",
+                          tol=EXACT_FALLBACK_TOL, max_iter=max(int(max_iter), 50 * stacked.shape[1]),
+                          verbose=verbose)
+
     def _data_block(self):
         """``(WA)'(WA)`` and ``(WA)'(Wd)``, the half of the normal equations the data set.
 
@@ -623,10 +677,10 @@ class SlipInversion:
         return block
 
     def _solve_active_set(self, smooth, boundary, lo, hi, max_iter, verbose):
-        """``method="active_set"``: an ``lsq_linear``-like result, or None if refused.
+        """``method="active_set"``: ``(result, None)``, or ``(None, why)`` if refused.
 
-        Refused, with a warning, under the conditions :data:`METHODS` lists; the
-        caller then solves with ``lsq_linear``.
+        Refused under the conditions :data:`METHODS` lists; the caller warns and
+        falls back (:data:`EXACT_FALLBACK_MAX_PARAMS`).
         """
         block = self._data_block()
         total = block.normal + (smooth.T @ smooth + boundary.T @ boundary).toarray()
@@ -642,9 +696,7 @@ class SlipInversion:
             elif qp.kkt > ACTIVE_SET_MAX_KKT:
                 problem = f"its KKT residual is {qp.kkt:.1e}"
         if problem is not None:
-            warnings.warn(f"the active-set solve was refused ({problem}); solved "
-                          "with lsq_linear instead", RuntimeWarning, stacklevel=3)
-            return None
+            return None, problem
 
         x = qp.x
         block.last = x
@@ -663,7 +715,7 @@ class SlipInversion:
             kkt=qp.kkt, condition=1.0 / qp.rcond,
             active_mask=np.where(qp.at_lo, -1, np.where(qp.at_hi, 1, 0)),
             message=f"active set settled in {qp.nit} steps; KKT residual {qp.kkt:.1e}",
-        )
+        ), None
 
     def l_curve(self, smoothing_values, **kwargs):
         """Solve at each smoothing weight and tabulate misfit against roughness.

@@ -460,27 +460,44 @@ def test_active_set_agrees_with_lsq_linear(recovery, tmp_path):
 
 
 def test_a_refused_active_set_answer_falls_back_to_lsq_linear(recovery, monkeypatch):
-    """A cycling active set, or a badly conditioned one, gets the trust-region answer."""
+    """A cycling or badly conditioned active set: the dense solve on small problems, ``lsq_linear`` on big ones.
+
+    Small (up to ``EXACT_FALLBACK_MAX_PARAMS``): ``"lsq_linear_dense"``, at the minimiser to
+    within its approach to the bounds (5e-7 m from BVLS here, 2e-11 m on the point test's
+    problem; a trust region nears a bound asymptotically). Above it: the trust-region answer,
+    bit for bit.
+    """
     import slipsolve.inversion as module
 
     _, _, _, inversion = recovery
     ref = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    exact = _bvls(inversion, 0.3)
 
     def cycles(*_, **__):
         raise RuntimeError("the active set cycled after 3 steps")
 
     with monkeypatch.context() as patch:
         patch.setattr(module, "box_qp", cycles)
-        with pytest.warns(RuntimeWarning, match="refused .*cycled"):
+        with pytest.warns(RuntimeWarning, match="refused .*cycled.*lsq_linear_dense"):
             model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
-    assert model.options["method"] == "lsq_linear"
-    np.testing.assert_array_equal(model.x, ref.x)
+        assert model.options["method"] == "lsq_linear_dense" and model.converged
+        np.testing.assert_allclose(model.x, exact, atol=2e-6)
+        patch.setattr(module, "EXACT_FALLBACK_MAX_PARAMS", 0)
+        with pytest.warns(RuntimeWarning, match="refused .*cycled.*with lsq_linear instead"):
+            model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
+        assert model.options["method"] == "lsq_linear"
+        np.testing.assert_array_equal(model.x, ref.x)
 
     with monkeypatch.context() as patch:
         patch.setattr(module, "ACTIVE_SET_MAX_COND", 1.0)
         with pytest.warns(RuntimeWarning, match="condition number"):
             model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="active_set")
-    assert model.options["method"] == "lsq_linear"
+    assert model.options["method"] == "lsq_linear_dense"
+
+    # Asked for by name, the dense solve is the minimiser too.
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="lsq_linear_dense")
+    assert model.options["method"] == "lsq_linear_dense"
+    np.testing.assert_allclose(model.x, exact, atol=2e-6)
 
     with pytest.raises(ValueError, match="method must be one of"):
         inversion.solve(smoothing=0.3, method="lbfgs")
