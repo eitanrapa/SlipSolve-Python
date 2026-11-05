@@ -29,6 +29,11 @@ Burgers vector is linear on each face triangle, so it is three vertex tents, eac
 integrated exactly by :func:`~slipsolve.layered_tde.tent_levelset`. The remainder is a
 volume rule of the tables' point moment sources -- not face dislocations, which on a
 voxel whose face lies on a layer interface would sit where the remainder is singular.
+Away from the voxel both parts are smooth over it, and its strain is a Gauss-Legendre volume
+rule of whole point moments: Okada (1992) in the voxel's half-space plus the remainder at
+each point (:data:`STRAIN_FAR_VOXEL`, 2026-11-05; 7-28x the faces' speed at 2-40 sizes and
+as accurate, the faces' cancellation costing them ~1e-3 beyond 10 sizes). Surface receivers
+far away take point sources of the whole tabulated surface field (:data:`FAR_VOXEL`).
 
 **Limits, as built (2026-11-04).**
 
@@ -50,6 +55,7 @@ The design, the tests and the measurements are in ``HETEROGENEOUS_3D_PLAN.local.
 
 import numpy as np
 
+from ._okada92 import point_source_enu
 from ._tde import STRAIN_COMPONENTS, _element_basis, tde_disp_hs_unit, tde_strain_hs_unit
 from .greens import _as_points
 from .layered import _QUADRATURE_CONSTANT, _QUADRATURE_SAFETY
@@ -59,6 +65,23 @@ from .layered_tde import (STRAIN_TENT_GAIN, STRAIN_TENT_MIN_POINTS, _combine,
 #: Surface receivers farther than this many voxel sizes take point sources of the whole
 #: tabulated surface field, as :data:`~slipsolve.layered_tde.FAR` does for elements.
 FAR_VOXEL = 4.0
+
+#: Receivers farther than this many voxel sizes (box distance) take the voxel's STRAIN from a
+#: Gauss-Legendre volume rule of point moments: Okada (1992) point sources in the voxel's own
+#: half-space (:func:`~slipsolve._okada92.point_source_enu`) plus the tabulated remainder, both at
+#: every point (:meth:`VoxelSource._point_moments`). As ``strain_far`` does for elements.
+STRAIN_FAR_VOXEL = 2.0
+
+#: Relative accuracy that volume rule aims for (:data:`~slipsolve.layered_tde.STRAIN_FAR_TOLERANCE`).
+VOXEL_FAR_TOLERANCE = 1e-3
+
+#: Its error model: ``n`` Gauss-Legendre points a side leave about ``C (a / 2R)**(2 n)`` of the
+#: strain at ``R`` from the centre of a voxel of longest side ``a`` (the 1-D rule's error for a
+#: kernel singular ``R`` away); ``C`` measured (:meth:`VoxelSource._far_orders`).
+VOXEL_FAR_CONSTANT = 8.0
+
+#: Most (receiver, point) pairs the volume rule handles at once.
+VOXEL_FAR_BATCH = 400_000
 
 #: Relative accuracy the remainder's volume rule aims for, as
 #: :data:`~slipsolve.layered_tde.REMAINDER_TOLERANCE`.
@@ -171,6 +194,22 @@ def compliance(stress, lam, mu):
     return (s - float(lam) / (3.0 * float(lam) + 2.0 * float(mu)) * trace * np.eye(3)) / (2.0 * float(mu))
 
 
+def moment_sources(lam, mu):
+    """Okada point sources making the six unit moments: ``(sources, coefficients)``.
+
+    ``sources`` is ``[(normal, slips), ...]`` for :func:`~slipsolve._okada92.point_source_enu`:
+    openings along east, north and up, and the double couples east-north, east-up and
+    north-up, six in all. A source of unit potency with slip ``s`` on normal ``n`` has the
+    moment ``mu (n s + s n) + lam (n . s) I``; ``coefficients`` ``(6, 6)`` combine the six
+    unit-potency fields into the fields of :func:`unit_moments`, ``field_k = sum_s c[k, s] field_s``.
+    """
+    e = np.eye(3)
+    sources = [(e[0], e[[0, 1, 2]]), (e[1], e[[1, 2]]), (e[2], e[[2]])]
+    moments = [to_voigt(mu * (np.outer(n, d) + np.outer(d, n)) + lam * float(n @ d) * np.eye(3))
+               for n, slips in sources for d in slips]
+    return sources, np.linalg.inv(np.array(moments))
+
+
 def _faces(lo, hi, free_surface):
     """The cuboid's face triangles, normals outward: ``(n, 3, 3)``; the top dropped in the free surface."""
     x = (lo[0], hi[0])
@@ -212,10 +251,14 @@ class VoxelSource:
     each of the six components of :func:`unit_moments`: ``(npts, 6, 3)`` east/north/up
     and ``(npts, 6, 6)`` in :data:`~slipsolve._tde.STRAIN_COMPONENTS`. A total moment is
     the density times the volume.
+
+    Receivers more than ``strain_far`` voxel sizes from the cuboid take its strain from
+    :meth:`_point_moments`, and surface receivers more than ``far`` sizes away take its
+    displacement from the whole surface table's point sources; None turns either off.
     """
 
     def __init__(self, engine, x, y, depth, far=FAR_VOXEL, tolerance=VOXEL_TOLERANCE,
-                 max_order=VOXEL_MAX_ORDER):
+                 max_order=VOXEL_MAX_ORDER, strain_far=STRAIN_FAR_VOXEL):
         self.engine = engine
         tables = engine.tables
         top, bottom = (float(v) for v in depth)
@@ -246,15 +289,19 @@ class VoxelSource:
         if counts.max() > 1:
             ex, ey, ez = (np.linspace(self.lo[a], self.hi[a], counts[a] + 1) for a in range(3))
             self.pieces = [VoxelSource(engine, (ex[i], ex[i + 1]), (ey[j], ey[j + 1]), (-ez[k + 1], -ez[k]),
-                                       far=far, tolerance=tolerance, max_order=max_order)
+                                       far=far, tolerance=tolerance, max_order=max_order, strain_far=strain_far)
                            for i in range(counts[0]) for j in range(counts[1]) for k in range(counts[2])]
         self.far = None if far is None or not tables.has_surface else float(far)
+        #: Box distance, in voxel sizes, past which strain takes :meth:`_point_moments`; None: never.
+        self.strain_far = None if strain_far is None else float(strain_far)
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
         #: ``eps* = C0^-1 : E_k`` for each unit moment component, ``(6, 3, 3)``.
         self.eigenstrain = compliance(unit_moments(), self.lam, self.mu)
         #: The tables' packing of each unit moment component, ``(6, 6)``.
         self.packing = tensor_packing(unit_moments(), self.lam, self.mu)
+        #: Okada point sources making the unit moments, and how to combine them (:func:`moment_sources`).
+        self.sources = moment_sources(self.lam, self.mu)
 
     # -- the fields -------------------------------------------------------------------
     def displacement(self, x, y, z=None):
@@ -280,21 +327,70 @@ class VoxelSource:
             return sum(piece._field(x, y, z, strain) for piece in self.pieces)
         width = 6 if strain else 3
         out = np.zeros((x.size, 6, width))
-        far = self._far(x, y, z) if not strain else np.zeros(x.size, bool)
+        far = self._far_strain(x, y, z) if strain else self._far(x, y, z)
         near = np.flatnonzero(~far)
         if near.size:
             out[near] = self._halfspace(x[near], y[near], z[near], strain)
             out[near] += self._remainder(x[near], y[near], z[near], strain, whole=False)
         if far.any():
-            out[far] = self._remainder(x[far], y[far], z[far], strain=False, whole=True)
+            out[far] = (self._point_moments(x[far], y[far], z[far]) if strain
+                        else self._remainder(x[far], y[far], z[far], strain=False, whole=True))
         return out
+
+    def _gap(self, x, y, z):
+        """Distance from each point to the cuboid (zero inside)."""
+        points = np.column_stack([x, y, z])
+        return np.linalg.norm(np.maximum(np.maximum(self.lo - points, points - self.hi), 0.0), axis=1)
 
     def _far(self, x, y, z):
         if self.far is None:
             return np.zeros(x.size, bool)
-        gap = np.maximum(np.maximum(self.lo - np.column_stack([x, y, z]),
-                                    np.column_stack([x, y, z]) - self.hi), 0.0)
-        return (z == 0.0) & (np.linalg.norm(gap, axis=1) > self.far * self.size)
+        return (z == 0.0) & (self._gap(x, y, z) > self.far * self.size)
+
+    def _far_strain(self, x, y, z):
+        if self.strain_far is None:
+            return np.zeros(x.size, bool)
+        return self._gap(x, y, z) > self.strain_far * self.size
+
+    def _far_orders(self, x, y, z, tolerance=VOXEL_FAR_TOLERANCE):
+        """Points a side for :meth:`_point_moments`: the least ``n`` with ``C (a / 2R)**(2n)`` within ``tolerance``."""
+        side = float(np.max(self.hi - self.lo))
+        reach = np.sqrt((x - self.centre[0]) ** 2 + (y - self.centre[1]) ** 2 + (z - self.centre[2]) ** 2)
+        ratio = np.maximum(2.0 * reach / side, 1.5)
+        n = np.ceil(np.log(VOXEL_FAR_CONSTANT / tolerance) / (2.0 * np.log(ratio)))
+        return np.clip(n, 1, self.max_order).astype(int)
+
+    def _point_moments(self, x, y, z, orders=None):
+        """Strain per unit moment density from a volume rule of point moments, ``(npts, 6, 6)``.
+
+        Each Gauss-Legendre point carries the whole layered field of a point moment: the
+        half-space part from Okada (1992) with the voxel's constants, the remainder from the
+        tables. For receivers outside the voxel, where both are smooth over it; ``orders``
+        (points a side, per receiver) defaults to :meth:`_far_orders`.
+        """
+        tables = self.engine.tables
+        n = x.size
+        out = np.zeros((n, 6, 6))
+        orders = self._far_orders(x, y, z) if orders is None else np.broadcast_to(np.asarray(orders, int), (n,))
+        receiver = tables.depth_stencil(z)
+        sources, coefficients = self.sources
+        for order in np.unique(orders):
+            group = np.flatnonzero(orders == order)
+            points, weights = self._rule(order)
+            q = weights.size
+            for at in np.array_split(group, max(1, group.size * q // VOXEL_FAR_BATCH)):
+                rec = np.repeat(at, q)
+                px, py, pz = (np.tile(points[:, i], at.size) for i in range(3))
+                de, dn = x[rec] - px, y[rec] - py
+                stencils = (tables.distance_stencil(np.hypot(de, dn)), tables.depth_stencil(pz),
+                            tuple(a[rec] for a in receiver))
+                pair = combine_strain(tables.gather(*stencils), tables.gather_strain(*stencils),
+                                      np.arctan2(de, dn), self.packing)
+                hs = np.concatenate([point_source_enu(self.nu, normal, slips, px, py, pz, x[rec], y[rec], z[rec])[1]
+                                     for normal, slips in sources], axis=1)          # (pairs, 6 sources, 6)
+                pair += np.einsum("ks,nsc->nkc", coefficients, hs)
+                out[at] += np.einsum("nqkc,q->nkc", pair.reshape(at.size, q, 6, 6), weights)
+        return out
 
     def _halfspace(self, x, y, z, strain):
         """The faces' dislocations and the interior term, with the voxel's own constants."""
@@ -870,17 +966,25 @@ class HeterogeneousEngine:
     and its LU depend only on the voxels and are built once; ``H`` (:func:`los_operator`)
     is kept per sample set, ``E`` per mesh and basis. Voxels must keep clear of the fault
     (:meth:`VoxelModel.check_clearance`), so the moment's rigidity is the reference's.
+
+    ``solver="fft"`` never forms ``Gamma``: it applies it as one lateral convolution per pair
+    of depth rows and solves by GMRES (:mod:`slipsolve.voxel_solve`), in memory ``O(n)`` in the
+    voxels rather than ``O(n^2)``; the dense LU (``"dense"``) is exact and faster while it fits.
     """
 
     supports_basis = True
 
-    def __init__(self, base, voxels, order="full", log=None, workers=None):
+    def __init__(self, base, voxels, order="full", log=None, workers=None, solver="dense"):
         if not base.tables.has_strain:
             raise ValueError("the base engine's tables need strain=True")
         if voxels.tables is not base.tables:
             raise ValueError("the voxels and the base engine must share one set of tables")
         if order not in ("full", "born1"):
             raise ValueError(f"order must be 'full' or 'born1', got {order!r}")
+        if solver not in ("dense", "fft"):
+            raise ValueError(f"solver must be 'dense' or 'fft', got {solver!r}")
+        self.solver = solver
+        self._system = None
         self.base = base
         self.voxels = voxels
         self.order = order
@@ -961,11 +1065,22 @@ class HeterogeneousEngine:
             self._e[key] = e.reshape(-1, e.shape[-1])
         return self._e[key]
 
+    def strain_system(self):
+        """The FFT solver's :class:`~slipsolve.voxel_solve.StrainSystem` (built on first use)."""
+        if self._system is None:
+            from .voxel_solve import ConvolutionGamma, StrainSystem
+
+            conv = ConvolutionGamma(self.voxels, self.base, log=self.log, workers=self._workers())
+            self._system = StrainSystem(conv, log=self.log)
+        return self._system
+
     def voxel_strain(self, mesh, basis=None):
         """``eps`` at the voxels per unit slip of each basis function, ``(6 n, cols)``: the solved strain."""
         e = self._strain_at_voxels(mesh, basis)
         if self.order == "born1":
             return e
+        if self.solver == "fft":
+            return self.strain_system().solve(e)
         import scipy.linalg as sla
 
         return sla.lu_solve(self._factor(), e)
@@ -1014,7 +1129,7 @@ class HeterogeneousEngine:
     def describe(self):
         """A JSON-able record for a saved model's options (the tables and voxels are not saved)."""
         v = self.voxels
-        return {"kind": "heterogeneous", "engine": self.base.name, "order": self.order,
+        return {"kind": "heterogeneous", "engine": self.base.name, "order": self.order, "solver": self.solver,
                 "voxels": {"shape": list(v.shape), "n_active": v.n_active,
                            "x_edges": v.x_edges.tolist(), "y_edges": v.y_edges.tolist(),
                            "z_edges": v.z_edges.tolist(),

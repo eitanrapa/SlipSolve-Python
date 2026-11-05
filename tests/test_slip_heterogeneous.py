@@ -576,3 +576,63 @@ def test_one_pool_serves_the_engine_operators(uniform_tables, tmp_path):
     assert pooled_engine._pool is not None
     pooled_engine.close()
     np.testing.assert_allclose(pooled, serial, rtol=1e-12, atol=1e-12 * np.abs(serial).max())
+
+
+# -- the strain far path: point moments by a volume rule -----------------------------------------
+def _around_voxel(v, n, lo, hi, seed, z_max=30e3):
+    """``n`` points at a box distance of ``lo``-``hi`` voxel sizes from ``v``, at or below the surface."""
+    rng = np.random.default_rng(seed)
+    pts = []
+    while len(pts) < n:
+        d = rng.normal(size=3)
+        d /= np.linalg.norm(d)
+        p = v.centre + rng.uniform(0.0, 2.0 * hi) * v.size * d
+        gap = v._gap(*(np.array([c]) for c in p))[0] / v.size
+        if lo < gap <= hi and -z_max < p[2] <= 0.0:
+            pts.append(p)
+    return np.array(pts).T
+
+
+def test_moment_sources_make_the_unit_moments():
+    """Openings and double couples of unit potency, combined, are the six unit moment densities."""
+    from slipsolve.heterogeneity import moment_sources
+
+    lam, mu = 2.7e10, 3.3e10
+    sources, coefficients = moment_sources(lam, mu)
+    moments = np.array([mu * (np.outer(n, d) + np.outer(d, n)) + lam * float(n @ d) * np.eye(3)
+                        for n, slips in sources for d in slips])
+    assert np.allclose(np.einsum("ks,sab->kab", coefficients, moments), unit_moments(), rtol=0, atol=1e-12)
+
+
+def test_the_far_strain_is_the_faces_in_a_uniform_crust(uniform_tables):
+    """Beyond ``strain_far`` sizes, Okada point moments by a Gauss volume rule against the faces (no remainder).
+
+    Measured (2026-11-05) at box distances of 2-20 sizes: at most 4e-4 (buried) and 1.2e-3 (at the surface)
+    of each receiver's peak; on the Venezuela v3 tables, where the remainder is not zero, the two paths agree
+    as well, except across an interface from the source, where both sit on the tables' trilinear floor.
+    """
+    engine = LayeredTDE(uniform_tables)
+    for seed, box in enumerate((((0.0, 1e3), (0.0, 1e3), (3e3, 4e3)), ((0.0, 1e3), (0.0, 1e3), (0.0, 1e3)),
+                                ((0.0, 2e3), (0.0, 1e3), (5e3, 6e3)))):
+        far, near = VoxelSource(engine, *box), VoxelSource(engine, *box, strain_far=None)
+        x, y, z = _around_voxel(far, 25, 2.0, 15.0, seed)
+        assert far._far_strain(x, y, z).all() and not near._far_strain(x, y, z).any()
+        a, b = far.strain(x, y, z), near.strain(x, y, z)
+        error = np.abs(a - b).max(axis=(1, 2)) / np.abs(b).max(axis=(1, 2))
+        assert error.max() < 3e-3
+
+
+def test_the_far_path_reads_the_remainder_at_the_near_paths_points(coarse_tables, monkeypatch):
+    """With the half-space part removed, the far path's sum is the near path's remainder rule at the same order."""
+    import slipsolve.heterogeneity as het
+
+    engine = LayeredTDE(coarse_tables)
+    v = VoxelSource(engine, (0.0, 1e3), (0.0, 1e3), (500.0, 1500.0))
+    x, y, z = _around_voxel(v, 12, 2.0, 10.0, seed=3, z_max=20e3)
+    monkeypatch.setattr(het, "point_source_enu",
+                        lambda nu, normal, slips, px, *rest: (None, np.zeros((np.size(px), len(slips), 6))))
+    for order in (1, 2, 3):
+        monkeypatch.setattr(v, "_orders", lambda x, y, z, whole, n=order: np.full(np.size(x), n))
+        far = v._point_moments(x, y, z, orders=order)
+        near = v._remainder(x, y, z, True, whole=False)
+        np.testing.assert_allclose(far, near, rtol=1e-12, atol=1e-12 * np.abs(near).max())
