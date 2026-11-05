@@ -442,3 +442,29 @@ def test_a_surface_voxel_leaves_the_free_surface_traction_free(uniform_tables):
     t = from_voigt(elastic)
     sigma = v.lam * np.trace(t, axis1=-2, axis2=-1)[..., None, None] * np.eye(3) + 2.0 * v.mu * t
     assert np.abs(sigma[..., :, 2]).max() < 1e-6 * np.abs(sigma).max()
+
+
+def test_a_long_thin_voxel_is_the_sum_of_its_cubes(uniform_tables):
+    """Past ``MAX_ASPECT`` a voxel is computed as near-cubic pieces: its field near itself is the cubes' sum.
+
+    Two triangles a face and a volume rule with as many points along every side under-resolve a long
+    thin voxel next to itself: computed whole, a 7.84 x 1 x 1 km voxel was 3.8% of the peak off 16
+    cubes' sum at its neighbours' centres (2026-11-04), where 16 and 32 cubes agreed to 7e-4.
+    """
+    from slipsolve.heterogeneity import MAX_ASPECT
+
+    eng = LayeredTDE(uniform_tables)
+    lx, h = 7840.0, 1000.0
+    x0, y0, z0 = -lx / 2, 2000.0, 3000.0
+    long = VoxelSource(eng, (x0, x0 + lx), (y0, y0 + h), (z0, z0 + h))
+    assert long.pieces is not None and len(long.pieces) % 2 == 1
+    assert max(np.ptp([p.lo, p.hi], axis=0).max() / np.ptp([p.lo, p.hi], axis=0).min() for p in long.pieces) <= MAX_ASPECT
+    cube = VoxelSource(eng, (0.0, h), (y0, y0 + h), (z0, z0 + h))
+    assert cube.pieces is None
+    xs = np.linspace(x0, x0 + lx, 17)
+    cubes = [VoxelSource(eng, (xs[i], xs[i + 1]), (y0, y0 + h), (z0, z0 + h)) for i in range(16)]
+    pts = np.array([(dx, y0 + (0.5 + dy) * h, -(z0 + (0.5 + dz) * h))
+                    for dx in (0.0, 0.45 * lx) for dy, dz in ((1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (-1.0, 0.0))])
+    got = long.strain(*pts.T)
+    want = sum(c.strain(*pts.T) for c in cubes)
+    assert (np.abs(got - want).max(axis=(1, 2)) / np.abs(want).max(axis=(1, 2))).max() < 3e-3

@@ -66,6 +66,17 @@ VOXEL_TOLERANCE = 3e-3
 #: Most Gauss-Legendre points per axis of the remainder's volume rule.
 VOXEL_MAX_ORDER = 12
 
+#: Most a voxel's longest side may exceed its shortest before its field is computed as the sum
+#: of near-cubic pieces (an odd number along each long side, so its centre stays a piece's
+#: centre, never on an internal face). Uniform eigenstrain in the pieces sums to the voxel's
+#: exactly; what changes is the quadrature. Its faces are two triangles each and its volume
+#: rule takes the same number of points along every side, so a long thin voxel is
+#: under-resolved near itself: measured (2026-11-04, uniform crust) at the centres of its
+#: neighbours, a 7.84 x 1 x 1 km voxel was 3.8% of the peak off 16 cubes' sum and a
+#: 7.84 x 0.5 x 0.5 km one 9.8%, where 16 and 32 pieces agreed to 7e-4 and 3e-4. A cube, and
+#: anything up to this aspect, is computed as before, bit for bit.
+MAX_ASPECT = 2.0
+
 #: The far path's points per axis by distance from the voxel's centre, in voxel sizes: three
 #: inside the first, two inside the second, one beyond. A tensor Gauss-Legendre rule on a cube
 #: converges far faster than the triangle rule the near path borrows. Measured (2026-11-04,
@@ -190,6 +201,17 @@ class VoxelSource:
         self.size = self.volume ** (1.0 / 3.0)
         self.free_surface = top == 0.0
         self.faces = _faces(self.lo, self.hi, self.free_surface)
+        sides = self.hi - self.lo
+        counts = np.ceil(sides / (MAX_ASPECT * sides.min()) - 1e-9).astype(int)
+        counts = np.where(counts % 2 == 0, counts + 1, counts)
+        #: Near-cubic pieces whose fields sum to this voxel's (:data:`MAX_ASPECT`); None for a
+        #: voxel computed whole.
+        self.pieces = None
+        if counts.max() > 1:
+            ex, ey, ez = (np.linspace(self.lo[a], self.hi[a], counts[a] + 1) for a in range(3))
+            self.pieces = [VoxelSource(engine, (ex[i], ex[i + 1]), (ey[j], ey[j + 1]), (-ez[k + 1], -ez[k]),
+                                       far=far, tolerance=tolerance, max_order=max_order)
+                           for i in range(counts[0]) for j in range(counts[1]) for k in range(counts[2])]
         self.far = None if far is None or not tables.has_surface else float(far)
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
@@ -218,6 +240,8 @@ class VoxelSource:
 
     def _field(self, x, y, z, strain):
         x, y, z = _as_points(x, y, z)
+        if self.pieces is not None:
+            return sum(piece._field(x, y, z, strain) for piece in self.pieces)
         width = 6 if strain else 3
         out = np.zeros((x.size, 6, width))
         far = self._far(x, y, z) if not strain else np.zeros(x.size, bool)
