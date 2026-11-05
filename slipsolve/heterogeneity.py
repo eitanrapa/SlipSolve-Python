@@ -328,17 +328,19 @@ class VoxelSource:
     def _field(self, x, y, z, strain):
         x, y, z = _as_points(x, y, z)
         if self.pieces is not None:
-            # Strain farther than the longest side from a cell in pieces takes the whole cell's volume rule
-            # (its order from that side): the pieces are for its near field, and a cell cut into hundreds of
-            # them (a long fault cell) would otherwise sum them at every receiver.
-            whole = self._far_whole(x, y, z) if strain else np.zeros(x.size, bool)
+            # Farther than the longest side from a cell in pieces, the whole cell's rule stands in (its order
+            # set by that side): strain by its point moments, surface displacement by the whole tabulated
+            # surface field. The pieces are for its near field; a cell cut into many of them (a long fault
+            # cell, a flat surface voxel) would otherwise sum them at every receiver.
+            whole = self._far_whole(x, y, z) if strain else self._far_whole_surface(x, y, z)
             if not whole.any():
                 return sum(piece._field(x, y, z, strain) for piece in self.pieces)
-            out = np.zeros((x.size, 6, 6))
+            out = np.zeros((x.size, 6, 6 if strain else 3))
             near = ~whole
             if near.any():
                 out[near] = sum(piece._field(x[near], y[near], z[near], strain) for piece in self.pieces)
-            out[whole] = self._point_moments(x[whole], y[whole], z[whole])
+            out[whole] = (self._point_moments(x[whole], y[whole], z[whole]) if strain
+                          else self._remainder(x[whole], y[whole], z[whole], strain=False, whole=True))
             return out
         width = 6 if strain else 3
         out = np.zeros((x.size, 6, width))
@@ -373,6 +375,12 @@ class VoxelSource:
             return np.zeros(x.size, bool)
         reach = max(self.strain_far * self.size, float(np.max(self.hi - self.lo)))
         return self._gap(x, y, z) > reach
+
+    def _far_whole_surface(self, x, y, z):
+        """For a cell in pieces: surface receivers beyond the surface far path's reach in its LONGEST side."""
+        if self.far is None:
+            return np.zeros(x.size, bool)
+        return (z == 0.0) & (self._gap(x, y, z) > self.far * float(np.max(self.hi - self.lo)))
 
     def _far_orders(self, x, y, z, tolerance=VOXEL_FAR_TOLERANCE):
         """Points a side for :meth:`_point_moments`: the least ``n`` with ``C (a / 2R)**(2n)`` within ``tolerance``."""
@@ -457,7 +465,8 @@ class VoxelSource:
         distance = np.sqrt((x - self.centre[0]) ** 2 + (y - self.centre[1]) ** 2
                            + (z - self.centre[2]) ** 2)
         if whole:
-            near, middle = (f * self.size for f in FAR_ORDER_SIZES)
+            # in the longest side, so a flat or long cell is not under-integrated (a cube's side is its size)
+            near, middle = (f * max(self.size, float(np.max(self.hi - self.lo))) for f in FAR_ORDER_SIZES)
             return np.where(distance < near, 3, np.where(distance < middle, 2, 1)).astype(int)
         scale = distance
         if not whole:
@@ -723,6 +732,39 @@ class VoxelModel:
         lam = (r * p ** 2).mean(axis=-1) - 2.0 * mu
         return cls(tables, x_edges, y_edges, z_edges, lam, mu, tol=tol, frame=frame)
 
+    @classmethod
+    def from_dataset(cls, tables, x_edges, y_edges, z_edges, ds, frame, vp="vp", vs="vs", rho="rho", lon="longitude",
+                     lat="latitude", depth="depth", depth_unit=1e3, speed_unit=1e3, density_unit=1e3, samples=8,
+                     tol=1e-9):
+        """:meth:`from_grid` from an ``xarray.Dataset`` (a tomography as distributed, e.g. IRIS EMC's netCDF files).
+
+        ``ds`` is opened by the caller, with whatever engine reads the file. The coordinates ``lon`` / ``lat`` are degrees
+        (0-360 longitudes are turned to -180-180 when the voxels lie west of Greenwich) and ``depth`` is in
+        ``depth_unit`` metres (km by default); ``vp``, ``vs`` in ``speed_unit`` m/s (km/s) and ``rho`` in ``density_unit``
+        kg/m^3 (g/cm^3), in any dimension order. ``vs=None`` or ``rho=None`` derive them from Vp by
+        :func:`brocher_vs` / :func:`brocher_density` (Brocher 2005's crustal fits), for models that carry Vp alone.
+        """
+        def coord(name):
+            return np.asarray(ds[name].values, dtype=float)
+
+        lons, lats, deps = coord(lon), coord(lat), coord(depth) * float(depth_unit)
+        cx = 0.5 * (np.asarray(x_edges, dtype=float)[1:] + np.asarray(x_edges, dtype=float)[:-1])
+        cy = 0.5 * (np.asarray(y_edges, dtype=float)[1:] + np.asarray(y_edges, dtype=float)[:-1])
+        want_lon, _ = (np.asarray(v) for v in frame.to_lonlat(*np.meshgrid(cx, cy, indexing="ij")))
+        if lons.max() > 180.0 and want_lon.min() < 0.0:
+            lons = np.where(lons > 180.0, lons - 360.0, lons)
+
+        def field(name):
+            return np.asarray(ds[name].transpose(lon, lat, depth).values, dtype=float)
+
+        p_kms = field(vp) * float(speed_unit) / 1e3
+        s_kms = brocher_vs(p_kms) if vs is None else field(vs) * float(speed_unit) / 1e3
+        r_gcc = brocher_density(p_kms) if rho is None else field(rho) * float(density_unit) / 1e3
+        order = [np.argsort(lons), np.argsort(lats), np.argsort(deps)]
+        grids = [a[np.ix_(*order)] for a in (p_kms, s_kms, r_gcc)]
+        return cls.from_grid(tables, x_edges, y_edges, z_edges, lons[order[0]], lats[order[1]], deps[order[2]],
+                             grids[0] * 1e3, grids[1] * 1e3, grids[2] * 1e3, frame, samples=samples, tol=tol)
+
     def keep_clear(self, mesh, buffer=None, samples=24):
         """Return active voxels within ``buffer`` of the fault to the reference; how many, ``int``.
 
@@ -920,6 +962,18 @@ class VoxelModel:
                 f"{self.mu[self.active].max() / 1e9 if self.n_active else 0:.2f} GPa>")
 
 
+def brocher_density(vp_kms):
+    """Density (g/cm^3) from Vp (km/s), Brocher (2005, BSSA 95, 2081-2092) eq. 1 (Nafe-Drake), 1.5 < Vp < 8.5."""
+    v = np.asarray(vp_kms, dtype=float)
+    return 1.6612 * v - 0.4721 * v ** 2 + 0.0671 * v ** 3 - 0.0043 * v ** 4 + 0.000106 * v ** 5
+
+
+def brocher_vs(vp_kms):
+    """Vs (km/s) from Vp (km/s), Brocher (2005) eq. 6, his regression for crustal rocks, 1.5 < Vp < 8 km/s."""
+    v = np.asarray(vp_kms, dtype=float)
+    return 0.7858 - 1.2344 * v + 0.7949 * v ** 2 - 0.1238 * v ** 3 + 0.0064 * v ** 4
+
+
 def _with_interfaces(tables, z_edges):
     """``z_edges`` with every interface of the tables strictly inside them inserted: ``(edges, inserted)``."""
     added = [t for t in tables.tops[1:] if z_edges[0] + 1e-6 < t < z_edges[-1] - 1e-6
@@ -984,10 +1038,11 @@ def strain_operator(voxels, engine, log=None, workers=None):
                 sources_by_row[iz_s] = VoxelSource(engine, *bounds)
             scatter(task, sources_by_row[iz_s].strain(*task[6:]))
         return out
+    from .layered_tde import pool_map
+
     with pool:
-        futures = [pool.submit(_voxel_task, task[5], *task[6:], True) for task in tasks]
-        for task, future in zip(tasks, futures):
-            scatter(task, future.result())
+        for k, field in pool_map(pool, _voxel_task, ((k, (task[5], *task[6:], True)) for k, task in enumerate(tasks))):
+            scatter(tasks[k], field)
     return out
 
 
@@ -1054,12 +1109,13 @@ def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
     if pool is not None:
         count = pool.pool._max_workers if hasattr(pool, "pool") else int(workers)
         shares = [s for s in np.array_split(np.arange(n), 4 * count) if s.size]
+        from .layered_tde import pool_map
+
         with pool:
-            futures = [pool.submit(_los_share, [voxels.spec(i) for i in voxel_ids[share]], x, y, z, look)
-                       for share in shares]
-            for share, future in zip(shares, futures):
-                cols = slice(6 * share[0], 6 * (share[-1] + 1))
-                out[..., cols] = future.result()
+            jobs = ((k, ([voxels.spec(i) for i in voxel_ids[share]], x, y, z, look)) for k, share in enumerate(shares))
+            for k, cols_field in pool_map(pool, _los_share, jobs):
+                share = shares[k]
+                out[..., 6 * share[0]:6 * (share[-1] + 1)] = cols_field
     for i in range(n if pool is None else 0):
         u = _make_source(engine, voxels.spec(voxel_ids[i])).displacement(x, y, z)   # (npts, 6, 3)
         if look is not None:
@@ -1274,16 +1330,14 @@ class HeterogeneousEngine:
             for chunk in chunks:
                 add(chunk, los_operator(self.voxels, self.base, x, y, look, subset=chunk))
         else:
-            from concurrent.futures import as_completed
+            from .layered_tde import pool_map
 
             with pool:
-                futures = {pool.submit(_los_share, [self.voxels.spec(i) for i in chunk], px, py, pz, lk): chunk
-                           for chunk in chunks}
-                for future in as_completed(futures):
-                    h = future.result()
+                jobs = ((k, ([self.voxels.spec(i) for i in chunk], px, py, pz, lk)) for k, chunk in enumerate(chunks))
+                for k, h in pool_map(pool, _los_share, jobs):
                     if not np.isfinite(h).all():
                         raise ValueError("a surface point got a non-finite voxel field; on or within rounding of a voxel face?")
-                    add(futures[future], h)
+                    add(chunks[k], h)
         if self.log:
             self.log(f"H streamed: {npts} surface points x {n} voxels in {len(chunks)} blocks [{time.time() - t0:.0f}s]")
         return out

@@ -633,3 +633,19 @@ def test_the_exact_interface_assembles_the_same_in_worker_processes(setup, tmp_p
     b = pooled.response_matrix(x[:40], y[:40], look=(le[:40], ln[:40], lu[:40]))
     np.testing.assert_allclose(b, a, rtol=0, atol=1e-12 * np.abs(a).max())
     assert pooled.with_contrast(contrast.with_ratio([[1.5, 1.5]])).workers == 2
+
+
+def test_the_interface_operator_can_be_built_unfactored(setup):
+    """``factor=False``: Fbar alone, the same as the factored solve's; a solve built from it factors as usual."""
+    from slipsolve.bimaterial import InterfaceSolve
+
+    trace, frame, mesh, obs = setup
+    contrast = RigidityContrast(trace, side="north", ratio=2.0, frame=frame)
+    reach = dict(depth=1.0, strike=1.0, cross=1.0)
+    bare = InterfaceSolve(mesh, contrast, extend=reach, factor=False)
+    assert not hasattr(bare, "_lu")
+    full = InterfaceSolve(mesh, contrast, extend=reach)
+    np.testing.assert_array_equal(bare.fbar, full.fbar)
+    rebuilt = InterfaceSolve(mesh, contrast, extend=reach, fbar=bare.fbar)
+    slip = np.ones(2 * mesh.n_elements)
+    np.testing.assert_allclose(rebuilt.discontinuity(slip), full.discontinuity(slip), rtol=1e-12, atol=1e-14)

@@ -106,10 +106,11 @@ class ConvolutionGamma:
                     sources[s] = VoxelSource(engine, *bounds)
                 place(task, sources[s].strain(*task[3:]))
         else:
+            from .layered_tde import pool_map
+
             with pool:
-                futures = [pool.submit(_voxel_task, task[2], *task[3:], True) for task in tasks]
-                for task, future in zip(tasks, futures):
-                    place(task, future.result())
+                for k, field in pool_map(pool, _voxel_task, ((k, (task[2], *task[3:], True)) for k, task in enumerate(tasks))):
+                    place(tasks[k], field)
         if log:
             log(f"Gamma kernels: {nz} rows x {di.size} offsets a pair, {nx} x {ny} -> {px} x {py} padded, "
                 f"{self.nbytes / 1e9:.2f} GB [{time.time() - t0:.0f}s]")

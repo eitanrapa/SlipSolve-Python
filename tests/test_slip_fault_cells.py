@@ -160,3 +160,115 @@ def test_beyond_its_longest_side_a_cell_in_pieces_takes_its_whole_volume_rule(un
     whole = cell.strain(*pts.T)
     pieces = sum(q.strain(*pts.T) for q in cell.pieces)
     assert (np.abs(whole - pieces).max(axis=(1, 2)) / np.abs(pieces).max(axis=(1, 2))).max() < 5e-4
+
+
+# -- several models in one solve ------------------------------------------------------------------
+def _soft_where(tables, mask):
+    def moduli(gx, gy, gz):
+        layer = tables.layer(gz)
+        f = np.where(mask(gx, gy, gz), 0.6, 1.0)
+        return f * tables.lam[layer], f * tables.mu[layer]
+    return moduli
+
+
+def test_two_voxel_models_combined_are_the_one_model_holding_both(coarse_tables):
+    """Two blocks of voxels as two models in CombinedCells = one VoxelModel with both: the blocks between them, pair
+    by pair, are the numbers translation gives."""
+    from slipsolve.fault_cells import CombinedCells
+    from slipsolve.heterogeneity import VoxelModel
+
+    tables = coarse_tables
+    base = LayeredTDE(tables)
+    trace, mesh = _vertical_mesh()
+    _, ty = (np.asarray(v) for v in trace.to_local(mesh.frame))
+    y0 = float(np.mean(ty))
+    xe, ye, ze = np.arange(-4e3, 4001.0, 2e3), y0 + np.arange(3e3, 7001.0, 2e3), np.array([0.0, 1000.0, 2000.0, 4000.0])
+    west = lambda gx, gy, gz: gx < 0.0  # noqa: E731
+    both = VoxelModel(tables, xe, ye, ze, lam=_soft_where(tables, lambda gx, gy, gz: np.ones(gx.shape, bool)))
+    a = VoxelModel(tables, xe, ye, ze, lam=_soft_where(tables, west))
+    b = VoxelModel(tables, xe, ye, ze, lam=_soft_where(tables, lambda gx, gy, gz: ~west(gx, gy, gz)))
+    combined = CombinedCells(a, b)
+    assert combined.n_active == both.n_active
+    rng = np.random.default_rng(7)
+    x, y = rng.uniform(-8e3, 8e3, 20), y0 + rng.uniform(-8e3, 12e3, 20)
+    look = (np.full(20, 0.6), np.full(20, -0.1), np.full(20, 0.79))
+    g0 = base.los_matrix(mesh, x, y, *look)
+    g_one = HeterogeneousEngine(base, both).los_matrix(mesh, x, y, *look)
+    g_two = HeterogeneousEngine(base, combined).los_matrix(mesh, x, y, *look)
+    assert np.abs(g_two - g_one).max() < 1e-9 * np.abs(g_one - g0).max()
+
+
+def test_fault_cells_and_voxels_in_one_solve(coarse_tables):
+    """Cells by the fault + voxels beyond: at first order the corrections add; in full they interact; overlap refused."""
+    from slipsolve.fault_cells import CombinedCells
+    from slipsolve.heterogeneity import VoxelModel
+
+    tables = coarse_tables
+    base = LayeredTDE(tables)
+    trace, mesh = _vertical_mesh()
+    _, ty = (np.asarray(v) for v in trace.to_local(mesh.frame))
+    y0 = float(np.mean(ty))
+
+    def damaged(x, y, depth, distance, side):
+        layer = tables.layer(depth)
+        f = np.where(depth < 4e3, 0.6, 1.0)
+        return f * tables.lam[layer], f * tables.mu[layer]
+
+    cells = FaultCells(tables, mesh, [1000.0, 1000.0], damaged, sides=(-1, 1))
+    vox = VoxelModel(tables, np.arange(-4e3, 4001.0, 2e3), y0 + np.arange(4e3, 8001.0, 2e3), [0.0, 2000.0, 4000.0],
+                     lam=_soft_where(tables, lambda gx, gy, gz: np.ones(gx.shape, bool)))
+    combined = CombinedCells(cells, vox)
+    rng = np.random.default_rng(8)
+    x, y = rng.uniform(-8e3, 8e3, 20), y0 + rng.uniform(-10e3, 12e3, 20)
+    look = (np.full(20, 0.6), np.full(20, -0.1), np.full(20, 0.79))
+    g0 = base.los_matrix(mesh, x, y, *look)
+
+    def g(model, order="full"):
+        return HeterogeneousEngine(base, model, order=order).los_matrix(mesh, x, y, *look)
+
+    born = g(combined, "born1") - g0
+    np.testing.assert_allclose(born, (g(cells, "born1") - g0) + (g(vox, "born1") - g0), rtol=0,
+                               atol=1e-10 * np.abs(born).max())
+    full, separate = g(combined) - g0, (g(cells) - g0) + (g(vox) - g0)
+    assert np.isfinite(full).all() and np.abs(full - separate).max() > 1e-4 * np.abs(full).max()
+    near = VoxelModel(tables, [-1000.0, 1000.0], [y0 - 1000.0, y0 + 1000.0], [1000.0, 2000.0],
+                      lam=_soft_where(tables, lambda gx, gy, gz: np.ones(gx.shape, bool)))
+    with pytest.raises(ValueError, match="overlap"):
+        CombinedCells(cells, near)
+
+
+def test_a_flat_surface_voxel_in_pieces_takes_its_whole_surface_rule_far_away(uniform_tables):
+    """A 4 x 4 x 1.5 km surface voxel (nine pieces) seen from the surface beyond four of its longest sides: the whole
+    voxel's tabulated surface field = the sum of its pieces."""
+    engine = LayeredTDE(uniform_tables)
+    v = VoxelSource(engine, (0.0, 4000.0), (0.0, 4000.0), (0.0, 1500.0))
+    assert v.pieces is not None and len(v.pieces) == 9
+    x = np.array([30000.0, -18000.0, 2000.0, 45000.0])
+    y = np.array([2000.0, 9000.0, -25000.0, 40000.0])
+    z = np.zeros(4)
+    assert v._far_whole_surface(x, y, z).all()
+    whole = v.displacement(x, y, z)
+    pieces = sum(q.displacement(x, y, z) for q in v.pieces)
+    assert (np.abs(whole - pieces).max(axis=(1, 2)) / np.abs(pieces).max(axis=(1, 2))).max() < 2e-3
+
+
+def test_surface_points_on_a_cell_edge_are_found(coarse_tables):
+    """A surface point on the edge two fault cells share at the surface is refused, one beside it is not."""
+    from slipsolve.heterogeneity import los_operator
+
+    tables = coarse_tables
+    trace, mesh = _vertical_mesh()
+
+    def soft(x, y, depth, distance, side):
+        layer = tables.layer(depth)
+        return 0.6 * tables.lam[layer], 0.6 * tables.mu[layer]
+
+    cells = FaultCells(tables, mesh, [1000.0], soft, sides=(1,))
+    surface_nodes = np.flatnonzero(np.abs(np.asarray(mesh.nodes)[:, 2]) < 1.0)
+    k = surface_nodes[len(surface_nodes) // 2]
+    on = np.asarray(mesh.nodes)[k, :2] + 500.0 * cells.vertex_normals[k, :2]     # on the extruded edge
+    off = on + np.array([300.0, -200.0])
+    found = cells.on_faces(np.array([on[0], off[0]]), np.array([on[1], off[1]]), np.zeros(2))
+    assert found.tolist() == [True, False]
+    with pytest.raises(ValueError, match="voxel face"):
+        los_operator(cells, LayeredTDE(tables), np.array([on[0]]), np.array([on[1]]))

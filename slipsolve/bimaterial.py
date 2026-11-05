@@ -673,7 +673,7 @@ class InterfaceSolve:
     """
 
     def __init__(self, mesh, contrast, nu=0.25, extend=None, growth=GROWTH, first=FIRST,
-                 kernel=None, fbar=None, workers=None):
+                 kernel=None, fbar=None, workers=None, factor=True):
         self.mesh, self.contrast, self.nu = mesh, contrast, float(nu)
         self.kernel = kernel if kernel is not None else _HalfSpaceKernel(nu)
         #: Processes for the assembly and :meth:`response_matrix` with a layered kernel
@@ -685,7 +685,7 @@ class InterfaceSolve:
         self.n_fault = int(mesh.n_elements)
         self._build()
         if fbar is None:
-            self._assemble()
+            self._assemble(factor=factor)
         else:
             # A saved ``fbar`` from the same mesh, kernel and reach: the geometry is
             # rebuilt (cheap and deterministic) and only its size is checked.
@@ -693,7 +693,8 @@ class InterfaceSolve:
             if fbar.shape != (3 * self.n_elements,) * 2:
                 raise ValueError(f"fbar is {fbar.shape}; this interface needs {(3 * self.n_elements,) * 2}")
             self.fbar = fbar
-            self._factor()
+            if factor:
+                self._factor()
         self._x = None
 
     # -- geometry -------------------------------------------------------------------
@@ -965,7 +966,7 @@ class InterfaceSolve:
 
         return engine_pool(self.kernel, self.workers)
 
-    def _assemble(self):
+    def _assemble(self, factor=True):
         n = self.n_elements
         offset = AVERAGE_OFFSET * np.sqrt(self.areas)[:, None] * self.normals
         cx, cy, cz = self.centroids.T
@@ -976,16 +977,17 @@ class InterfaceSolve:
                 fbar[:, 3 * j: 3 * j + 3] = _fbar_columns(self.kernel, self.vertices[j:j + 1], cx, cy, cz, offset,
                                                           self.frames)
         else:
-            from concurrent.futures import as_completed
+            from .layered_tde import pool_map
 
             chunks = [c for c in np.array_split(np.arange(n), max(1, 16 * int(self.workers))) if c.size]
             with pool:
-                futures = {pool.submit(_fbar_task, self.vertices[c], cx, cy, cz, offset, self.frames): c for c in chunks}
-                for future in as_completed(futures):
-                    c = futures[future]
-                    fbar[:, 3 * c[0]: 3 * (c[-1] + 1)] = future.result()
+                jobs = ((k, (self.vertices[c], cx, cy, cz, offset, self.frames)) for k, c in enumerate(chunks))
+                for k, cols in pool_map(pool, _fbar_task, jobs):
+                    c = chunks[k]
+                    fbar[:, 3 * c[0]: 3 * (c[-1] + 1)] = cols
         self.fbar = fbar
-        self._factor()
+        if factor:                  # ``factor=False``: Fbar alone, to be saved and factored elsewhere
+            self._factor()
 
     def _factor(self):
         n = self.n_elements
@@ -1055,15 +1057,15 @@ class InterfaceSolve:
             for start, stop, cols in self._responses(x, y, z, look, block):
                 out[..., 3 * start: 3 * stop] = cols
             return out
-        from concurrent.futures import as_completed
+        from .layered_tde import pool_map
 
         px, py, pz = _as_points(x, y, z)
         chunks = [c for c in np.array_split(np.arange(self.n_elements), max(1, 16 * int(workers))) if c.size]
         with pool:
-            futures = {pool.submit(_response_task, self.vertices[c], px, py, pz, look): c for c in chunks}
-            for future in as_completed(futures):
-                c = futures[future]
-                out[..., 3 * c[0]: 3 * (c[-1] + 1)] = future.result()
+            jobs = ((k, (self.vertices[c], px, py, pz, look)) for k, c in enumerate(chunks))
+            for k, cols in pool_map(pool, _response_task, jobs):
+                c = chunks[k]
+                out[..., 3 * c[0]: 3 * (c[-1] + 1)] = cols
         return out
 
     def los(self, x, y, z=None, look=None, block=64):

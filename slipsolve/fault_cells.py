@@ -171,7 +171,139 @@ def _prism_centroids(inner, outer):
     return vols, cents
 
 
-class FaultCells:
+class PrismCells:
+    """Cells of uniform departure, each a triangular prism ``inner`` -> ``outer`` (``(n, 3, 3)`` each, vertex i to i).
+
+    ``lam`` and ``mu`` (Pa, ``(n,)`` or scalars) are the cells' moduli; a cell whose moduli match the reference's to
+    ``tol`` times its ``mu`` is inactive. A model for :class:`~slipsolve.heterogeneity.HeterogeneousEngine`'s dense solve
+    (``Gamma`` pair by pair) and for :class:`CombinedCells`. :class:`FaultCells` builds one from a fault mesh.
+    """
+
+    def __init__(self, tables, inner, outer, lam, mu, tol=1e-9, _centroids=None):
+        self.tables = tables
+        self.inner = np.asarray(inner, dtype=float).reshape(-1, 3, 3)
+        self.outer = np.asarray(outer, dtype=float).reshape(-1, 3, 3)
+        if self.inner.shape != self.outer.shape:
+            raise ValueError("inner and outer must hold the same number of triangles")
+        self.volumes, centroids = _centroids if _centroids is not None else _prism_centroids(self.inner, self.outer)
+        depth = -centroids[:, 2]
+        ref = tables.layer(depth)
+        self.lam0, self.mu0 = tables.lam[ref], tables.mu[ref]
+        self.lam = np.broadcast_to(np.asarray(lam, dtype=float), depth.shape).copy()
+        self.mu = np.broadcast_to(np.asarray(mu, dtype=float), depth.shape).copy()
+        self.dlam, self.dmu = self.lam - self.lam0, self.mu - self.mu0
+        self.active = (np.abs(self.dlam) + np.abs(self.dmu)) > float(tol) * self.mu0
+        self._all_centroids = centroids
+        self.ids = np.flatnonzero(self.active)
+        #: East/north/up centroids of the active cells, in the operators' order.
+        self.centres = centroids[self.active]
+        top = np.maximum(0.0, -np.maximum(self.inner[:, :, 2].max(1), self.outer[:, :, 2].max(1)))
+        bottom = -np.minimum(self.inner[:, :, 2].min(1), self.outer[:, :, 2].min(1))
+        bad = [i for i in self.ids if any(top[i] + 1e-6 < t < bottom[i] - 1e-6 for t in tables.tops[1:])]
+        if bad:
+            raise ValueError(f"{len(bad)} active cells cross a layer interface (cells {bad[:10]}...): put the cells' "
+                             f"edges on the interfaces {tables.tops[1:].tolist()} m")
+
+    @property
+    def n_active(self):
+        return int(self.ids.size)
+
+    def stiffness(self):
+        """``D``, block-diagonal ``(6 n, 6 n)`` sparse: the moment density is ``M = -D eps``."""
+        import scipy.sparse as sp
+
+        return sp.block_diag(list(stiffness_block(self.dlam[self.active], self.dmu[self.active])), format="csr")
+
+    def spec(self, i):
+        """Active cell ``i``'s picklable description, for :func:`~slipsolve.heterogeneity._make_source`."""
+        k = self.ids[i]
+        return ("prism", self.inner[k], self.outer[k])
+
+    def source(self, engine, i):
+        return _make_source(engine, self.spec(i))
+
+    def contains(self, points):
+        """Which ``points`` ``(m, 3)`` lie strictly inside an active cell (a convex-cell test on each cell's faces)."""
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        out = np.zeros(points.shape[0], bool)
+        for k in self.ids:
+            a, b = self.inner[k], self.outer[k]
+            lo, hi = np.minimum(a.min(0), b.min(0)), np.maximum(a.max(0), b.max(0))
+            near = np.flatnonzero(np.all((points > lo) & (points < hi), axis=1) & ~out)
+            if not near.size:
+                continue
+            centre = self._all_centroids[k]
+            inside = np.ones(near.size, bool)
+            candidates = [a, b]
+            for i, j in ((0, 1), (1, 2), (2, 0)):
+                candidates += _side_triangles(a[i], a[j], b[j], b[i])
+            for tri in candidates:
+                n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+                if np.linalg.norm(n) == 0.0:
+                    continue
+                if n @ (tri.mean(axis=0) - centre) < 0.0:
+                    n = -n
+                inside &= (points[near] - tri[0]) @ n < -1e-9 * np.linalg.norm(n) * max(1.0, np.abs(tri).max())
+            out[near[inside]] = True
+        return out
+
+    def check_clearance(self, mesh, buffer=None, samples=24, contact=False):
+        """Refuse a fault triangle that passes through an active cell (sampled ``samples`` times an edge)."""
+        n = int(samples)
+        i, j = np.meshgrid(np.arange(n + 1), np.arange(n + 1), indexing="ij")
+        keep = i + j <= n
+        bary = np.column_stack([i[keep], j[keep], n - i[keep] - j[keep]]) / n
+        points = np.concatenate([bary @ tri for tri in np.asarray(mesh.vertices)])
+        hit = self.contains(points)
+        if hit.any():
+            raise ValueError(f"the fault passes through an active cell (at {points[np.argmax(hit)].round(0).tolist()})")
+        return True
+
+    def on_faces(self, x, y, z=None, tol=None):
+        """Surface points on an active cell's face: within ``tol`` (default 1e-6 of the cell's size) of one of its
+        edges or corners in the surface plane, where its field is singular. Points at depth are not tested."""
+        x, y = np.asarray(x, dtype=float).ravel(), np.asarray(y, dtype=float).ravel()
+        z = np.zeros(x.size) if z is None else np.asarray(z, dtype=float).ravel()
+        out = np.zeros(x.size, bool)
+        surface = np.flatnonzero(z == 0.0)
+        if not surface.size or not self.n_active:
+            return out
+        p = np.column_stack([x[surface], y[surface]])
+        for k in self.ids:
+            corners = np.vstack([self.inner[k], self.outer[k]])
+            at = np.abs(corners[:, 2]) < 1e-6
+            if not at.any():
+                continue
+            size = float(self.volumes[k]) ** (1.0 / 3.0)
+            eps = (1e-6 * size) if tol is None else float(tol)
+            pts = corners[at, :2]
+            hit = (np.linalg.norm(p[:, None, :] - pts[None], axis=2) < eps).any(axis=1)
+            idx = np.flatnonzero(at)
+            for a in range(idx.size):                       # every pair of surface corners spans a candidate edge
+                for b in range(a + 1, idx.size):
+                    u, v = pts[a], pts[b]
+                    d = v - u
+                    t = np.clip(((p - u) @ d) / max(d @ d, 1e-30), 0.0, 1.0)
+                    hit |= np.linalg.norm(p - (u + t[:, None] * d), axis=1) < eps
+            out[surface[hit]] = True
+        return out
+
+    def strain_operator(self, engine, log=None, workers=None):
+        """``Gamma`` pair by pair, ``(6 n, 6 n)``: each active cell's field at every active centroid."""
+        return _pairwise_gamma([self], engine, log=log, workers=workers)
+
+    def describe(self):
+        from .heterogeneity import _digest
+
+        return {"kind": "prism_cells", "n_cells": int(self.active.size), "n_active": self.n_active,
+                "digest": _digest(self.lam, self.mu, self.inner, self.outer)}
+
+    def __repr__(self):
+        return (f"<{type(self).__name__} {self.active.size} cells ({self.n_active} active); mu "
+                f"{self.mu.min() / 1e9:.2f}-{self.mu.max() / 1e9:.2f} GPa>")
+
+
+class FaultCells(PrismCells):
     """Cells that follow a fault mesh: its triangles extruded horizontally, in layers, on one or both sides.
 
     ``thickness`` (metres) lists the layers' thicknesses outward from the fault; ``sides`` takes ``+1`` (the side the
@@ -183,7 +315,6 @@ class FaultCells:
     """
 
     def __init__(self, tables, mesh, thickness, moduli, sides=(-1, 1), tol=1e-9):
-        self.tables = tables
         self.mesh = mesh
         self.thickness = np.asarray(thickness, dtype=float).ravel()
         if self.thickness.size == 0 or np.any(self.thickness <= 0):
@@ -213,50 +344,19 @@ class FaultCells:
                 side.append(np.full(tris.shape[0], s))
                 layer.append(np.full(tris.shape[0], k))
                 element.append(np.arange(tris.shape[0]))
-        self.inner = np.concatenate(inner)
-        self.outer = np.concatenate(outer)
+        inner, outer = np.concatenate(inner), np.concatenate(outer)
         self.side = np.concatenate(side)
         self.layer_index = np.concatenate(layer)
         self.element = np.concatenate(element)
-        self.volumes, centroids = _prism_centroids(self.inner, self.outer)
+        volumes, centroids = _prism_centroids(inner, outer)
         self.distance = 0.5 * (reach[self.layer_index] + reach[self.layer_index + 1])
-        depth = -centroids[:, 2]
-        ref = tables.layer(depth)
-        self.lam0, self.mu0 = tables.lam[ref], tables.mu[ref]
-        lam, mu = moduli(centroids[:, 0], centroids[:, 1], depth, self.distance, self.side)
-        self.lam = np.broadcast_to(np.asarray(lam, dtype=float), depth.shape).copy()
-        self.mu = np.broadcast_to(np.asarray(mu, dtype=float), depth.shape).copy()
-        self.dlam, self.dmu = self.lam - self.lam0, self.mu - self.mu0
-        self.active = (np.abs(self.dlam) + np.abs(self.dmu)) > float(tol) * self.mu0
-        self._all_centroids = centroids
-        self.ids = np.flatnonzero(self.active)
-        #: East/north/up centroids of the active cells, in the operators' order.
-        self.centres = centroids[self.active]
-        top = np.maximum(0.0, -np.maximum(self.inner[:, :, 2].max(1), self.outer[:, :, 2].max(1)))
-        bottom = -np.minimum(self.inner[:, :, 2].min(1), self.outer[:, :, 2].min(1))
-        bad = [i for i in self.ids if any(top[i] + 1e-6 < t < bottom[i] - 1e-6 for t in tables.tops[1:])]
-        if bad:
-            raise ValueError(f"{len(bad)} active cells cross a layer interface (elements "
-                             f"{sorted(set(self.element[bad].tolist()))[:10]}...): put the mesh's element edges on the "
-                             f"interfaces {tables.tops[1:].tolist()} m")
-
-    @property
-    def n_active(self):
-        return int(self.ids.size)
-
-    def stiffness(self):
-        """``D``, block-diagonal ``(6 n, 6 n)`` sparse: the moment density is ``M = -D eps``."""
-        import scipy.sparse as sp
-
-        return sp.block_diag(list(stiffness_block(self.dlam[self.active], self.dmu[self.active])), format="csr")
-
-    def spec(self, i):
-        """Active cell ``i``'s picklable description, for :func:`~slipsolve.heterogeneity._make_source`."""
-        k = self.ids[i]
-        return ("prism", self.inner[k], self.outer[k])
-
-    def source(self, engine, i):
-        return _make_source(engine, self.spec(i))
+        lam, mu = moduli(centroids[:, 0], centroids[:, 1], -centroids[:, 2], self.distance, self.side)
+        try:
+            super().__init__(tables, inner, outer, lam, mu, tol=tol, _centroids=(volumes, centroids))
+        except ValueError as err:
+            if "cross a layer interface" not in str(err):
+                raise
+            raise ValueError(str(err).replace("cells' edges", "fault mesh's element edges")) from None
 
     def check_clearance(self, mesh, buffer=None, samples=24, contact=False):
         """The cells end on the fault they were built from; refuse any other mesh."""
@@ -264,46 +364,11 @@ class FaultCells:
             raise ValueError("these fault cells were built from another mesh")
         return True
 
-    def on_faces(self, x, y, z=None, tol=None):
-        """Surface points on a cell's vertical side faces are not detected here: the fields' finite check backs it up."""
-        return np.zeros(np.size(x), bool)
-
-    def strain_operator(self, engine, log=None, workers=None):
-        """``Gamma`` pair by pair, ``(6 n, 6 n)``: each active cell's field at every active centroid."""
-        import time
-
-        from .heterogeneity import _spec_task
-        from .layered_tde import engine_pool
-
-        n = self.n_active
-        out = np.zeros((6 * n, 6 * n))
-        x, y, z = self.centres.T
-        t0 = time.time()
-
-        def place(j, field):                                          # field (n receivers, 6 moment b, 6 strain a)
-            out[:, 6 * j:6 * j + 6] = np.swapaxes(field, 1, 2).reshape(6 * n, 6)
-
-        pool = engine_pool(engine, workers)
-        if pool is None:
-            for j in range(n):
-                place(j, self.source(engine, j).strain(x, y, z))
-        else:
-            from concurrent.futures import as_completed
-
-            with pool:
-                futures = {pool.submit(_spec_task, self.spec(j), x, y, z, True): j for j in range(n)}
-                for future in as_completed(futures):
-                    place(futures[future], future.result())
-        if log:
-            log(f"Gamma pair by pair: {n} fault cells [{time.time() - t0:.0f}s]")
-        return out
-
     def describe(self):
-        from .heterogeneity import _digest
-
-        return {"kind": "fault_cells", "n_cells": int(self.active.size), "n_active": self.n_active,
-                "thickness": self.thickness.tolist(), "sides": list(self.sides), "mesh": self.mesh.digest(),
-                "digest": _digest(self.lam, self.mu, self.inner, self.outer)}
+        out = super().describe()
+        out.update(kind="fault_cells", thickness=self.thickness.tolist(), sides=list(self.sides),
+                   mesh=self.mesh.digest())
+        return out
 
     def __repr__(self):
         return (f"<FaultCells {self.active.size} cells ({self.n_active} active) on {self.mesh.n_elements} elements, "
@@ -311,4 +376,159 @@ class FaultCells:
                 f"{self.mu.min() / 1e9:.2f}-{self.mu.max() / 1e9:.2f} GPa>")
 
 
-__all__ = ["FaultCells", "PrismSource"]
+def _pairwise_gamma(models, engine, log=None, workers=None, blocks=None):
+    """``Gamma`` of the cells of ``models`` (in order), pair by pair; ``blocks`` maps (a, b) to a precomputed block."""
+    import time
+
+    from .heterogeneity import _spec_task
+    from .layered_tde import engine_pool
+
+    sizes = [m.n_active for m in models]
+    starts = np.concatenate([[0], np.cumsum(sizes)])
+    n = int(starts[-1])
+    out = np.zeros((6 * n, 6 * n))
+    centres = np.concatenate([m.centres for m in models]) if n else np.zeros((0, 3))
+    blocks = blocks or {}
+    for (a, b), block in blocks.items():
+        out[6 * starts[b]:6 * starts[b + 1], 6 * starts[a]:6 * starts[a + 1]] = block
+    jobs = []                                                   # (model a, cell j, receiver rows)
+    for a, model in enumerate(models):
+        rows = np.concatenate([np.arange(starts[b], starts[b + 1]) for b in range(len(models)) if (a, b) not in blocks]
+                              + [np.zeros(0, int)]).astype(int)
+        if rows.size:
+            jobs += [(a, j, rows) for j in range(model.n_active)]
+    t0 = time.time()
+
+    def place(job, field):                                      # field (receivers, 6 moment b, 6 strain a)
+        a, j, rows = job
+        col = 6 * (starts[a] + j)
+        r6 = (6 * rows[:, None] + np.arange(6)[None, :]).ravel()
+        out[r6, col:col + 6] = np.swapaxes(field, 1, 2).reshape(-1, 6)
+
+    pool = engine_pool(engine, workers)
+    if pool is None:
+        for job in jobs:
+            a, j, rows = job
+            x, y, z = centres[rows].T
+            place(job, models[a].source(engine, j).strain(x, y, z))
+    else:
+        from .layered_tde import pool_map
+
+        def tasks():
+            for k, (a, j, rows) in enumerate(jobs):
+                x, y, z = centres[rows].T
+                yield k, (models[a].spec(j), x, y, z, True)
+
+        with pool:
+            for k, field in pool_map(pool, _spec_task, tasks()):
+                place(jobs[k], field)
+    if log:
+        log(f"Gamma pair by pair: {n} cells in {len(models)} model(s), {len(jobs)} sources [{time.time() - t0:.0f}s]")
+    return out
+
+
+class CombinedCells:
+    """Several cell models in one solve (plan Part IV 1(b)): cells beside the fault and voxels beyond, say.
+
+    ``models`` are :class:`~slipsolve.heterogeneity.VoxelModel`, :class:`PrismCells` / :class:`FaultCells` or other
+    models with the same interface, on one set of tables. Each model's own block of ``Gamma`` is its own operator (by
+    translation for a voxel grid); the blocks between models go pair by pair. The models must not overlap: a voxel centre
+    inside an active prism cell, or a prism centroid inside an active voxel, is refused (a voxel only partly inside a cell
+    is not detected: put the voxels' faces on the cells' outer edge, or clear them, :meth:`VoxelModel.keep_clear`).
+    Dense: for the FFT solver use one :class:`~slipsolve.heterogeneity.VoxelModel`.
+    """
+
+    def __init__(self, *models):
+        if not models:
+            raise ValueError("CombinedCells needs at least one model")
+        self.models = list(models)
+        self.tables = models[0].tables
+        if any(m.tables is not self.tables for m in self.models):
+            raise ValueError("every model must share one set of tables")
+        from .heterogeneity import VoxelModel
+
+        prisms = [m for m in self.models if isinstance(m, PrismCells)]
+        boxes = [m for m in self.models if isinstance(m, VoxelModel)]
+        for p in prisms:
+            for v in boxes:
+                if v.n_active and p.contains(v.centres).any():
+                    raise ValueError("a voxel centre lies inside a prism cell: the models overlap")
+                if p.n_active and _in_active_voxels(v, p.centres).any():
+                    raise ValueError("a prism cell's centroid lies inside an active voxel: the models overlap")
+        self._starts = np.concatenate([[0], np.cumsum([m.n_active for m in self.models])]).astype(int)
+
+    @property
+    def n_active(self):
+        return int(self._starts[-1])
+
+    @property
+    def centres(self):
+        return np.concatenate([m.centres for m in self.models]) if self.n_active else np.zeros((0, 3))
+
+    def stiffness(self):
+        import scipy.sparse as sp
+
+        return sp.block_diag([m.stiffness() for m in self.models if m.n_active], format="csr")
+
+    def _locate(self, i):
+        a = int(np.searchsorted(self._starts, i, side="right") - 1)
+        return self.models[a], i - self._starts[a]
+
+    def spec(self, i):
+        model, j = self._locate(i)
+        return model.spec(j)
+
+    def source(self, engine, i):
+        return _make_source(engine, self.spec(i))
+
+    def on_faces(self, x, y, z=None, tol=None):
+        out = np.zeros(np.size(x), bool)
+        for m in self.models:
+            if m.n_active:
+                out |= m.on_faces(x, y, z) if tol is None else m.on_faces(x, y, z, tol=tol)
+        return out
+
+    def check_clearance(self, mesh, buffer=None, samples=24, contact=False):
+        for m in self.models:
+            if m.n_active:
+                m.check_clearance(mesh, buffer=buffer, samples=samples, contact=contact)
+        return True
+
+    def strain_operator(self, engine, log=None, workers=None):
+        """``Gamma``: each model's own block by its own operator, the blocks between models pair by pair."""
+        from .heterogeneity import strain_operator
+
+        live = [m for m in self.models if m.n_active]
+        own = {}
+        for k, m in enumerate(live):
+            own[(k, k)] = (m.strain_operator(engine, log=log, workers=workers) if hasattr(m, "strain_operator")
+                           else strain_operator(m, engine, log=log, workers=workers))
+        return _pairwise_gamma(live, engine, log=log, workers=workers, blocks=own)
+
+    def describe(self):
+        parts = []
+        for m in self.models:
+            if hasattr(m, "describe"):
+                parts.append(m.describe())
+            else:
+                parts.append({"kind": "voxels", "shape": list(m.shape), "n_active": m.n_active})
+        return {"kind": "combined", "n_active": self.n_active, "parts": parts}
+
+    def __repr__(self):
+        return f"<CombinedCells {self.n_active} active cells: {', '.join(repr(m) for m in self.models)}>"
+
+
+def _in_active_voxels(voxels, points):
+    """Which points lie inside an active voxel of a :class:`~slipsolve.heterogeneity.VoxelModel`."""
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    ix = np.searchsorted(voxels.x_edges, points[:, 0]) - 1
+    iy = np.searchsorted(voxels.y_edges, points[:, 1]) - 1
+    iz = np.searchsorted(voxels.z_edges, -points[:, 2]) - 1
+    nx, ny, nz = voxels.shape
+    inside = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny) & (iz >= 0) & (iz < nz)
+    out = np.zeros(points.shape[0], bool)
+    out[inside] = voxels.active[ix[inside], iy[inside], iz[inside]]
+    return out
+
+
+__all__ = ["CombinedCells", "FaultCells", "PrismCells", "PrismSource"]

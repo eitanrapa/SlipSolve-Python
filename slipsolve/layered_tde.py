@@ -418,13 +418,10 @@ class LayeredTDE:
             with pool:
                 # many contiguous chunks, handed out as workers free up: an element's cost varies a
                 # hundredfold (a long one is near every point); each returns only its own columns
-                from concurrent.futures import as_completed
-
                 count = pool.pool._max_workers if isinstance(pool, _Borrowed) else int(workers)
                 chunks = [k for k in np.array_split(np.arange(mesh.n_elements), 16 * count) if k.size]
-                futures = [pool.submit(_strain_share, k, verts[k], tris[k], x, y, z, nodal, n) for k in chunks]
-                for future in as_completed(futures):
-                    cols, part = future.result()
+                for _, (cols, part) in pool_map(pool, _strain_share,
+                                                 ((None, (k, verts[k], tris[k], x, y, z, nodal, n)) for k in chunks)):
                     k = cols.size
                     out[:, :, cols] += part[:, :, :k]
                     out[:, :, n + cols] += part[:, :, k:]
@@ -748,6 +745,40 @@ class _Borrowed:
 
     def submit(self, *args, **kwargs):
         return self.pool.submit(*args, **kwargs)
+
+
+def pool_map(pool, fn, jobs, window=None):
+    """Run ``fn(*args)`` for each ``(key, args)`` of ``jobs`` in ``pool``; yield ``(key, result)`` as each finishes.
+
+    At most ``window`` jobs (default twice the pool's workers) are pending at once, and each result is let go once
+    yielded, so memory holds a few results rather than all of them. A list of futures keeps every result alive until
+    its loop ends: the interface operator's columns twice over, and every block of a streamed ``H`` (2026-11-05).
+    """
+    from concurrent.futures import FIRST_COMPLETED, wait
+
+    inner = pool.pool if isinstance(pool, _Borrowed) else pool
+    window = int(window) if window else 2 * max(1, int(getattr(inner, "_max_workers", 4)))
+    jobs = iter(jobs)
+    pending = {}
+
+    def submit_next():
+        for key, args in jobs:
+            pending[inner.submit(fn, *args)] = key
+            return True
+        return False
+
+    for _ in range(window):
+        if not submit_next():
+            break
+    while pending:
+        done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+        for future in done:
+            key = pending.pop(future)
+            result = future.result()
+            del future
+            submit_next()
+            yield key, result
+            del result
 
 
 def engine_pool(engine, workers):

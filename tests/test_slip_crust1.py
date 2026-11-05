@@ -135,3 +135,31 @@ def test_keep_clear_returns_the_voxels_by_the_fault_to_the_reference(coarse_tabl
     off = ~vox.active
     np.testing.assert_allclose(vox.mu[off], vox.mu0[off])
     assert np.all(np.abs(vox.centres[:, 1] - y0) > 2e3)               # what is left is a voxel or more from the trace
+
+
+def test_a_dataset_in_km_any_order_is_the_grid(coarse_tables):
+    """``from_dataset``: km, km/s and g/cm^3, dims (depth, lat, lon), latitudes decreasing and 0-360 longitudes give
+    ``from_grid``'s model; Brocher's relations stand in for missing Vs and density."""
+    import xarray as xr
+
+    from slipsolve.heterogeneity import brocher_density, brocher_vs
+
+    trace, frame, mesh = _frame_and_mesh()
+    x_edges, y_edges = np.arange(-4e3, 4001.0, 2e3), np.arange(3e3, 7001.0, 2e3)
+    z_edges = np.array([0.0, 2000.0, 4000.0])
+    lon, lat = np.linspace(-80.0, -79.0, 11), np.linspace(8.0, 9.0, 11)
+    depth = np.linspace(0.0, 10e3, 21)
+    vs = np.broadcast_to(3000.0 + 0.1 * depth, (11, 11, 21)).copy()
+    vp = np.sqrt(3.0) * vs
+    rho = np.full((11, 11, 21), 2700.0)
+    want = VoxelModel.from_grid(coarse_tables, x_edges, y_edges, z_edges, lon, lat, depth, vp, vs, rho, frame, samples=6)
+    ds = xr.Dataset({k: (("depth", "latitude", "longitude"), np.transpose(v, (2, 1, 0))[:, ::-1, :] / 1e3)
+                     for k, v in (("vp", vp), ("vs", vs), ("rho", rho))},
+                    coords={"depth": depth / 1e3, "latitude": lat[::-1], "longitude": lon + 360.0})
+    got = VoxelModel.from_dataset(coarse_tables, x_edges, y_edges, z_edges, ds, frame, samples=6)
+    np.testing.assert_allclose(got.mu, want.mu, rtol=1e-12)
+    np.testing.assert_allclose(got.lam, want.lam, rtol=1e-12)
+    assert np.isclose(brocher_density(6.0), 2.7167, atol=1e-4) and np.isclose(brocher_vs(6.0), 3.5494, atol=1e-4)
+    derived = VoxelModel.from_dataset(coarse_tables, x_edges, y_edges, z_edges, ds.drop_vars(["vs", "rho"]), frame,
+                                      vs=None, rho=None, samples=6)
+    assert np.all(derived.mu > 0) and np.all(np.isfinite(derived.lam))
