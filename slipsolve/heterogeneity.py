@@ -88,7 +88,12 @@ VOXEL_FAR_TOLERANCE = 1e-3
 VOXEL_FAR_CONSTANT = 8.0
 
 #: Most (receiver, point) pairs the volume rule handles at once.
-VOXEL_FAR_BATCH = 400_000
+VOXEL_FAR_BATCH = 16_000
+
+#: Most (receiver, point) pairs the whole-table surface far path handles at once, one order at a time. It is memory
+#: bound: with six copies running, 200,000 far receivers took 2.5-2.7 s all at once with one ``bincount`` per component
+#: and 1.1-1.3 s in chunks of this (alone 1.30 and 0.76 s; bit-identical, 2026-11-05).
+WHOLE_BATCH = 8_000
 
 #: Voxels in a block of ``H`` when :class:`HeterogeneousEngine` streams it (``solver="fft"``):
 #: 17k samples x 6 x 1000 voxels is 0.8 GB a block.
@@ -501,8 +506,27 @@ class VoxelSource:
         weight = np.einsum("i,j,k->ijk", w, w, w).ravel() * self.volume
         return np.column_stack([px, py, pz]), weight
 
+    def _whole_surface(self, x, y, z):
+        """Point sources of the whole tabulated surface field at far surface receivers, ``(npts, 6, 3)``."""
+        tables = self.engine.tables
+        out = np.zeros((x.size, 6, 3))
+        orders = self._orders(x, y, z, True)
+        for order in np.unique(orders):
+            at = np.flatnonzero(orders == order)
+            points, weights = self._rule(order)
+            q = weights.size
+            for chunk in np.array_split(at, max(1, at.size * q // WHOLE_BATCH)):
+                de = x[chunk, None] - points[:, 0]
+                dn = y[chunk, None] - points[:, 1]
+                values = tables.surface_lookup(np.hypot(dn, de).ravel(), np.tile(points[:, 2], chunk.size), "whole")
+                pair = _combine(values, np.arctan2(de, dn).ravel(), self.packing)
+                out[chunk] = np.einsum("mqkc,q->mkc", pair.reshape(chunk.size, q, 6, 3), weights)
+        return out
+
     def _remainder(self, x, y, z, strain, whole):
         """The remainder's volume integral (or with ``whole``, the whole surface field's), ``(npts, 6, width)``."""
+        if whole:
+            return self._whole_surface(x, y, z)
         tables = self.engine.tables
         n = x.size
         width = 6 if strain else 3
@@ -524,10 +548,7 @@ class VoxelSource:
         de = x[rec] - points[:, 0]
         distance = np.hypot(dn, de)
         azimuth = np.arctan2(de, dn)
-        if whole:
-            pair = _combine(tables.surface_lookup(distance, points[:, 2], "whole"), azimuth,
-                            self.packing)
-        elif strain:
+        if strain:
             stencils = (tables.distance_stencil(distance), tables.depth_stencil(points[:, 2]),
                         tuple(a[rec] for a in receiver))
             pair = combine_strain(tables.gather(*stencils), tables.gather_strain(*stencils),

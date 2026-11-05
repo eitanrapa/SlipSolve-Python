@@ -74,6 +74,10 @@ STRAIN_FAR_TOLERANCE = 1e-3
 #: ~11 sizes and 2 beyond.
 TRIANGLE_FAR_CONSTANT = 300.0
 
+#: Most (receiver, point) pairs the strain remainder handles at once, one rule at a time: the far path is memory bound
+#: when many workers run it (:meth:`LayeredTDE._strain_remainder`).
+STRAIN_BATCH = 8_000
+
 #: One point (the centroid) gives each tent a third of the element with its first moment
 #: wrong: 8e-2 to 3e-1 of a tent's strain at 4-45 sizes (2026-11-05). So at least ``2 x 2``.
 TRIANGLE_FAR_MIN_ORDER = 2
@@ -559,15 +563,15 @@ class LayeredTDE:
             raise ValueError("strain needs remainder tables computed with strain=True, and has "
                              "no far path" if whole else
                              "strain needs remainder tables computed with strain=True")
+        if strain:
+            self._strain_remainder(pieces, packing, x, y, z, parent, halfspace, out)
+            return out
+        if halfspace is not None:
+            raise ValueError("halfspace is the strain far path's")
         # Receivers at the surface read the fine 2-D surface tables when there are any;
         # the 3-D table is too coarse in depth for a point source seen from the surface.
-        at_surface = (z == 0.0) & tables.has_surface & (not strain)
+        at_surface = (z == 0.0) & tables.has_surface
         receiver = tables.depth_stencil(np.where(at_surface, 0.0, z))
-        if halfspace is not None:
-            if not strain:
-                raise ValueError("halfspace is the strain far path's")
-            far, normal, slips = halfspace
-            nus = tables.poisson(np.array([mid for _, mid in pieces]))
         for piece, (tri, _) in enumerate(pieces):
             area = 0.5 * np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0]))
             size = np.sqrt(2.0 * area)
@@ -576,13 +580,7 @@ class LayeredTDE:
             # The rule exact for quadratics: the sub-triangle centroids split an element's
             # remainder among its tents with an error first order in size / distance
             # (_rule_quadratic). Displacement takes the centroids only with quadratic=False.
-            kind = np.full(n, int(bool(strain) or self.quadratic))   # 0 centroids, 1 quadratic, 2 Gauss
-            if halfspace is not None:
-                if self.far_rule == "gauss":
-                    orders = np.where(far, self._gauss_orders(tri, x, y, z), orders)
-                    kind = np.where(far, 2, kind)
-                else:
-                    orders = np.where(far, self._point_orders(tri, size, x, y, z, STRAIN_FAR_TOLERANCE), orders)
+            kind = np.full(n, int(self.quadratic))                   # 0 centroids, 1 quadratic
             rec, points, weights = [], [], []
             key = 3 * orders + kind                       # displacement: the orders alone
             for k in np.unique(key):
@@ -598,11 +596,6 @@ class LayeredTDE:
             distance = np.hypot(dn, de)
             if whole:
                 values = tables.surface_lookup(distance, points[:, 2], "whole")
-            elif strain:
-                stencils = (tables.distance_stencil(distance), tables.depth_stencil(points[:, 2]),
-                            tuple(a[rec] for a in receiver))
-                values = tables.gather(*stencils)
-                derivatives = tables.gather_strain(*stencils)
             else:
                 values = np.empty((rec.size, len(TABLE_KEYS)))
                 top = at_surface[rec]
@@ -613,15 +606,7 @@ class LayeredTDE:
                     values[deep] = tables.gather(tables.distance_stencil(distance[deep]),
                                                  tables.depth_stencil(points[deep, 2]),
                                                  tuple(a[rec[deep]] for a in receiver))
-            if strain:
-                pair = combine_strain(values, derivatives, np.arctan2(de, dn), packing)
-                if halfspace is not None:
-                    at = far[rec]
-                    if at.any():
-                        pair[at] += point_source_enu(nus[piece], normal, slips, points[at, 0], points[at, 1],
-                                                     points[at, 2], x[rec[at]], y[rec[at]], z[rec[at]])[1]
-            else:
-                pair = _combine(values, np.arctan2(de, dn), packing)
+            pair = _combine(values, np.arctan2(de, dn), packing)
             pair *= np.concatenate(weights)[:, None, None]
             if not tents:
                 for i in range(packing.shape[0]):
@@ -634,6 +619,62 @@ class LayeredTDE:
                     for c in range(width):
                         out[:, j, i, c] += np.bincount(rec, phi[:, j] * pair[:, i, c], minlength=n)
         return out
+
+    def _strain_remainder(self, pieces, packing, x, y, z, parent, halfspace, out):
+        """:meth:`_remainder` for strain, into ``out``: one rule at a time in chunks of :data:`STRAIN_BATCH` pairs.
+
+        The same pairs and weights; the sums come out the same to rounding.
+        """
+        tables = self.tables
+        n = x.size
+        ncomp = packing.shape[0]
+        receiver = tables.depth_stencil(z)
+        far = None
+        if halfspace is not None:
+            far, normal, slips = halfspace
+            nus = tables.poisson(np.array([mid for _, mid in pieces]))
+        for piece, (tri, _) in enumerate(pieces):
+            area = 0.5 * np.linalg.norm(np.cross(tri[1] - tri[0], tri[2] - tri[0]))
+            size = np.sqrt(2.0 * area)
+            orders = self._orders(tri, size, x, y, z)
+            kind = np.full(n, 1)                                     # the rule exact for quadratics
+            if far is not None:
+                if self.far_rule == "gauss":
+                    orders = np.where(far, self._gauss_orders(tri, x, y, z), orders)
+                    kind = np.where(far, 2, kind)
+                else:
+                    orders = np.where(far, self._point_orders(tri, size, x, y, z, STRAIN_FAR_TOLERANCE), orders)
+            key = 3 * orders + kind
+            for k in np.unique(key):
+                at = np.flatnonzero(key == k)
+                bary, share = _RULE_KINDS[int(k % 3)](int(k // 3))
+                pts = bary @ tri
+                weights = share * area
+                q = weights.size
+                phi = None if parent is None else _barycentric(parent, pts)
+                for chunk in np.array_split(at, max(1, at.size * q // STRAIN_BATCH)):
+                    m = chunk.size
+                    de = x[chunk, None] - pts[:, 0]
+                    dn = y[chunk, None] - pts[:, 1]
+                    pz = np.tile(pts[:, 2], m)
+                    rep = np.repeat(chunk, q)
+                    stencils = (tables.distance_stencil(np.hypot(dn, de).ravel()), tables.depth_stencil(pz),
+                                tuple(a[rep] for a in receiver))
+                    pair = combine_strain(tables.gather(*stencils), tables.gather_strain(*stencils),
+                                          np.arctan2(de, dn).ravel(), packing)
+                    if far is not None and far[chunk[0]] and far[chunk].all():
+                        pair += point_source_enu(nus[piece], normal, slips, np.tile(pts[:, 0], m), np.tile(pts[:, 1], m),
+                                                 pz, x[rep], y[rep], z[rep])[1]
+                    elif far is not None and far[chunk].any():
+                        hit = far[rep]
+                        pair[hit] += point_source_enu(nus[piece], normal, slips, np.tile(pts[:, 0], m)[hit],
+                                                      np.tile(pts[:, 1], m)[hit], pz[hit], x[rep[hit]], y[rep[hit]],
+                                                      z[rep[hit]])[1]
+                    pair = pair.reshape(m, q, ncomp, 6)
+                    if phi is None:
+                        out[chunk] += np.einsum("q,mqic->mic", weights, pair)
+                    else:
+                        out[chunk] += np.einsum("qj,mqic->mjic", weights[:, None] * phi, pair)
 
     def _gauss_orders(self, tri, x, y, z, tolerance=STRAIN_FAR_TOLERANCE):
         """Points a side of :func:`_rule_gauss` for far receivers: the least ``n`` with
