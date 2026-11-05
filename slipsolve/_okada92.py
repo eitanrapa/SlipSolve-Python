@@ -327,10 +327,10 @@ def point_source_enu(nu, normal, slips, px, py, pz, x, y, z):
     alpha = 1.0 / (2.0 * (1.0 - float(nu)))
     unit = point_source_unit(alpha, de * x_ok[0] + dn * x_ok[1], de * y_ok[0] + dn * y_ok[1], z, -pz,
                              sin_dip, cos_dip)                        # (3, n, 12)
-    u = np.einsum("ks,snc->nkc", coeff, unit)                         # (n, k, 12)
+    u = np.moveaxis(np.tensordot(unit, coeff, axes=([0], [1])), -1, 1)   # (n, k, 12)
     disp = u[..., :3] @ frame                                         # u_enu = R^T u_ok
     grad_ok = np.stack([u[..., 3:6], u[..., 6:9], u[..., 9:12]], axis=-1)   # [i, j] = d u_i / d x_j
-    grad = np.einsum("ia,nkij,jb->nkab", frame, grad_ok, frame)        # R^T G R
+    grad = frame.T @ grad_ok @ frame        # R^T G R; a three-operand einsum took 3x as long (2026-11-05)
     strain = 0.5 * (grad + np.swapaxes(grad, -1, -2))
     i, j = (0, 1, 2, 0, 0, 1), (0, 1, 2, 1, 2, 2)
     return disp, strain[..., i, j]

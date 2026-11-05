@@ -62,9 +62,16 @@ from .layered import _QUADRATURE_CONSTANT, _QUADRATURE_SAFETY
 from .layered_tde import (STRAIN_TENT_GAIN, STRAIN_TENT_MIN_POINTS, _combine,
                           _gauss01, combine_strain, tensor_packing, tent_levelset)
 
-#: Surface receivers farther than this many voxel sizes take point sources of the whole
-#: tabulated surface field, as :data:`~slipsolve.layered_tde.FAR` does for elements.
-FAR_VOXEL = 4.0
+#: Surface receivers farther than this many voxel sizes (box distance) take point sources of
+#: the whole tabulated surface field, as :data:`~slipsolve.layered_tde.FAR` does for elements.
+#: Was 4 until 2026-11-05: on the Venezuela CRUST1.0 grid (32,577 voxels, 4 km, 17,034
+#: samples) the 1% of pairs inside 4 sizes took 96% of ``H`` (the faces, 2.5 ms a pair against
+#: 0.04 ms for 64 point sources). Measured the same day against a 10-point rule and the faces,
+#: surface and buried cubes and a 2 x 2 x 1.5 km surface voxel: 4 points an axis are 3-4e-4 off
+#: the 10-point rule from 1.5 sizes out and 0.6-1e-3 off the faces at 1.5-4 sizes, as the
+#: 3-point rule already was at 4-6 sizes (the tables' own interpolation, ~1e-4-5e-4, is the
+#: floor of every point rule).
+FAR_VOXEL = 2.0
 
 #: Receivers farther than this many voxel sizes (box distance) take the voxel's STRAIN from a
 #: Gauss-Legendre volume rule of point moments: Okada (1992) point sources in the voxel's own
@@ -142,13 +149,16 @@ def _cells(v, start, step, n, tol):
     inside = (v >= start - tol) & (v <= start + n * step + tol)
     return np.clip(lo, 0, n - 1), np.clip(hi, 0, n - 1), inside
 
-#: The far path's points per axis by distance from the voxel's centre, in voxel sizes: three
-#: inside the first, two inside the second, one beyond. A tensor Gauss-Legendre rule on a cube
-#: converges far faster than the triangle rule the near path borrows. Measured (2026-11-04,
-#: whole surface table, surface and 3-4 km voxels, against 8 points an axis): one point
-#: 9e-3-2.1e-2 at 4 sizes, 3.2-3.6e-3 at 10, 9e-4 at 20; two points 1.2-4.7e-4 at 4-10 sizes;
-#: three 8e-5-2e-4. The triangle rule asked for six an axis at 4 sizes.
-FAR_ORDER_SIZES = (6.0, 15.0)
+#: The far path's points per axis by distance from the voxel's centre, in voxel sizes (the
+#: longest side for a flat or long one): four inside the first, three inside the second, two
+#: inside the third, one beyond. A tensor Gauss-Legendre rule on a cube converges far faster
+#: than the triangle rule the near path borrows. Measured (2026-11-04, whole surface table,
+#: surface and 3-4 km voxels, against 8 points an axis): one point 9e-3-2.1e-2 at 4 sizes,
+#: 3.2-3.6e-3 at 10, 9e-4 at 20; two points 1.2-4.7e-4 at 4-10 sizes; three 8e-5-2e-4. The
+#: triangle rule asked for six an axis at 4 sizes. The four-point band came with
+#: :data:`FAR_VOXEL` 2 (2026-11-05, against 10 points: at a gap of 1.5-2 sizes two points
+#: 5-7e-3, three and four 4e-4; at 2-3 sizes four 3-4e-4).
+FAR_ORDER_SIZES = (4.0, 6.0, 15.0)
 
 #: The faces' tent rule, displacement and strain alike: the strain tents' (gain 4, at least
 #: 3 points). With the displacement tents' (gain 2, at least 2), a voxel's displacement
@@ -466,8 +476,8 @@ class VoxelSource:
                            + (z - self.centre[2]) ** 2)
         if whole:
             # in the longest side, so a flat or long cell is not under-integrated (a cube's side is its size)
-            near, middle = (f * max(self.size, float(np.max(self.hi - self.lo))) for f in FAR_ORDER_SIZES)
-            return np.where(distance < near, 3, np.where(distance < middle, 2, 1)).astype(int)
+            bands = np.array(FAR_ORDER_SIZES) * max(self.size, float(np.max(self.hi - self.lo)))
+            return (1 + np.searchsorted(-bands[::-1], -distance, side="left")).astype(int)
         scale = distance
         if not whole:
             z_c, z_r = -self.centre[2], -z
@@ -1072,19 +1082,63 @@ def _voxel_task(bounds, x, y, z, strain):
     return VoxelSource(worker_engine(), *bounds)._field(x, y, z, strain)
 
 
-def _los_share(specs, x, y, z, look):
-    """A pool worker's columns of :func:`los_operator` for the cells ``specs`` (:func:`_make_source`)."""
-    from .layered_tde import worker_engine
+#: Most receivers in one call of a reference voxel's field when :func:`_los_columns` evaluates
+#: translated voxels together (npts x the voxels batched).
+TRANSLATED_RECEIVERS = 200_000
 
-    engine = worker_engine()
+
+def _box_key(bounds):
+    """Boxes equal up to a lateral translation share this key (their widths to 1e-6 m and their depths)."""
+    (x0, x1), (y0, y1), (d0, d1) = bounds
+    return round(x1 - x0, 6), round(y1 - y0, 6), float(d0), float(d1)
+
+
+def _los_columns(engine, specs, x, y, z, look):
+    """:func:`los_operator`'s columns for the cells ``specs``, ``(npts, 6 n)`` (or ``(npts, 3, 6 n)`` without ``look``).
+
+    Boxes that are translates of one another (a regular grid's depth row) are evaluated as ONE
+    reference voxel at receivers moved by each box's offset, many boxes in one call: the field
+    of a voxel in a laterally uniform reference depends only on the receiver's position relative
+    to it. The near path's cost is set per call by its closest receivers (the face tents' point
+    groups), not by how many it serves, so one voxel at a time paid it once a voxel: on the
+    Venezuela CRUST1.0 grid a shallow voxel cost 0.33 s with 13 near samples and 0.38 s with 46
+    (2026-11-05). Other cells (prisms) are evaluated one by one.
+    """
     out = np.zeros((x.size, 6 * len(specs)) if look is not None else (x.size, 3, 6 * len(specs)))
-    for i, spec in enumerate(specs):
-        u = _make_source(engine, spec).displacement(x, y, z)       # (npts, 6, 3)
+
+    def put(i, u):                                                  # u (npts, 6, 3)
         if look is not None:
             out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
         else:
             out[:, :, 6 * i:6 * i + 6] = np.moveaxis(u, 2, 1)
+
+    groups = {}
+    for i, spec in enumerate(specs):
+        if spec[0] == "box":
+            groups.setdefault(_box_key(spec[1]), []).append(i)
+        else:
+            put(i, _make_source(engine, spec).displacement(x, y, z))
+    per_call = max(1, TRANSLATED_RECEIVERS // max(1, x.size))
+    for members in groups.values():
+        reference = specs[members[0]][1]
+        source = VoxelSource(engine, *reference)
+        for start in range(0, len(members), per_call):
+            batch = members[start:start + per_call]
+            shift_x = np.array([specs[i][1][0][0] - reference[0][0] for i in batch])
+            shift_y = np.array([specs[i][1][1][0] - reference[1][0] for i in batch])
+            u = source.displacement((x[None, :] - shift_x[:, None]).ravel(), (y[None, :] - shift_y[:, None]).ravel(),
+                                    np.tile(z, len(batch)))
+            u = u.reshape(len(batch), x.size, 6, 3)
+            for j, i in enumerate(batch):
+                put(i, u[j])
     return out
+
+
+def _los_share(specs, x, y, z, look):
+    """A pool worker's columns of :func:`los_operator` for the cells ``specs`` (:func:`_make_source`)."""
+    from .layered_tde import worker_engine
+
+    return _los_columns(worker_engine(), specs, x, y, z, look)
 
 
 def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
@@ -1116,12 +1170,8 @@ def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
             for k, cols_field in pool_map(pool, _los_share, jobs):
                 share = shares[k]
                 out[..., 6 * share[0]:6 * (share[-1] + 1)] = cols_field
-    for i in range(n if pool is None else 0):
-        u = _make_source(engine, voxels.spec(voxel_ids[i])).displacement(x, y, z)   # (npts, 6, 3)
-        if look is not None:
-            out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
-        else:
-            out[:, :, 6 * i:6 * i + 6] = np.moveaxis(u, 2, 1)
+    else:
+        out[...] = _los_columns(engine, [voxels.spec(i) for i in voxel_ids], x, y, z, look)
     bad = ~np.isfinite(out.reshape(x.size, -1)).all(axis=1)
     if bad.any():
         raise ValueError(f"{int(bad.sum())} point(s) got a non-finite voxel field, indices "

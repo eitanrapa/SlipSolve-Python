@@ -117,7 +117,9 @@ def test_the_fft_engine_is_the_dense_engine(coarse_tables, tmp_path):
 
 
 def test_a_subset_of_the_surface_operator_is_its_columns(coarse_tables):
-    """``los_operator(subset=)`` gives exactly those voxels' columns of the whole operator."""
+    """``los_operator(subset=)`` gives those voxels' columns of the whole operator, to rounding: since 2026-11-05 a
+    row's voxels go through one reference voxel at shifted receivers, and which voxel is the reference, and how many
+    receivers share a call, depend on the voxels asked for."""
     from slipsolve.heterogeneity import los_operator
 
     engine = LayeredTDE(coarse_tables)
@@ -128,4 +130,6 @@ def test_a_subset_of_the_surface_operator_is_its_columns(coarse_tables):
     whole = los_operator(vox, engine, x, y, look)
     subset = np.array([2, 5, 6, 20, 41])
     cols = (6 * subset[:, None] + np.arange(6)).ravel()
-    np.testing.assert_array_equal(los_operator(vox, engine, x, y, look, subset=subset), whole[:, cols])
+    want = whole[:, cols]
+    np.testing.assert_allclose(los_operator(vox, engine, x, y, look, subset=subset), want, rtol=1e-12,
+                               atol=1e-12 * np.abs(want).max())

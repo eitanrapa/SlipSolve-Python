@@ -306,14 +306,16 @@ def test_a_voxel_is_its_point_moments(uniform_tables):
 
 
 def test_far_surface_receivers_take_point_sources_of_the_same_field(uniform_tables):
-    """A surface voxel seen from 4.5-12 sizes: the whole-table point sources against its faces."""
+    """A surface voxel seen from 2.1-12 sizes: the whole-table point sources against its faces (the four-point band
+    inside 4 sizes from the centre, three inside 6, two inside 15)."""
     engine = LayeredTDE(uniform_tables)
     near = VoxelSource(engine, (0.0, 1000.0), (0.0, 1000.0), (0.0, 1000.0), far=None)
     far = VoxelSource(engine, (0.0, 1000.0), (0.0, 1000.0), (0.0, 1000.0))
     angle = np.linspace(0.0, 2 * np.pi, 7)[:-1]
-    reach = np.repeat([5.0, 8.0, 12.0], angle.size) * 1e3
-    x = 500.0 + reach * np.cos(np.tile(angle, 3))
-    y = 500.0 + reach * np.sin(np.tile(angle, 3))
+    radii = [2.8, 3.4, 4.2, 5.0, 8.0, 12.0]
+    reach = np.repeat(radii, angle.size) * 1e3
+    x = 500.0 + reach * np.cos(np.tile(angle, len(radii)))
+    y = 500.0 + reach * np.sin(np.tile(angle, len(radii)))
     z = np.zeros(x.size)
     assert far._far(x, y, z).all()
     a, b = near.displacement(x, y, z), far.displacement(x, y, z)
