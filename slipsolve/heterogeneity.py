@@ -696,9 +696,17 @@ class HeterogeneousEngine:
         return self._gamma
 
     def system(self):
-        """``I + Gamma D``, the strain equation's matrix (dense)."""
+        """``I + Gamma D``, the strain equation's matrix (dense, Fortran-ordered).
+
+        One dense array beside ``Gamma``: the product's transpose is a Fortran-ordered view,
+        the identity goes onto its diagonal in place, and :func:`scipy.linalg.lu_factor`
+        overwrites it without a copy. Building ``np.eye(n) + Gamma D`` instead held four
+        such arrays at once (77 GB at 49,000 unknowns, 2026-11-04); the values are the same.
+        """
         d = self.voxels.stiffness()
-        return np.eye(6 * self.voxels.n_active) + (d.T @ self.gamma.T).T
+        a = (d.T @ self.gamma.T).T
+        a[np.diag_indices_from(a)] += 1.0
+        return a
 
     def _factor(self):
         if self._lu is None:
