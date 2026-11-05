@@ -620,6 +620,38 @@ class _HalfSpaceKernel:
         return np.column_stack(tde_disp_hs(x, y, z, *vertices, *slip, self.nu))
 
 
+def _fbar_columns(kernel, vertices, cx, cy, cz, offset, frames):
+    """``fbar``'s columns for the interface elements ``vertices`` ``(k, 3, 3)``: ``(3 N, 3 k)``."""
+    out = np.empty((3 * cx.size, 3 * len(vertices)))
+    for i, v in enumerate(vertices):
+        mean = kernel.element_field(v, cx, cy, cz, offset=offset)
+        for comp in range(3):
+            out[:, 3 * i + comp] = np.einsum("eki,ei->ek", frames, mean[:, comp]).ravel()
+    return out
+
+
+def _fbar_task(vertices, cx, cy, cz, offset, frames):
+    from .layered_tde import worker_engine
+
+    return _fbar_columns(worker_engine(), vertices, cx, cy, cz, offset, frames)
+
+
+def _response_task(vertices, x, y, z, look):
+    """A worker's block of :meth:`InterfaceSolve.response_matrix` for the elements ``vertices``."""
+    from .layered_tde import worker_engine
+
+    kernel = worker_engine()
+    out = np.empty((x.size, 3, 3 * len(vertices)) if look is None else (x.size, 3 * len(vertices)))
+    for k, v in enumerate(vertices):
+        f = kernel.element_field(v, x, y, z)
+        for comp in range(3):
+            if look is None:
+                out[:, :, 3 * k + comp] = f[:, comp]
+            else:
+                out[:, 3 * k + comp] = f[:, comp, 0] * look[0] + f[:, comp, 1] * look[1] + f[:, comp, 2] * look[2]
+    return out
+
+
 class InterfaceSolve:
     """The exact bimaterial field of one fault mesh: its interface, and the discontinuity on it.
 
@@ -641,9 +673,12 @@ class InterfaceSolve:
     """
 
     def __init__(self, mesh, contrast, nu=0.25, extend=None, growth=GROWTH, first=FIRST,
-                 kernel=None, fbar=None):
+                 kernel=None, fbar=None, workers=None):
         self.mesh, self.contrast, self.nu = mesh, contrast, float(nu)
         self.kernel = kernel if kernel is not None else _HalfSpaceKernel(nu)
+        #: Processes for the assembly and :meth:`response_matrix` with a layered kernel
+        #: (:func:`~slipsolve.layered_tde.engine_pool`); None or 1 runs here.
+        self.workers = workers
         self.extend = {**EXTEND, **(extend or {})}
         self.growth = float(growth)
         self.first = float(first)
@@ -922,16 +957,33 @@ class InterfaceSolve:
         return new
 
     # -- the system ---------------------------------------------------------------
+    def _pool(self):
+        """A worker pool for a layered kernel (``workers`` > 1), else None."""
+        if not self.workers or int(self.workers) < 2 or not hasattr(self.kernel, "tables"):
+            return None
+        from .layered_tde import engine_pool
+
+        return engine_pool(self.kernel, self.workers)
+
     def _assemble(self):
         n = self.n_elements
         offset = AVERAGE_OFFSET * np.sqrt(self.areas)[:, None] * self.normals
         cx, cy, cz = self.centroids.T
         fbar = np.empty((3 * n, 3 * n))
-        for j in range(n):
-            mean = self.kernel.element_field(self.vertices[j], cx, cy, cz, offset=offset)
-            for comp in range(3):
-                fbar[:, 3 * j + comp] = np.einsum("eki,ei->ek", self.frames,
-                                                  mean[:, comp]).ravel()
+        pool = self._pool()
+        if pool is None:
+            for j in range(n):
+                fbar[:, 3 * j: 3 * j + 3] = _fbar_columns(self.kernel, self.vertices[j:j + 1], cx, cy, cz, offset,
+                                                          self.frames)
+        else:
+            from concurrent.futures import as_completed
+
+            chunks = [c for c in np.array_split(np.arange(n), max(1, 16 * int(self.workers))) if c.size]
+            with pool:
+                futures = {pool.submit(_fbar_task, self.vertices[c], cx, cy, cz, offset, self.frames): c for c in chunks}
+                for future in as_completed(futures):
+                    c = futures[future]
+                    fbar[:, 3 * c[0]: 3 * (c[-1] + 1)] = future.result()
         self.fbar = fbar
         self._factor()
 
@@ -981,7 +1033,7 @@ class InterfaceSolve:
                                                 + f[:, comp, 2] * look[2])
             yield start, stop, out
 
-    def response_matrix(self, x, y, z=None, look=None, block=64):
+    def response_matrix(self, x, y, z=None, look=None, block=64, workers=None):
         """The reference field of unit ``D`` on every element, ``(npts, 3 N)`` with ``look``.
 
         Without ``look``, east/north/up: ``(npts, 3, 3 N)``. It does not depend on the
@@ -994,8 +1046,24 @@ class InterfaceSolve:
         x_ = np.asarray(x, dtype=float).ravel()
         shape = (x_.size, 3 * self.n_elements) if look is not None else (x_.size, 3, 3 * self.n_elements)
         out = np.empty(shape)
-        for start, stop, cols in self._responses(x, y, z, look, block):
-            out[..., 3 * start: 3 * stop] = cols
+        if workers is None:
+            workers = self.workers
+        saved, self.workers = self.workers, workers
+        pool = self._pool()
+        self.workers = saved
+        if pool is None:
+            for start, stop, cols in self._responses(x, y, z, look, block):
+                out[..., 3 * start: 3 * stop] = cols
+            return out
+        from concurrent.futures import as_completed
+
+        px, py, pz = _as_points(x, y, z)
+        chunks = [c for c in np.array_split(np.arange(self.n_elements), max(1, 16 * int(workers))) if c.size]
+        with pool:
+            futures = {pool.submit(_response_task, self.vertices[c], px, py, pz, look): c for c in chunks}
+            for future in as_completed(futures):
+                c = futures[future]
+                out[..., 3 * c[0]: 3 * (c[-1] + 1)] = future.result()
         return out
 
     def los(self, x, y, z=None, look=None, block=64):

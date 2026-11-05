@@ -610,3 +610,26 @@ def test_the_bootstrap_gives_the_ratio_an_interval(setup):
     assert pinned.best[1] == 1.6
     with pytest.warns(UserWarning, match="edge of its grid"):
         narrow.bootstrap(pinned, draws=3, seed=0, compare=False)
+
+
+def test_the_exact_interface_assembles_the_same_in_worker_processes(setup, tmp_path):
+    """``InterfaceSolve(workers=2)``: Fbar and the response matrix equal the serial ones (layered kernel, depth break)."""
+    from slipsolve.bimaterial import InterfaceSolve
+
+    trace, frame, mesh, obs = setup
+    one = VelocityModel.uniform(vp=6000.0, vs=3464.1016, rho=2700.0)
+    tops, _, _ = wn.layer_stack(one)
+    z = wn.depth_grid(tops, z_max=80e3, first=50.0, growth=2.0, spacing=2000.0, deep_spacing=8000.0)
+    tables = wn.RemainderTables.compute(one, z=z, r=wn.distance_grid(per_decade=5), n_k=256,
+                                        surface_z=z, surface_r=wn.distance_grid(per_decade=5))
+    kernel = LayeredTDE(wn.RemainderTables.load(tables.save(tmp_path / "one.npz")), far=None)
+    contrast = RigidityContrast(trace, side="north", ratio=[[2.0, 1.2]], frame=frame, depth_breaks=(6e3,))
+    reach = dict(depth=1.0, strike=1.0, cross=1.0)
+    serial = InterfaceSolve(mesh, contrast, kernel=kernel, extend=reach)
+    pooled = InterfaceSolve(mesh, contrast, kernel=kernel, extend=reach, workers=2)
+    np.testing.assert_allclose(pooled.fbar, serial.fbar, rtol=0, atol=1e-12 * np.abs(serial.fbar).max())
+    x, y, le, ln, lu = _points(obs)
+    a = serial.response_matrix(x[:40], y[:40], look=(le[:40], ln[:40], lu[:40]))
+    b = pooled.response_matrix(x[:40], y[:40], look=(le[:40], ln[:40], lu[:40]))
+    np.testing.assert_allclose(b, a, rtol=0, atol=1e-12 * np.abs(a).max())
+    assert pooled.with_contrast(contrast.with_ratio([[1.5, 1.5]])).workers == 2

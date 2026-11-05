@@ -724,6 +724,13 @@ class VoxelModel:
     def n_active(self):
         return int(self.index.shape[0])
 
+    def spec(self, i):
+        """Active voxel ``i``'s picklable description, for :func:`_make_source`."""
+        return ("box", self.bounds(i))
+
+    def source(self, engine, i):
+        return VoxelSource(engine, *self.bounds(i))
+
     def bounds(self, i):
         """``(x, y, depth)`` ranges of active voxel ``i``."""
         ix, iy, iz = self.index[i]
@@ -966,6 +973,25 @@ def strain_operator(voxels, engine, log=None, workers=None):
     return out
 
 
+def _make_source(engine, spec):
+    """A cell's source from its picklable ``spec``: ``("box", bounds)`` or ``("prism", inner, outer)``."""
+    kind = spec[0]
+    if kind == "box":
+        return VoxelSource(engine, *spec[1])
+    if kind == "prism":
+        from .fault_cells import PrismSource
+
+        return PrismSource(engine, spec[1], spec[2])
+    raise ValueError(f"unknown cell kind {kind!r}")
+
+
+def _spec_task(spec, x, y, z, strain):
+    """A pool worker's field of the cell ``spec`` at the points, ``(npts, 6, 3 or 6)``."""
+    from .layered_tde import worker_engine
+
+    return _make_source(worker_engine(), spec)._field(x, y, z, strain)
+
+
 def _voxel_task(bounds, x, y, z, strain):
     """A pool worker's :class:`VoxelSource` field: the voxel ``bounds`` at the points, ``(npts, 6, 3 or 6)``."""
     from .layered_tde import worker_engine
@@ -973,14 +999,14 @@ def _voxel_task(bounds, x, y, z, strain):
     return VoxelSource(worker_engine(), *bounds)._field(x, y, z, strain)
 
 
-def _los_share(bounds, x, y, z, look):
-    """A pool worker's columns of :func:`los_operator` for the voxels ``bounds``."""
+def _los_share(specs, x, y, z, look):
+    """A pool worker's columns of :func:`los_operator` for the cells ``specs`` (:func:`_make_source`)."""
     from .layered_tde import worker_engine
 
     engine = worker_engine()
-    out = np.zeros((x.size, 6 * len(bounds)) if look is not None else (x.size, 3, 6 * len(bounds)))
-    for i, b in enumerate(bounds):
-        u = VoxelSource(engine, *b).displacement(x, y, z)          # (npts, 6, 3)
+    out = np.zeros((x.size, 6 * len(specs)) if look is not None else (x.size, 3, 6 * len(specs)))
+    for i, spec in enumerate(specs):
+        u = _make_source(engine, spec).displacement(x, y, z)       # (npts, 6, 3)
         if look is not None:
             out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
         else:
@@ -1011,13 +1037,13 @@ def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
         count = pool.pool._max_workers if hasattr(pool, "pool") else int(workers)
         shares = [s for s in np.array_split(np.arange(n), 4 * count) if s.size]
         with pool:
-            futures = [pool.submit(_los_share, [voxels.bounds(i) for i in voxel_ids[share]], x, y, z, look)
+            futures = [pool.submit(_los_share, [voxels.spec(i) for i in voxel_ids[share]], x, y, z, look)
                        for share in shares]
             for share, future in zip(shares, futures):
                 cols = slice(6 * share[0], 6 * (share[-1] + 1))
                 out[..., cols] = future.result()
     for i in range(n if pool is None else 0):
-        u = VoxelSource(engine, *voxels.bounds(voxel_ids[i])).displacement(x, y, z)   # (npts, 6, 3)
+        u = _make_source(engine, voxels.spec(voxel_ids[i])).displacement(x, y, z)   # (npts, 6, 3)
         if look is not None:
             out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
         else:
@@ -1084,6 +1110,8 @@ class HeterogeneousEngine:
             raise ValueError(f"order must be 'full' or 'born1', got {order!r}")
         if solver not in ("dense", "fft"):
             raise ValueError(f"solver must be 'dense' or 'fft', got {solver!r}")
+        if solver == "fft" and not isinstance(voxels, VoxelModel):
+            raise ValueError("solver='fft' needs a regular VoxelModel; fault cells are solved densely")
         self.solver = solver
         #: Voxels a block of ``H`` holds when ``solver="fft"`` streams it.
         self.h_chunk = int(h_chunk)
@@ -1133,8 +1161,10 @@ class HeterogeneousEngine:
     def gamma(self):
         if self._gamma is None:
             n = self.voxels.n_active
-            self._gamma = self._timed(f"Gamma: {6 * n} x {6 * n}",
-                                      lambda: strain_operator(self.voxels, self.base, workers=self._workers()))
+            build = (lambda: self.voxels.strain_operator(self.base, workers=self._workers())) \
+                if hasattr(self.voxels, "strain_operator") else \
+                (lambda: strain_operator(self.voxels, self.base, workers=self._workers()))
+            self._gamma = self._timed(f"Gamma: {6 * n} x {6 * n}", build)
         return self._gamma
 
     def system(self):
@@ -1229,7 +1259,7 @@ class HeterogeneousEngine:
             from concurrent.futures import as_completed
 
             with pool:
-                futures = {pool.submit(_los_share, [self.voxels.bounds(i) for i in chunk], px, py, pz, lk): chunk
+                futures = {pool.submit(_los_share, [self.voxels.spec(i) for i in chunk], px, py, pz, lk): chunk
                            for chunk in chunks}
                 for future in as_completed(futures):
                     h = future.result()
@@ -1275,6 +1305,9 @@ class HeterogeneousEngine:
     def describe(self):
         """A JSON-able record for a saved model's options (the tables and voxels are not saved)."""
         v = self.voxels
+        if hasattr(v, "describe"):
+            return {"kind": "heterogeneous", "engine": self.base.name, "order": self.order, "solver": self.solver,
+                    "cells": v.describe()}
         return {"kind": "heterogeneous", "engine": self.base.name, "order": self.order, "solver": self.solver,
                 "voxels": {"shape": list(v.shape), "n_active": v.n_active,
                            "x_edges": v.x_edges.tolist(), "y_edges": v.y_edges.tolist(),
@@ -1286,5 +1319,6 @@ class HeterogeneousEngine:
 
 
 __all__ = ["Box", "HeterogeneousEngine", "Prism", "VoxelSource", "VoxelModel", "strain_operator", "los_operator",
+           "moment_sources",
            "stiffness_block", "unit_moments", "to_voigt", "from_voigt", "compliance", "FAR_VOXEL",
            "STRAIN_COMPONENTS"]
