@@ -804,6 +804,11 @@ class RemainderTables:
             extra["strain"] = self.strain
         np.savez_compressed(path, r=self.r, z=self.z, values=self.values, tops=self.tops,
                             lam=self.lam, mu=self.mu, attrs=json.dumps(self.attrs), **extra)
+        if not path.suffix:
+            path = path.with_suffix(".npz")
+        #: The file the tables were saved to or loaded from: where pool workers load their own copy
+        #: (:func:`~slipsolve.layered_tde.engine_pool`).
+        self.path = path
         return path
 
     @classmethod
@@ -813,8 +818,10 @@ class RemainderTables:
             surface = ({k: f[f"surface_{k}"] for k in ("r", "z", "whole", "remainder")}
                        if "surface_whole" in f.files else None)
             strain = f["strain"] if "strain" in f.files else None
-            return cls(f["r"], f["z"], f["values"], f["tops"], f["lam"], f["mu"],
-                       attrs=json.loads(str(f["attrs"])), surface=surface, strain=strain)
+            out = cls(f["r"], f["z"], f["values"], f["tops"], f["lam"], f["mu"],
+                      attrs=json.loads(str(f["attrs"])), surface=surface, strain=strain)
+        out.path = Path(path).expanduser().resolve()
+        return out
 
     def __repr__(self):
         return (f"<RemainderTables {len(self.tops)} layers, nr={self.r.size} "

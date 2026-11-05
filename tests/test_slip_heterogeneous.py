@@ -494,3 +494,85 @@ def test_points_on_voxel_faces_are_found_and_refused(uniform_tables):
     np.testing.assert_array_equal(vox.on_faces(*pts.T), [c[1] for c in cases])
     with pytest.raises(ValueError, match="lie on voxel faces"):
         los_operator(vox, LayeredTDE(uniform_tables), [1000.0, 9000.0], [1500.0, 9000.0])
+
+
+def test_voxels_may_end_on_the_fault_with_contact_but_not_straddle_it(uniform_tables):
+    """``check_clearance(contact=True)``: voxels on one side of a planar fault, a face on its plane, pass; voxels the
+    fault runs through are refused; without ``contact`` the first are refused too (they lie within a voxel of it)."""
+    from slipsolve import FaultMesh, FaultTrace
+
+    trace = FaultTrace.from_lonlat(np.array([-80.05, -79.95]), np.array([8.0, 8.0]))
+    frame = trace.local_frame()
+    mesh = FaultMesh.vertical(trace, frame, max_depth=6e3, edge_length=2e3)
+    tx, ty = (np.asarray(v) for v in trace.to_local(frame))
+    y0 = float(np.mean(ty))                                       # the fault's plane, y = const in this frame
+
+    def model(y_lo):
+        lam0, mu0 = float(uniform_tables.lam[0]), float(uniform_tables.mu[0])
+        return VoxelModel(uniform_tables, np.linspace(-3000.0, 3000.0, 4), [y_lo, y_lo + 1000.0], [0.0, 1000.0, 2000.0],
+                          lam=np.full((3, 1, 2), 0.5 * lam0), mu=np.full((3, 1, 2), 0.5 * mu0))
+
+    assert abs(ty.max() - ty.min()) < 1e-6
+    ends_on_it = model(y0)
+    assert ends_on_it.check_clearance(mesh, contact=True)
+    with pytest.raises(ValueError, match="within"):
+        ends_on_it.check_clearance(mesh)
+    with pytest.raises(ValueError, match="passes through"):
+        model(y0 - 500.0).check_clearance(mesh, contact=True)
+
+
+def test_workers_give_the_serial_operators(uniform_tables, tmp_path):
+    """``workers`` > 1: processes that each load the tables from their file give the serial E, H and Gamma to rounding."""
+    from slipsolve import FaultMesh, FaultTrace
+    from slipsolve import wavenumber as wn
+    from slipsolve.basis import make_basis
+    from slipsolve.heterogeneity import los_operator, strain_operator
+
+    tables = wn.RemainderTables.load(uniform_tables.save(tmp_path / "uniform.npz"))
+    engine = LayeredTDE(tables)
+    trace = FaultTrace.from_lonlat(np.array([-80.05, -79.95]), np.array([8.0, 8.0]))
+    frame = trace.local_frame()
+    mesh = FaultMesh.vertical(trace, frame, max_depth=6e3, edge_length=2e3)
+    _, ty = (np.asarray(v) for v in trace.to_local(frame))
+    y0 = float(np.mean(ty))
+    lam0, mu0 = float(tables.lam[0]), float(tables.mu[0])
+    vox = VoxelModel(tables, [-4000.0, -2000.0, 0.0, 2000.0], [y0 + 3000.0, y0 + 5000.0], [0.0, 2000.0, 4000.0],
+                     lam=np.full((3, 1, 2), 0.5 * lam0), mu=np.full((3, 1, 2), 0.5 * mu0))
+    c = vox.centres
+    for basis in (None, make_basis(mesh, "node")):
+        serial = engine.strain(mesh, c[:, 0], c[:, 1], c[:, 2], basis=basis)
+        pooled = engine.strain(mesh, c[:, 0], c[:, 1], c[:, 2], basis=basis, workers=2)
+        np.testing.assert_allclose(pooled, serial, rtol=1e-12, atol=1e-12 * np.abs(serial).max())
+    rng = np.random.default_rng(4)
+    x, y = rng.uniform(-9e3, 9e3, 30), y0 + rng.uniform(-9e3, 9e3, 30)
+    look = (np.full(30, 0.6), np.full(30, -0.1), np.full(30, 0.79))
+    np.testing.assert_allclose(los_operator(vox, engine, x, y, look, workers=2), los_operator(vox, engine, x, y, look),
+                               rtol=1e-12, atol=0)
+    serial = strain_operator(vox, engine)
+    np.testing.assert_allclose(strain_operator(vox, engine, workers=2), serial, rtol=1e-12, atol=1e-12 * np.abs(serial).max())
+
+
+def test_one_pool_serves_the_engine_operators(uniform_tables, tmp_path):
+    """``HeterogeneousEngine(workers=2)``: one pool for H, E and Gamma, the serial engine's G to rounding."""
+    from slipsolve import FaultMesh, FaultTrace
+    from slipsolve import wavenumber as wn
+
+    tables = wn.RemainderTables.load(uniform_tables.save(tmp_path / "uniform.npz"))
+    base = LayeredTDE(tables)
+    trace = FaultTrace.from_lonlat(np.array([-80.05, -79.95]), np.array([8.0, 8.0]))
+    frame = trace.local_frame()
+    mesh = FaultMesh.vertical(trace, frame, max_depth=6e3, edge_length=2e3)
+    _, ty = (np.asarray(v) for v in trace.to_local(frame))
+    y0 = float(np.mean(ty))
+    lam0, mu0 = float(tables.lam[0]), float(tables.mu[0])
+    vox = VoxelModel(tables, [-4000.0, -2000.0, 0.0, 2000.0], [y0 + 3000.0, y0 + 5000.0], [0.0, 2000.0, 4000.0],
+                     lam=np.full((3, 1, 2), 0.5 * lam0), mu=np.full((3, 1, 2), 0.5 * mu0))
+    rng = np.random.default_rng(5)
+    x, y = rng.uniform(-9e3, 9e3, 25), y0 + rng.uniform(-9e3, 9e3, 25)
+    look = (np.full(25, 0.6), np.full(25, -0.1), np.full(25, 0.79))
+    serial = HeterogeneousEngine(base, vox).los_matrix(mesh, x, y, *look)
+    pooled_engine = HeterogeneousEngine(base, vox, workers=2)
+    pooled = pooled_engine.los_matrix(mesh, x, y, *look)
+    assert pooled_engine._pool is not None
+    pooled_engine.close()
+    np.testing.assert_allclose(pooled, serial, rtol=1e-12, atol=1e-12 * np.abs(serial).max())

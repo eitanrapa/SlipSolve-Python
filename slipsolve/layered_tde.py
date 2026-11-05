@@ -373,7 +373,7 @@ class LayeredTDE:
                       self.tables.poisson)
 
     # -- strain at depth: the heterogeneous engine's E ------------------------------
-    def strain(self, mesh, x, y, z, basis=None):
+    def strain(self, mesh, x, y, z, basis=None, workers=None):
         """Strain per unit slip at points, ``(npts, 6, 2 * n_parameters)``.
 
         Components as :data:`~slipsolve._tde.STRAIN_COMPONENTS` (east, north, up; tensor
@@ -382,10 +382,27 @@ class LayeredTDE:
         :mod:`slipsolve.heterogeneity`). Receivers farther than :attr:`strain_far` sizes from a
         triangle take point sources of the whole field: Okada's (1992) half-space point
         source plus the tabulated remainder, ordered by the point-source rule. Needs
-        tables computed with ``strain=True``.
+        tables computed with ``strain=True``. ``workers`` > 1 shares the elements among that
+        many processes (:func:`engine_pool`); the sums come out the same to rounding.
         """
         x, y, z = _as_points(x, y, z)
         nodal = basis is not None and getattr(basis, "name", "element") != "element"
+        if nodal and basis.name != "node":
+            raise ValueError(f"LayeredTDE cannot assemble the {basis.name!r} basis")
+        pool = engine_pool(self, workers)
+        if pool is not None:
+            n = basis.n_basis if nodal else mesh.n_elements
+            out = np.zeros((x.size, 6, 2 * n))
+            verts, tris = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
+            with pool:
+                # interleaved shares, one a worker: the elements near the points cost the most
+                count = pool.pool._max_workers if isinstance(pool, _Borrowed) else int(workers)
+                shares = [np.arange(i, mesh.n_elements, count) for i in range(count)]
+                futures = [pool.submit(_strain_share, k, verts[k], tris[k], x, y, z, nodal, n) for k in shares if k.size]
+                for future in futures:
+                    out += future.result()
+            _require_finite(out, mesh, x, y, z)
+            return out
         if not nodal:
             n = mesh.n_elements
             out = np.zeros((x.size, 6, 2 * n))
@@ -657,6 +674,82 @@ def _combine(values, azimuth, packing):
         out[:, i, 0] = ur * sin1 + ut * cos1
         out[:, i, 1] = ur * cos1 - ut * sin1
         out[:, i, 2] = -uz
+    return out
+
+
+#: The engine a pool worker holds (:func:`engine_pool`).
+_WORKER = {}
+
+
+def _start_worker(path, options):
+    from .wavenumber import RemainderTables
+
+    _WORKER["engine"] = LayeredTDE(RemainderTables.load(path), **options)
+
+
+def worker_engine():
+    """The :class:`LayeredTDE` a pool worker holds (:func:`engine_pool`)."""
+    return _WORKER["engine"]
+
+
+class _Borrowed:
+    """A pool someone else owns: used, not shut down, by ``with``."""
+
+    def __init__(self, pool):
+        self.pool = pool
+
+    def __enter__(self):
+        return self.pool
+
+    def __exit__(self, *exc):
+        return False
+
+    def submit(self, *args, **kwargs):
+        return self.pool.submit(*args, **kwargs)
+
+
+def engine_pool(engine, workers):
+    """A process pool whose workers each hold a copy of ``engine``; None (run here) for ``workers`` < 2.
+
+    ``workers`` may also be a pool this returned before: it is used and left open, so one pool
+    (and one load of the tables a worker) can serve several operators.
+
+    Every worker loads the engine's tables from their file once (``RemainderTables.load`` and
+    ``save`` record it; a v3 strain table is ~3 GB a worker) and builds the engine with the same
+    options. Threads do not help here (``slipsolve.greens``); processes do (2026-11-04).
+    ⚠️ The workers are spawned (macOS's default), which re-imports the calling script: a script
+    that passes ``workers`` must keep its work under ``if __name__ == "__main__":``.
+    """
+    from concurrent.futures import Executor
+
+    if isinstance(workers, Executor):
+        return _Borrowed(workers)
+    if not workers or int(workers) < 2:
+        return None
+    path = getattr(engine.tables, "path", None)
+    if path is None:
+        raise ValueError("workers= needs tables loaded from (or saved to) a file: every worker loads its own copy")
+    from concurrent.futures import ProcessPoolExecutor
+
+    options = dict(tolerance=engine.tolerance, max_order=engine.max_order, far=engine.strain_far,
+                   quadratic=engine.quadratic)
+    return ProcessPoolExecutor(int(workers), initializer=_start_worker, initargs=(str(path), options))
+
+
+def _strain_share(elements, vertices, triangles, x, y, z, nodal, n):
+    """A worker's share of :meth:`LayeredTDE.strain`: its elements' contributions, ``(npts, 6, 2 n)``."""
+    engine = worker_engine()
+    out = np.zeros((x.size, 6, 2 * n))
+    for e, v, tri in zip(elements, vertices, triangles):
+        if nodal:
+            tents = engine.tent_strain(v, x, y, z, components=(0, 1))
+            for j, node in enumerate(tri):
+                out[:, :, node] += tents[:, j, 0]
+                out[:, :, n + node] += tents[:, j, 1]
+        else:
+            eps = engine.element_strain(v, x, y, z, components=(0, 1))
+            out[:, :, e] += eps[:, 0]
+            out[:, :, n + e] += eps[:, 1]
     return out
 
 

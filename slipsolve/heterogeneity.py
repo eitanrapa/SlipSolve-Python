@@ -86,6 +86,28 @@ def _piece_counts(sides):
     return np.where(counts % 2 == 0, counts + 1, counts)
 
 
+def _triangle_enters_boxes(tri, lo, hi):
+    """Whether the triangle ``tri`` (3, 3) enters each box's interior, ``(nbox,)``: the separating-axis test.
+
+    Boxes are ``lo``/``hi`` (nbox, 3), already shrunk by the caller where touching must not count. No separating
+    axis among the box's three, the triangle's normal and the nine cross products of the two sets of edges means
+    the two overlap (Akenine-Moeller 2001).
+    """
+    centre, e = 0.5 * (lo + hi), 0.5 * (hi - lo)
+    v = tri[None, :, :] - centre[:, None, :]                       # (nbox, 3 vertices, 3)
+    apart = (v.min(axis=1) > e).any(axis=1) | (v.max(axis=1) < -e).any(axis=1)
+    edges = np.array([tri[1] - tri[0], tri[2] - tri[1], tri[0] - tri[2]])
+    normal = np.cross(edges[0], edges[1])
+    axes = [normal] + [np.cross(np.eye(3)[i], f) for i in range(3) for f in edges]
+    for a in axes:
+        if np.linalg.norm(a) < 1e-12 * max(np.linalg.norm(normal), 1.0):
+            continue
+        proj = v @ a                                                # (nbox, 3)
+        reach = e @ np.abs(a)
+        apart |= (proj.min(axis=1) > reach) | (proj.max(axis=1) < -reach)
+    return ~apart
+
+
 def _cells(v, start, step, n, tol):
     """The (at most two) grid cells holding each value, edges included within ``tol``: ``(lo, hi, inside)``."""
     lo = np.floor((v - tol - start) / step).astype(int)
@@ -607,8 +629,16 @@ class VoxelModel:
             out |= near & hit
         return out
 
-    def check_clearance(self, mesh, buffer=None, samples=24):
+    def check_clearance(self, mesh, buffer=None, samples=24, contact=False):
         """Refuse an active voxel within ``buffer`` (default: one voxel size) of the fault mesh.
+
+        With ``contact`` (2026-11-04, plan Part IV 1a) a voxel may END on the fault instead: it may
+        touch it, a face on the fault's plane, but the fault must not enter its interior (a
+        separating-axis test of each triangle against each nearby voxel, shrunk by 1e-6 of its
+        size). The strain is collocated at each voxel's centre, on one side of the fault; the
+        equation stays exact with soft material up to the fault (measured: a zone against a planar
+        fault as accurate as one 2 km away for strike-slip, twice the error for dip-slip at 1 km
+        cells, both converging), so cells beside it should be fine. ``buffer`` is then unused.
 
         A voxel's strain is collocated at its centre and taken as uniform; next to the fault
         the strain varies on the scale of the distance to it and is singular on it. A
@@ -621,6 +651,8 @@ class VoxelModel:
 
         if self.n_active == 0:
             return True
+        if contact:
+            return self._check_contact(mesh)
         dz = np.diff(self.z_edges)[self.index[:, 2]]
         dx = float(np.diff(self.x_edges[:2])[0])
         dy = float(np.diff(self.y_edges[:2])[0])
@@ -648,6 +680,30 @@ class VoxelModel:
                                  f"fault, within {buffer:.0f} m; keep the heterogeneity a voxel clear of it")
         return True
 
+    def _check_contact(self, mesh):
+        """``check_clearance(contact=True)``: no triangle of the fault may enter an active voxel's interior."""
+        from ._tde import distance_to_triangle
+
+        dz = np.diff(self.z_edges)[self.index[:, 2]]
+        dx = float(np.diff(self.x_edges[:2])[0])
+        dy = float(np.diff(self.y_edges[:2])[0])
+        half = 0.5 * np.sqrt(dx * dx + dy * dy + dz * dz)
+        lo = np.column_stack([self.x_edges[self.index[:, 0]], self.y_edges[self.index[:, 1]],
+                              -self.z_edges[self.index[:, 2] + 1]])
+        hi = np.column_stack([self.x_edges[self.index[:, 0] + 1], self.y_edges[self.index[:, 1] + 1],
+                              -self.z_edges[self.index[:, 2]]])
+        shrink = 1e-6 * np.minimum(min(dx, dy), dz)[:, None]
+        for tri in np.asarray(mesh.vertices):
+            near = np.flatnonzero(distance_to_triangle(tri, self.centres) <= half * (1.0 + 1e-9))
+            if not near.size:
+                continue
+            enters = _triangle_enters_boxes(tri, lo[near] + shrink[near], hi[near] - shrink[near])
+            if enters.any():
+                k = near[int(np.flatnonzero(enters)[0])]
+                raise ValueError(f"the fault passes through active voxel {tuple(self.index[k])}: with "
+                                 "contact=True a voxel may end on the fault, not straddle it")
+        return True
+
     def __repr__(self):
         return (f"<VoxelModel {self.shape[0]}x{self.shape[1]}x{self.shape[2]}, {self.n_active} active; "
                 f"mu {self.mu[self.active].min() / 1e9 if self.n_active else 0:.2f}-"
@@ -658,7 +714,7 @@ def _steps(voxels):
     return (float(voxels.x_edges[1] - voxels.x_edges[0]), float(voxels.y_edges[1] - voxels.y_edges[0]))
 
 
-def strain_operator(voxels, engine, log=None):
+def strain_operator(voxels, engine, log=None, workers=None):
     """``Gamma``, ``(6 n, 6 n)``: the strain at each active voxel's centre per unit moment density in each.
 
     Rows are voxel ``r``'s six strain components (:data:`~slipsolve._tde.STRAIN_COMPONENTS`),
@@ -666,8 +722,11 @@ def strain_operator(voxels, engine, log=None):
     :attr:`VoxelModel.index` order. The reference is laterally uniform, so the strain at
     voxel ``r`` from voxel ``s`` depends only on their depth rows and horizontal offset:
     one :class:`VoxelSource` per source row, evaluated at every offset that occurs, fills
-    every pair. A voxel's own block is its Eshelby self-strain at its centre.
+    every pair. A voxel's own block is its Eshelby self-strain at its centre. ``workers`` > 1
+    evaluates the pairs of rows in that many processes (:func:`~slipsolve.layered_tde.engine_pool`).
     """
+    from .layered_tde import engine_pool
+
     n = voxels.n_active
     out = np.zeros((6 * n, 6 * n))
     if n == 0:
@@ -676,31 +735,75 @@ def strain_operator(voxels, engine, log=None):
     index = voxels.index
     rows = {int(iz): np.flatnonzero(index[:, 2] == iz) for iz in np.unique(index[:, 2])}
     x_edges, y_edges, z_edges = voxels.x_edges, voxels.y_edges, voxels.z_edges
+    tasks = []
     for iz_s, sources in rows.items():
-        source = VoxelSource(engine, x_edges[:2], y_edges[:2], z_edges[iz_s:iz_s + 2])
+        bounds = (x_edges[:2], y_edges[:2], z_edges[iz_s:iz_s + 2])
+        centre = 0.5 * np.array([x_edges[0] + x_edges[1], y_edges[0] + y_edges[1]])
         for iz_r, receivers in rows.items():
             di = index[receivers, 0][:, None] - index[sources, 0][None, :]
             dj = index[receivers, 1][:, None] - index[sources, 1][None, :]
             offsets, inverse = np.unique(np.column_stack([di.ravel(), dj.ravel()]), axis=0,
                                          return_inverse=True)
-            x = source.centre[0] + offsets[:, 0] * dx
-            y = source.centre[1] + offsets[:, 1] * dy
+            x = centre[0] + offsets[:, 0] * dx
+            y = centre[1] + offsets[:, 1] * dy
             z = np.full(offsets.shape[0], -0.5 * (z_edges[iz_r] + z_edges[iz_r + 1]))
-            field = source.strain(x, y, z)                         # (n_offsets, 6 moment, 6 strain)
-            pair = field[inverse.ravel()].reshape(receivers.size, sources.size, 6, 6)
-            r6 = 6 * receivers[:, None, None, None] + np.arange(6)[None, None, None, :]
-            s6 = 6 * sources[None, :, None, None] + np.arange(6)[None, None, :, None]
-            out[r6, s6] = pair                                      # [r, s, moment b, strain a]
-            if log:
-                log(f"Gamma: source row {iz_s}, receiver row {iz_r}: {offsets.shape[0]} offsets")
+            tasks.append((iz_s, iz_r, sources, receivers, inverse, bounds, x, y, z))
+
+    def scatter(task, field):                                       # field (n_offsets, 6 moment, 6 strain)
+        iz_s, iz_r, sources, receivers, inverse = task[:5]
+        pair = field[inverse.ravel()].reshape(receivers.size, sources.size, 6, 6)
+        r6 = 6 * receivers[:, None, None, None] + np.arange(6)[None, None, None, :]
+        s6 = 6 * sources[None, :, None, None] + np.arange(6)[None, None, :, None]
+        out[r6, s6] = pair                                          # [r, s, moment b, strain a]
+        if log:
+            log(f"Gamma: source row {iz_s}, receiver row {iz_r}: {field.shape[0]} offsets")
+
+    pool = engine_pool(engine, workers)
+    if pool is None:
+        sources_by_row = {}
+        for task in tasks:
+            iz_s, bounds = task[0], task[5]
+            if iz_s not in sources_by_row:
+                sources_by_row[iz_s] = VoxelSource(engine, *bounds)
+            scatter(task, sources_by_row[iz_s].strain(*task[6:]))
+        return out
+    with pool:
+        futures = [pool.submit(_voxel_task, task[5], *task[6:], True) for task in tasks]
+        for task, future in zip(tasks, futures):
+            scatter(task, future.result())
     return out
 
 
-def los_operator(voxels, engine, x, y, look=None):
+def _voxel_task(bounds, x, y, z, strain):
+    """A pool worker's :class:`VoxelSource` field: the voxel ``bounds`` at the points, ``(npts, 6, 3 or 6)``."""
+    from .layered_tde import worker_engine
+
+    return VoxelSource(worker_engine(), *bounds)._field(x, y, z, strain)
+
+
+def _los_share(bounds, x, y, z, look):
+    """A pool worker's columns of :func:`los_operator` for the voxels ``bounds``."""
+    from .layered_tde import worker_engine
+
+    engine = worker_engine()
+    out = np.zeros((x.size, 6 * len(bounds)) if look is not None else (x.size, 3, 6 * len(bounds)))
+    for i, b in enumerate(bounds):
+        u = VoxelSource(engine, *b).displacement(x, y, z)          # (npts, 6, 3)
+        if look is not None:
+            out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
+        else:
+            out[:, :, 6 * i:6 * i + 6] = np.moveaxis(u, 2, 1)
+    return out
+
+
+def los_operator(voxels, engine, x, y, look=None, workers=None):
     """``H``, ``(npts, 6 n)``: line of sight at surface points per unit moment density in each voxel.
 
     ``look`` is ``(look_e, look_n, look_u)``; without it, east/north/up, ``(npts, 3, 6 n)``.
+    ``workers`` > 1 shares the voxels among that many processes.
     """
+    from .layered_tde import engine_pool
+
     x, y, z = _as_points(x, y, None)
     _refuse_on_faces(voxels, x, y, z)
     n = voxels.n_active
@@ -709,7 +812,16 @@ def los_operator(voxels, engine, x, y, look=None):
         out = np.zeros((x.size, 6 * n))
     else:
         out = np.zeros((x.size, 3, 6 * n))
-    for i in range(n):
+    pool = engine_pool(engine, workers)
+    if pool is not None:
+        count = pool.pool._max_workers if hasattr(pool, "pool") else int(workers)
+        shares = [s for s in np.array_split(np.arange(n), 4 * count) if s.size]
+        with pool:
+            futures = [pool.submit(_los_share, [voxels.bounds(i) for i in share], x, y, z, look) for share in shares]
+            for share, future in zip(shares, futures):
+                cols = slice(6 * share[0], 6 * (share[-1] + 1))
+                out[..., cols] = future.result()
+    for i in range(n if pool is None else 0):
         u = VoxelSource(engine, *voxels.bounds(i)).displacement(x, y, z)   # (npts, 6, 3)
         if look is not None:
             out[:, 6 * i:6 * i + 6] = np.einsum("pkc,pc->pk", u, look)
@@ -762,7 +874,7 @@ class HeterogeneousEngine:
 
     supports_basis = True
 
-    def __init__(self, base, voxels, order="full", log=None):
+    def __init__(self, base, voxels, order="full", log=None, workers=None):
         if not base.tables.has_strain:
             raise ValueError("the base engine's tables need strain=True")
         if voxels.tables is not base.tables:
@@ -773,6 +885,11 @@ class HeterogeneousEngine:
         self.voxels = voxels
         self.order = order
         self.log = log
+        #: Processes for ``H``, ``E`` and ``Gamma`` (:func:`~slipsolve.layered_tde.engine_pool`):
+        #: each loads the base's tables from their file once, and the one pool serves all three
+        #: until :meth:`close`. None or 1 runs here.
+        self.workers = workers
+        self._pool = None
         self.name = f"heterogeneous:{base.name}"
         self.nu = base.nu
         self.interfaces = base.interfaces
@@ -782,6 +899,20 @@ class HeterogeneousEngine:
         self._e = {}
 
     # -- the voxel operators --------------------------------------------------------
+    def _workers(self):
+        """The engine's pool, made on first use, or None to run here."""
+        if self._pool is None and self.workers and int(self.workers) > 1:
+            from .layered_tde import engine_pool
+
+            self._pool = engine_pool(self.base, self.workers)
+        return self._pool
+
+    def close(self):
+        """Shut the worker pool down (a new one is made if the engine is used again)."""
+        if self._pool is not None:
+            self._pool.shutdown()
+            self._pool = None
+
     def _timed(self, label, build):
         import time
 
@@ -796,7 +927,7 @@ class HeterogeneousEngine:
         if self._gamma is None:
             n = self.voxels.n_active
             self._gamma = self._timed(f"Gamma: {6 * n} x {6 * n}",
-                                      lambda: strain_operator(self.voxels, self.base))
+                                      lambda: strain_operator(self.voxels, self.base, workers=self._workers()))
         return self._gamma
 
     def system(self):
@@ -825,7 +956,8 @@ class HeterogeneousEngine:
         if key not in self._e:
             c = self.voxels.centres
             e = self._timed(f"E: strain of {mesh.n_elements} elements at {c.shape[0]} voxel centres",
-                            lambda: self.base.strain(mesh, c[:, 0], c[:, 1], c[:, 2], basis=basis))
+                            lambda: self.base.strain(mesh, c[:, 0], c[:, 1], c[:, 2], basis=basis,
+                                                     workers=self._workers()))
             self._e[key] = e.reshape(-1, e.shape[-1])
         return self._e[key]
 
@@ -842,7 +974,8 @@ class HeterogeneousEngine:
         key = _digest(x, y, *(look if look is not None else ()))
         if key not in self._h:
             self._h[key] = self._timed(f"H: {np.size(x)} surface points x {self.voxels.n_active} voxels",
-                                       lambda: los_operator(self.voxels, self.base, x, y, look))
+                                       lambda: los_operator(self.voxels, self.base, x, y, look,
+                                                            workers=self._workers()))
         return self._h[key]
 
     # -- the engine protocol ----------------------------------------------------------
