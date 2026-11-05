@@ -80,13 +80,15 @@ def test_a_prism_turned_about_the_vertical_turns_its_field(uniform_tables):
 
 
 def test_a_flat_prism_is_summed_as_near_cubic_pieces(uniform_tables):
-    """A prism 4 km across and 0.5 km thick: midpoint pieces, whose volumes sum to its own."""
+    """A prism 4 km across and 0.5 km thick: midpoint pieces, whose volumes sum to its own, and whose fields are its
+    own inside its longest side (beyond it the whole cell's rule takes over, the next test)."""
     engine = LayeredTDE(uniform_tables)
     inner = np.array([[0.0, 0.0, -3000.0], [4000.0, 0.0, -3000.0], [2000.0, 0.0, -6400.0]])
     p = PrismSource(engine, inner, inner + np.array([0.0, 500.0, 0.0]))
     assert p.pieces is not None and len(p.pieces) == 4
     assert np.isclose(sum(q.volume for q in p.pieces), p.volume)
-    pts = np.array([[2000.0, 6000.0, -4000.0], [-3000.0, -2000.0, -1000.0]])
+    pts = np.array([[2000.0, 1500.0, -4000.0], [-1000.0, 250.0, -3500.0]])
+    assert not p._far_whole(*pts.T).any()
     whole = sum(q.strain(*pts.T) for q in p.pieces)
     np.testing.assert_allclose(p.strain(*pts.T), whole, rtol=1e-12, atol=0)
 
@@ -143,3 +145,18 @@ def test_fault_cells_across_an_interface_are_refused(coarse_tables):
     with pytest.raises(ValueError, match="cross a layer interface"):
         FaultCells(tables, mesh, [1000.0], lambda x, y, d, s, side: (0.5 * tables.lam[tables.layer(d)],
                                                                      0.5 * tables.mu[tables.layer(d)]))
+
+
+def test_beyond_its_longest_side_a_cell_in_pieces_takes_its_whole_volume_rule(uniform_tables):
+    """The strain of a 15 km prism in pieces, beyond its longest side: its own volume rule = the sum of its pieces.
+
+    Measured (2026-11-05): 5e-5 of each point's peak (a 3.9 km voxel: 1.5e-4); the pieces are for the near field.
+    """
+    engine = LayeredTDE(uniform_tables)
+    inner = np.array([[0.0, 0.0, -3000.0], [15000.0, 0.0, -3000.0], [7000.0, 0.0, -4000.0]])
+    cell = PrismSource(engine, inner, inner + np.array([0.0, 1000.0, 0.0]))
+    pts = np.array([[7000.0, 31000.0, -3500.0], [-20000.0, 4000.0, -1000.0], [30000.0, -20000.0, -12000.0]])
+    assert cell.pieces is not None and cell._far_whole(*pts.T).all()
+    whole = cell.strain(*pts.T)
+    pieces = sum(q.strain(*pts.T) for q in cell.pieces)
+    assert (np.abs(whole - pieces).max(axis=(1, 2)) / np.abs(pieces).max(axis=(1, 2))).max() < 5e-4

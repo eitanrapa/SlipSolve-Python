@@ -328,7 +328,18 @@ class VoxelSource:
     def _field(self, x, y, z, strain):
         x, y, z = _as_points(x, y, z)
         if self.pieces is not None:
-            return sum(piece._field(x, y, z, strain) for piece in self.pieces)
+            # Strain farther than the longest side from a cell in pieces takes the whole cell's volume rule
+            # (its order from that side): the pieces are for its near field, and a cell cut into hundreds of
+            # them (a long fault cell) would otherwise sum them at every receiver.
+            whole = self._far_whole(x, y, z) if strain else np.zeros(x.size, bool)
+            if not whole.any():
+                return sum(piece._field(x, y, z, strain) for piece in self.pieces)
+            out = np.zeros((x.size, 6, 6))
+            near = ~whole
+            if near.any():
+                out[near] = sum(piece._field(x[near], y[near], z[near], strain) for piece in self.pieces)
+            out[whole] = self._point_moments(x[whole], y[whole], z[whole])
+            return out
         width = 6 if strain else 3
         out = np.zeros((x.size, 6, width))
         far = self._far_strain(x, y, z) if strain else self._far(x, y, z)
@@ -355,6 +366,13 @@ class VoxelSource:
         if self.strain_far is None:
             return np.zeros(x.size, bool)
         return self._gap(x, y, z) > self.strain_far * self.size
+
+    def _far_whole(self, x, y, z):
+        """For a cell in pieces: receivers beyond both the strain far path's reach and its longest side."""
+        if self.strain_far is None:
+            return np.zeros(x.size, bool)
+        reach = max(self.strain_far * self.size, float(np.max(self.hi - self.lo)))
+        return self._gap(x, y, z) > reach
 
     def _far_orders(self, x, y, z, tolerance=VOXEL_FAR_TOLERANCE):
         """Points a side for :meth:`_point_moments`: the least ``n`` with ``C (a / 2R)**(2n)`` within ``tolerance``."""
