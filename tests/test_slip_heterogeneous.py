@@ -1,7 +1,6 @@
 """3-D elastic heterogeneity on the layered reference (``slipsolve.heterogeneity``).
 
-The plan and its measurements are in ``HETEROGENEOUS_3D_PLAN.local.md``; the strain kernels
-the engine stands on are tested in ``test_slip_strain.py``.
+The strain kernels the engine stands on are tested in ``test_slip_strain.py``.
 """
 
 import numpy as np

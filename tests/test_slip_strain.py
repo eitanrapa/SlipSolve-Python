@@ -1,6 +1,6 @@
 """Strain kernels for the 3-D heterogeneity engine: the half-space TDE and the layered remainder.
 
-The heterogeneous engine (``HETEROGENEOUS_3D_PLAN.local.md``) needs the strain of every
+The heterogeneous engine (``slipsolve.heterogeneity``) needs the strain of every
 fault element at every voxel centre, at depth, and the strain of point moment sources in
 the layered reference. These pin the strain against independent references: ``cutde``'s
 analytic triangular-dislocation strain, the free surface's traction-free condition, and

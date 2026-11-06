@@ -50,7 +50,7 @@ far away take point sources of the whole tabulated surface field (:data:`FAR_VOX
   more demanding than displacement); the strain-bearing tables want ~200 m in depth.
 - ``Gamma`` and its LU are dense: ~10k voxels on 128 GB, ~5-6k on 64 GB.
 
-The design, the tests and the measurements are in ``HETEROGENEOUS_3D_PLAN.local.md``.
+The tests are in ``tests/test_slip_heterogeneous.py``, the strain kernels' in ``tests/test_slip_strain.py``.
 """
 
 import numpy as np
