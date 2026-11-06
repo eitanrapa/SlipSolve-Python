@@ -7,6 +7,8 @@ share the fault's triangles as faces and every cell ends on the fault or on a ne
 each cell within its triangle's depth range, so within its layer when the mesh has element edges on the interfaces;
 neighbouring cells share their faces because each fault vertex moves along ONE normal (its elements' horizontal normals
 averaged by area), and a shared side quad is split along the same diagonal by both (chosen from its corners alone).
+Thinner layers refine across the fault only; ``split`` divides the triangles for the cells alone, so the cells can be
+finer along the fault than the mesh that carries the slip (benchmark 11: on a thrust that is what sets the error).
 
 :class:`PrismSource` is one cell, a triangular prism ("wedge"): :class:`~slipsolve.heterogeneity.VoxelSource`'s
 construction with its own faces (two triangles and three quads, triangulated, outward; faces in the free surface
@@ -192,6 +194,43 @@ def _prism_centroids(inner, outer):
     return vols, cents
 
 
+def _midpoint_weights(level):
+    """A triangle's midpoint subdivision, ``level`` times: barycentric weights ``(4**level, 3, 3)`` (child, corner,
+    parent vertex), each child wound as its parent, in :class:`PrismSource`'s order."""
+    w = np.eye(3)[None]
+    for _ in range(int(level)):
+        m = 0.5 * (w + np.roll(w, -1, axis=1))                                 # the midpoints of edges 01, 12, 20
+        w = np.concatenate([np.stack([w[:, 0], m[:, 0], m[:, 2]], axis=1),
+                            np.stack([m[:, 0], w[:, 1], m[:, 1]], axis=1),
+                            np.stack([m[:, 2], m[:, 1], w[:, 2]], axis=1), m])
+    return w
+
+
+def _split_prisms(inner, outer, levels):
+    """Each prism ``inner[i]`` -> ``outer[i]`` divided ``levels[i]`` times: the children's ``inner`` and ``outer`` and
+    the index of each one's parent, a parent's children together and the parents in order.
+
+    Inner and outer triangles get the same weights, so a child is its parent's map (:func:`_mapped_rule`) restricted to
+    a part of the triangle: volumes and centroids add up exactly, also where a side quad twists."""
+    counts = 4 ** levels
+    parent = np.repeat(np.arange(levels.size), counts)
+    first = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    w = np.empty((parent.size, 3, 3))
+    for level in np.unique(levels):
+        weights = _midpoint_weights(level)
+        w[first[levels == level][:, None] + np.arange(weights.shape[0])] = weights
+    return w @ inner[parent], w @ outer[parent], parent
+
+
+def _split_levels(split, n):
+    """``split`` as one level for each of ``n`` elements; a mask means level 1 where it is set."""
+    levels = np.asarray(split)
+    if (not (np.issubdtype(levels.dtype, np.integer) or levels.dtype == bool) or np.any(levels < 0)
+            or levels.shape not in ((), (n,))):
+        raise ValueError(f"split: a non-negative integer, or one for each of the {n} fault elements")
+    return np.broadcast_to(levels, (n,)).astype(int)
+
+
 class PrismCells:
     """Cells of uniform departure, each a triangular prism ``inner`` -> ``outer`` (``(n, 3, 3)`` each, vertex i to i).
 
@@ -335,9 +374,18 @@ class FaultCells(PrismCells):
     its layer (the layer's mid-distance), returning arrays. Cells whose moduli differ from the reference's by less than
     ``tol`` times its ``mu`` are inactive. The cells end on the fault by construction, so the clearance guard holds for
     the mesh they were built from (:meth:`check_clearance`).
+
+    ``split`` makes the cells finer than that mesh, which otherwise sets their extent along the fault: each triangle is
+    divided at its edges' midpoints that many times for the cells alone, ``4**split`` cells a triangle and layer. A
+    non-negative integer, or one per element (a mask means 1 where set; 0 keeps a triangle whole). The children partition
+    their parent on the same fault and each has its own strain value, unlike the pieces of a flat :class:`PrismSource`,
+    which sum one cell's field for one value. ``moduli`` is asked at the children. ``Gamma`` goes pair by pair, so a
+    uniform split costs ~16x a level: split where the field needs it. Elements at different levels meet at hanging
+    corners, which a cell's field does not see (it comes from its own faces alone; where a side quad twists, on a curved
+    fault, the two sides' diagonals differ by the twist). A child can still cross a layer interface, which is refused.
     """
 
-    def __init__(self, tables, mesh, thickness, moduli, sides=(-1, 1), tol=1e-9):
+    def __init__(self, tables, mesh, thickness, moduli, sides=(-1, 1), tol=1e-9, split=0):
         self.mesh = mesh
         self.thickness = np.asarray(thickness, dtype=float).ravel()
         if self.thickness.size == 0 or np.any(self.thickness <= 0):
@@ -347,6 +395,7 @@ class FaultCells(PrismCells):
             raise ValueError("sides: +1 and/or -1")
         nodes = np.asarray(mesh.nodes, dtype=float)
         tris = np.asarray(mesh.triangles)
+        self.split = _split_levels(split, tris.shape[0])
         normals = np.asarray(mesh.normals, dtype=float)
         horizontal = normals.copy()
         horizontal[:, 2] = 0.0
@@ -371,6 +420,9 @@ class FaultCells(PrismCells):
         self.side = np.concatenate(side)
         self.layer_index = np.concatenate(layer)
         self.element = np.concatenate(element)
+        if self.split.any():
+            inner, outer, parent = _split_prisms(inner, outer, self.split[self.element])
+            self.side, self.layer_index, self.element = self.side[parent], self.layer_index[parent], self.element[parent]
         volumes, centroids = _prism_centroids(inner, outer)
         self.distance = 0.5 * (reach[self.layer_index] + reach[self.layer_index + 1])
         lam, mu = moduli(centroids[:, 0], centroids[:, 1], -centroids[:, 2], self.distance, self.side)
@@ -391,11 +443,14 @@ class FaultCells(PrismCells):
         out = super().describe()
         out.update(kind="fault_cells", thickness=self.thickness.tolist(), sides=list(self.sides),
                    mesh=self.mesh.digest())
+        if self.split.any():
+            out["split"] = np.bincount(self.split).tolist()                     # elements at each level
         return out
 
     def __repr__(self):
         return (f"<FaultCells {self.active.size} cells ({self.n_active} active) on {self.mesh.n_elements} elements, "
-                f"layers {np.round(self.thickness / 1e3, 3).tolist()} km, sides {list(self.sides)}; mu "
+                f"layers {np.round(self.thickness / 1e3, 3).tolist()} km, sides {list(self.sides)}"
+                f"{f', split to level {self.split.max()}' if self.split.any() else ''}; mu "
                 f"{self.mu.min() / 1e9:.2f}-{self.mu.max() / 1e9:.2f} GPa>")
 
 

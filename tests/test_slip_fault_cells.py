@@ -297,3 +297,158 @@ def test_the_face_guard_sees_the_pieces_of_a_flat_cell(coarse_tables):
     off = on + 0.13 * along                                                # inside the cell, on no face
     found = cells.on_faces(np.array([on[0], off[0]]), np.array([on[1], off[1]]), np.zeros(2))
     assert found.tolist() == [True, False]
+
+
+# -- cells finer than the slip mesh ---------------------------------------------------------------
+def _soft(tables, factor=0.6):
+    def moduli(x, y, depth, distance, side):
+        layer = tables.layer(depth)
+        return factor * tables.lam[layer], factor * tables.mu[layer]
+    return moduli
+
+
+def _bent_mesh(max_depth=6e3, edge=2e3):
+    """A trace with a bend: the vertex normals differ there and the extruded side quads twist."""
+    trace = FaultTrace.from_lonlat(np.array([-80.05, -80.0, -79.95]), np.array([8.0, 8.015, 8.0]))
+    return FaultMesh.vertical(trace, trace.local_frame(), max_depth=max_depth, edge_length=edge)
+
+
+def test_split_cells_partition_their_parents_on_the_same_fault(coarse_tables):
+    """split=1 on a bent fault: four children a parent cell, whose volumes and centroids make the parent's, also where
+    side quads twist; the innermost lie in their element's plane and fill it; layers share faces; no split changes
+    nothing, bit for bit."""
+    tables = coarse_tables
+    mesh = _bent_mesh()
+    kw = dict(sides=(-1, 1))
+    whole = FaultCells(tables, mesh, [800.0, 1200.0], _soft(tables), **kw)
+    cells = FaultCells(tables, mesh, [800.0, 1200.0], _soft(tables), split=1, **kw)
+    assert cells.inner.shape == (4 * whole.inner.shape[0], 3, 3) and cells.n_active == 4 * whole.n_active
+    for name in ("element", "side", "layer_index", "distance"):
+        np.testing.assert_array_equal(getattr(cells, name), np.repeat(getattr(whole, name), 4))
+    v = cells.volumes.reshape(-1, 4)
+    np.testing.assert_allclose(v.sum(axis=1), whole.volumes, rtol=1e-12, atol=0)
+    weighted = (v[..., None] * cells._all_centroids.reshape(-1, 4, 3)).sum(axis=1) / whole.volumes[:, None]
+    np.testing.assert_allclose(weighted, whole._all_centroids, rtol=0, atol=1e-6)
+    n = mesh.n_elements
+    first = cells.inner[:4 * n]                                                 # side -1, the layer on the fault
+    normal, origin = (np.repeat(np.asarray(a), 4, axis=0) for a in (mesh.normals, np.asarray(mesh.vertices)[:, 0]))
+    assert np.abs(np.einsum("ni,nci->nc", normal, first - origin[:, None])).max() < 1e-6
+    area = 0.5 * np.linalg.norm(np.cross(first[:, 1] - first[:, 0], first[:, 2] - first[:, 0]), axis=1)
+    assert np.isclose(area.sum(), np.asarray(mesh.areas).sum(), rtol=1e-12, atol=0)
+    np.testing.assert_allclose(cells.inner[4 * n:8 * n], cells.outer[:4 * n], rtol=0, atol=1e-9)
+    assert cells.check_clearance(mesh)
+    with pytest.raises(ValueError, match="another mesh"):
+        cells.check_clearance(_bent_mesh(max_depth=4e3))
+    for none in (0, np.zeros(n, int)):
+        same = FaultCells(tables, mesh, [800.0, 1200.0], _soft(tables), split=none, **kw)
+        np.testing.assert_array_equal(same.inner, whole.inner)
+        np.testing.assert_array_equal(same.outer, whole.outer)
+        assert same.describe() == whole.describe() and repr(same) == repr(whole)
+
+
+def test_the_children_of_a_split_cell_sum_to_its_field(uniform_tables):
+    """Eshelby's construction is linear and the faces children share cancel: at one moment density their fields sum to
+    the parent's, outside it and inside it.
+
+    Measured (2026-11-05): displacement 1.3e-4 / 1.6e-5 (outside / inside), strain 1.7e-4 / 7.3e-5 of each point's peak;
+    the children's far paths start nearer than the parent's.
+    """
+    from slipsolve.fault_cells import _split_prisms
+
+    engine = LayeredTDE(uniform_tables)
+    inner = np.array([[0.0, 0.0, -3000.0], [2000.0, 0.0, -3000.0], [2000.0, 0.0, -4000.0]])
+    outer = inner + np.array([0.0, 1200.0, 0.0])
+    whole = PrismSource(engine, inner, outer)
+    a, b, parent = _split_prisms(inner[None], outer[None], np.array([1]))
+    kids = [PrismSource(engine, i, o) for i, o in zip(a, b)]
+    assert whole.pieces is None and all(k.pieces is None for k in kids) and parent.tolist() == [0, 0, 0, 0]
+    assert np.isclose(sum(k.volume for k in kids), whole.volume, rtol=1e-12, atol=0)
+    rng = np.random.default_rng(11)
+    outside = np.column_stack([rng.uniform(-4e3, 6e3, 40), rng.uniform(-4e3, 5e3, 40), rng.uniform(-9e3, 0.0, 40)])
+    outside = outside[whole._gap(*outside.T) > 200.0]
+    within = np.array([k.centre for k in kids])
+    assert whole.inside(*within.T).all() and all(k.inside(*k.centre[:, None]).all() for k in kids)
+    for pts, disp_bar, strain_bar in ((outside, 3e-4, 3e-4), (within, 5e-5, 2e-4)):
+        for which, bar in (("displacement", disp_bar), ("strain", strain_bar)):
+            want = getattr(whole, which)(*pts.T)
+            got = sum(getattr(k, which)(*pts.T) for k in kids)
+            assert (np.abs(got - want).max(axis=(1, 2)) / np.abs(want).max(axis=(1, 2))).max() < bar
+
+
+def test_split_by_element_refines_those_elements_alone(coarse_tables):
+    """Levels per element: the top row twice, the rest whole and in their old order; a mask means level 1; nonsense is
+    refused."""
+    tables = coarse_tables
+    mesh = _bent_mesh()
+    shallow = -np.asarray(mesh.centroids)[:, 2] < 2e3
+    kw = dict(sides=(1,))
+    whole = FaultCells(tables, mesh, [1000.0], _soft(tables), **kw)
+    cells = FaultCells(tables, mesh, [1000.0], _soft(tables), split=2 * shallow.astype(int), **kw)
+    np.testing.assert_array_equal(np.bincount(cells.element, minlength=mesh.n_elements), np.where(shallow, 16, 1))
+    assert np.isclose(cells.volumes.sum(), whole.volumes.sum(), rtol=1e-12, atol=0)
+    np.testing.assert_array_equal(cells.inner[np.isin(cells.element, np.flatnonzero(~shallow))], whole.inner[~shallow])
+    assert cells.describe()["split"] == [int((~shallow).sum()), 0, int(shallow.sum())]
+    assert "split to level 2" in repr(cells) and "split" not in repr(whole)
+    mask = FaultCells(tables, mesh, [1000.0], _soft(tables), split=shallow, **kw)
+    assert mask.inner.shape[0] == mesh.n_elements + 3 * shallow.sum()
+    for bad in (-1, 1.5, [1, 0], np.ones(mesh.n_elements + 1, int)):
+        with pytest.raises(ValueError, match="split"):
+            FaultCells(tables, mesh, [1000.0], _soft(tables), split=bad, **kw)
+
+
+def test_a_coarse_mesh_split_once_is_the_mesh_refined_twofold(uniform_tables):
+    """What the split is for. On a lattice a coarse triangle's children are the finer lattice's own triangles, so under
+    uniform slip (the same source on either mesh) the zone's effect from a coarse mesh with its cells split once must be
+    the fine mesh's, through the full solve.
+
+    Measured (2026-11-05): 3.0e-6 of the effect's peak. On 24 coarse elements and 96 cells it was 2.3e-6, where the
+    unsplit coarse cells were 0.38 off at these near-field points; the reference fields of the two meshes differ by
+    2.6e-3 of it there, which is why each mesh's own reference is subtracted.
+    """
+    tables = uniform_tables
+    base = LayeredTDE(tables)
+    trace = FaultTrace.from_lonlat(np.array([-80.027, -79.973]), np.array([8.0, 8.0]))
+    frame = trace.local_frame()
+    length = trace.length(frame)
+    coarse = FaultMesh.vertical(trace, frame, max_depth=length / 3, edge_length=length / 3)
+    fine = FaultMesh.vertical(trace, frame, max_depth=length / 3, edge_length=length / 6)
+    assert fine.n_elements == 4 * coarse.n_elements
+    kw = dict(sides=(1,))
+    split = FaultCells(tables, coarse, [1000.0], _soft(tables), split=1, **kw)
+    same = FaultCells(tables, fine, [1000.0], _soft(tables), **kw)
+
+    def in_order(c):
+        return c._all_centroids[np.lexsort(np.round(c._all_centroids, 3).T)]
+
+    np.testing.assert_allclose(in_order(split), in_order(same), rtol=0, atol=1e-6)      # the same prisms
+    rng = np.random.default_rng(13)
+    _, ty = (np.asarray(v) for v in trace.to_local(frame))
+    x, y = rng.uniform(-6e3, 6e3, 24), float(np.mean(ty)) + rng.uniform(-6e3, 6e3, 24)
+    look = (np.full(24, 0.6), np.full(24, -0.1), np.full(24, 0.79))
+
+    def effect(mesh, cells):
+        g = HeterogeneousEngine(base, cells).los_matrix(mesh, x, y, *look) - base.los_matrix(mesh, x, y, *look)
+        return g[:, :mesh.n_elements].sum(axis=1)                                       # uniform strike-slip
+
+    want = effect(fine, same)
+    assert np.abs(want).max() > 1e-3
+    assert np.abs(effect(coarse, split) - want).max() < 2e-5 * np.abs(want).max()
+
+
+def test_the_face_guard_sees_the_children(coarse_tables):
+    """A surface point on the face two children share lies inside the unsplit cell: refused only with the split. Off
+    the footprint's centre: the guard takes every pair of surface corners as a candidate edge, its diagonals too."""
+    from slipsolve.fault_cells import _leaf_prisms
+
+    tables = coarse_tables
+    _, mesh = _vertical_mesh()
+    kw = dict(sides=(1,))
+    whole = FaultCells(tables, mesh, [2000.0], _soft(tables), **kw)
+    cells = FaultCells(tables, mesh, [2000.0], _soft(tables), split=1, **kw)
+    k = next(i for i in whole.ids if (np.abs(whole.inner[i][:, 2]) < 1e-6).sum() == 2)
+    top = np.flatnonzero(np.abs(whole.inner[k][:, 2]) < 1e-6)
+    assert len(_leaf_prisms(whole.inner[k], whole.outer[k])) == 1
+    on = (0.75 * whole.inner[k][top].mean(axis=0) + 0.25 * whole.outer[k][top].mean(axis=0))[:2]
+    x, y, z = np.array([on[0]]), np.array([on[1]]), np.zeros(1)
+    assert not whole.on_faces(x, y, z).any() and cells.on_faces(x, y, z).all()
+
