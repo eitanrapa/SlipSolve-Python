@@ -1,4 +1,4 @@
-"""Pins the quadtree sampler and the ``Observations`` container.
+"""Pins the quadtree sampler and the `Observations` container.
 
 Two properties matter beyond "it returns some points". First, the cells must
 actually *adapt* -- fine where the field is rough, coarse where it is smooth --
@@ -99,18 +99,17 @@ def test_exclusion_needs_a_trace(trace, frame):
 
 
 def test_sign_attribute_is_provenance_and_is_not_re_applied(trace, frame):
-    """``attrs["sign"]`` must not touch ``los``. The sampler takes it as-is.
+    """`attrs["sign"]` must not touch `los`. The sampler takes it as-is.
 
-    A stack's ``los`` is positive toward the sensor whatever ``sign`` was passed,
-    because :func:`~slipsolve._geo.phase_to_los` applied it when the stack
-    was built. The sampler used to multiply by it a second time, squaring it to
-    +1 and silently undoing the very correction ``sign=-1`` exists to make -- so
-    there was no supported way to flip an inverted fringe sense at all.
+    A stack's `los` is positive toward the sensor whatever `sign` was passed,
+    because `slipsolve._geo.phase_to_los` applied it when the stack was built.
+    Multiplying by it a second time would square it to +1 and silently undo the
+    very correction `sign=-1` exists to make.
 
-    That is not a cosmetic bug: it fits a slip model with the wrong sense of
-    motion on every track at once, and the variance reduction cannot reveal it.
-    Two stacks holding the same displacement must sample identically no matter
-    what they are labelled.
+    That is not cosmetic: it fits a slip model with the wrong sense of motion on
+    every track at once, and the variance reduction cannot reveal it. Two stacks
+    holding the same displacement must sample identically no matter what they
+    are labelled.
     """
     positive = _sample(trace, frame, sign=1)
     negative = _sample(trace, frame, sign=-1)
@@ -169,12 +168,12 @@ def test_concat_applies_named_track_weights(trace, frame):
 def test_concat_keeps_the_sampling_method_across_tracks(trace, frame):
     """`field` must survive concat even when the per-scene numbers differ.
 
-    ``combine_attrs="drop_conflicts"`` compares the ``quadtree`` dicts whole, and
-    ``rms_min``/``width_min``/``exclude_within`` are measured *per scene* -- so any
-    real multi-track set conflicts and used to lose the key entirely, ``field``
-    with it. A model-driven set then read back as a coarse data-driven one, which
-    is silent: the L-curve it produces is right, but labelled and filed as the
-    wrong kind. Single-track sets never exercised this.
+    `combine_attrs="drop_conflicts"` compares the `quadtree` dicts whole, and
+    `rms_min`/`width_min`/`exclude_within` are measured *per scene* -- so any
+    real multi-track set conflicts and would lose the key entirely, `field`
+    with it. A model-driven set would then read back as a coarse data-driven one,
+    silently: the L-curve it produces is right, but labelled and filed as the
+    wrong kind. Single-track sets never exercise this.
     """
     a = _sample(trace, frame, name="A", rms_min=0.008, width_min=2500.0)
     b = _sample(trace, frame, name="B", rms_min=0.011, width_min=3500.0)

@@ -56,7 +56,7 @@ def test_a_ramp_kind_per_track(setup):
     assert [l for l in labels if l.startswith("az:")] == ["az:offset"]
     # "*" stands for the tracks a mapping does not name; "none" leaves a track bare
     assert ramp_columns(obs, {"*": "linear", "az": "none"})[1] == ["asc:offset", "asc:dx", "asc:dy"]
-    # a single kind is the old behaviour exactly
+    # a single kind means that kind on every track, exactly
     np.testing.assert_array_equal(ramp_columns(obs, "linear")[0],
                                   ramp_columns(obs, {"*": "linear"})[0])
 

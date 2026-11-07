@@ -45,8 +45,8 @@ def _stations(trace, frame, spacing=3e3):
 def test_the_lattice_split_is_clockwise_in_parameter_space():
     """The measured fact the whole Delaunay path rests on.
 
-    ``PARAM_ORIENTATION`` is not a convention picked for tidiness; it is what
-    ``_lattice_triangles`` happens to produce, and the 3-D normals that come out
+    `PARAM_ORIENTATION` is not a convention picked for tidiness; it is what
+    `_lattice_triangles` happens to produce, and the 3-D normals that come out
     on the trace's left-hand side follow from it.
     """
     ns, nz = 6, 4
@@ -274,8 +274,8 @@ def test_lloyd_places_small_elements_where_the_size_field_is_small(trace, frame)
 def test_the_relaxation_honours_the_size_field_it_was_given():
     """A plain area-weighted centroid is the CVT iteration for a *uniform*
     density, so it relaxes toward equal element sizes and flattens the grading
-    the rejection sampling just put in. Weighting by ``1/h**2`` is what makes the
-    achieved size track ``h``; without it the shallow-to-deep size ratio came
+    the rejection sampling just put in. Weighting by `1/h**2` is what makes the
+    achieved size track `h`; without it the shallow-to-deep size ratio comes
     back at 2.16 against a wanted 2.85.
     """
     h = lambda s, d: 1e3 + 0.15 * d          # noqa: E731 -- 1 km to 4 km down dip
@@ -294,8 +294,8 @@ def test_the_relaxation_honours_the_size_field_it_was_given():
 
 
 def test_the_relaxation_is_what_makes_the_cloud_usable():
-    """The rejection-sampled cloud on its own is full of slivers -- 0.4 degrees
-    measured -- so the iteration count is not a tuning nicety."""
+    """The rejection-sampled cloud on its own is full of slivers -- angles down to
+    about 0.4 degrees -- so the iteration count is not a tuning nicety."""
     h = lambda s, d: 2e3 + 0.2 * d           # noqa: E731
     raw = L.lloyd_layout(60e3, 20e3, h, iterations=0)
     relaxed = L.lloyd_layout(60e3, 20e3, h, iterations=25)
@@ -314,11 +314,11 @@ def test_the_layout_is_reproducible():
 
 
 def test_a_layout_longer_than_the_resampled_trace_is_refused(trace, frame):
-    """``np.interp`` clamps past the last station, so nodes beyond the end of the
-    trace as ``curved`` resamples it would all land on the end point. An end
-    column a few metres over is let through (clamped, as before); a longer layout,
-    or an interior node past the end, is refused. Shorter layouts mesh part of
-    the trace, as before."""
+    """`np.interp` clamps past the last station, so nodes beyond the end of the
+    trace as `curved` resamples it would all land on the end point. An end
+    column a few metres over is let through (and clamped); a longer layout, or an
+    interior node past the end, is refused. Shorter layouts mesh part of the
+    trace."""
     from slipsolve.mesh import LAYOUT_OVERRUN_FRACTION
 
     edge = 3e3
@@ -392,10 +392,9 @@ def test_a_single_fault_is_one_component_and_the_mask_does_not_move(trace, frame
 
 
 def test_the_global_extremum_test_loses_a_second_faults_edges(two_faults):
-    """⚠️ The bug, stated directly. Do not "simplify" the mask back to a global
-    extremum: on two faults only the deeper one has a bottom, and only the outer
-    ends of the pair are left and right, so three of the second fault's four
-    edges vanish and nothing raises."""
+    """Do not "simplify" the mask to a global extremum: on two faults only the
+    deeper one has a bottom, and only the outer ends of the pair are left and
+    right, so three of the second fault's four edges vanish and nothing raises."""
     labels = two_faults.node_components
     assert sorted(np.unique(labels)) == [0, 1]
 
@@ -427,7 +426,7 @@ def test_require_boundaries_passes_a_pair_it_should_refuse(two_faults):
 
     counts = L.require_boundaries(two_faults.params, labels=labels)
     assert all(n >= 2 for n in counts.values())
-    # It reports the THINNEST piece, since one unconstrained fault invalidates
+    # It reports the thinnest piece, since one unconstrained fault invalidates
     # the run whatever the other one has.
     assert counts["bottom"] == min(
         int(L.boundary_node_mask(two_faults.params, "bottom", labels)[labels == k].sum())
@@ -436,7 +435,7 @@ def test_require_boundaries_passes_a_pair_it_should_refuse(two_faults):
 
 def test_a_component_with_a_collapsed_edge_is_still_refused(trace, frame):
     """Per-component counting must not become a way of passing: a piece whose
-    own edge has one node is as unconstrained as it was before."""
+    own edge has one node is unconstrained all the same."""
     mesh = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=10e3)
     params = np.vstack([mesh.params, [[1e6, 0.0], [1e6 + 1.0, -1.0]]])
     labels = np.concatenate([np.zeros(mesh.n_nodes, int), [1, 1]])

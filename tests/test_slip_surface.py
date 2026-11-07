@@ -18,8 +18,8 @@ from slipsolve.mesh import _depth_levels, _snap_vertical_columns
 from slipsolve.surface import centres
 from slipsolve.trace import VERTICAL_TOL_DEG, dip_offset
 
-# The real San Sebastian trace, decimated -- nearly east-west, the orientation
-# that stresses winding and the reference's fixed-axis orientation test.
+# A real fault trace, decimated -- nearly east-west, the orientation that
+# stresses winding and the reference's fixed-axis orientation test.
 _LON = np.array([-68.681, -68.300, -67.900, -67.500, -67.100, -66.700, -66.523])
 _LAT = np.array([10.410, 10.490, 10.540, 10.565, 10.595, 10.620, 10.630])
 
@@ -117,10 +117,10 @@ def test_gridfit_rejects_unsorted_nodes():
 def test_dip_offset_snaps_near_vertical_to_exactly_zero():
     """The guard that keeps a fitted surface out of the catastrophic band.
 
-    ``VERTICAL_TOL_DEG`` is a numerical tolerance, not a modelling preference:
+    `VERTICAL_TOL_DEG` is a numerical tolerance, not a modelling preference:
     the triangular-dislocation solution's error against Okada is 2e-14 at exactly
     90 degrees and 1.9e+02 -- 190 times the signal -- a ten-thousandth of a degree
-    away. See the constant's own docstring for the measured sweep.
+    away. See the constant's own docstring for the sweep.
     """
     assert dip_offset(20e3, 90.0) == 0.0
     assert dip_offset(20e3, 90.0 - VERTICAL_TOL_DEG / 2) == 0.0
@@ -140,9 +140,9 @@ def test_segment_projection_matches_the_reference_formula():
 
 
 def test_dip_over_ninety_leans_the_other_way():
-    """Dips above 90 are legal, and the reference's Myanmar run uses one.
+    """Dips above 90 are legal, and one of the reference's example configurations uses one.
 
-    ``segmentDipDegrees = [75 75 70 80 85 90 100]`` -- so an overhanging segment
+    `segmentDipDegrees = [75 75 70 80 85 90 100]` -- so an overhanging segment
     is exercised, not hypothetical, and clamping into [0, 90] would silently
     change the geometry rather than reject it.
     """
@@ -175,8 +175,8 @@ def test_curvilinear_round_trip(setup):
     steps along the interpolated *vertex* normal, and at a bend those differ.
     That is why the mesh builds its curvilinear frame from the **resampled**
     trace: at the resampled spacing the normals turn slowly and the round trip is
-    exact for most points and sub-element for the rest. Measured here the median
-    error is 0 m on a resampled trace against 94 m on the raw 7-vertex one.
+    exact for most points and sub-element for the rest. Here the median error is
+    0 m on a resampled trace against 94 m on the raw 7-vertex one.
     """
     trace, frame = setup
     resampled = trace.resample(6e3, frame)
@@ -262,10 +262,10 @@ def test_no_element_lands_in_the_catastrophic_band(setup):
 def test_curved_at_ninety_is_bit_identical_to_vertical(setup):
     """The backward-compatibility gate.
 
-    Not "agrees to a tolerance": identical, so every persisted phase-one mesh,
+    Not "agrees to a tolerance": identical, so every persisted vertical mesh,
     params hash and stored model stays valid. This is why a uniform dip is
     projected in closed form instead of through the gridder, and why the offset
-    at exactly 90 is a literal zero rather than ``depth / tan(pi/2)`` -- which in
+    at exactly 90 is a literal zero rather than `depth / tan(pi/2)` -- which in
     float64 is 1.2e-12 m, not 0.
     """
     trace, frame = setup
@@ -286,8 +286,8 @@ def test_uniform_dip_geometry(setup, dip):
                             max_depth=20e3, edge_length=6e3)
 
     # Dip is recovered; the excess is the trace's own curvature, which tilts an
-    # element slightly out of the nominal plane. Measured over 45-80 degrees the
-    # spread is 0.006 to 0.017 degrees, entirely at the bends.
+    # element slightly out of the nominal plane. Over 45-80 degrees the spread is
+    # 0.006 to 0.017 degrees, entirely at the bends.
     assert abs(mesh.dip.min() - dip) < 1e-9
     assert mesh.dip.max() < dip + 0.1
     # Area is the vertical fault's, stretched by the down-dip lengthening.
@@ -399,11 +399,10 @@ def test_bottom_trace_reproduces_a_uniform_dip(setup, dip):
 def test_bottom_trace_overhang_is_trimmed(setup):
     """The silent failure this constructor exists to guard against.
 
-    ``to_curvilinear`` clamps to the polyline, so a bottom-trace point drawn past
+    `to_curvilinear` clamps to the polyline, so a bottom-trace point drawn past
     the end of the surface trace reports its distance to the *endpoint* -- along
-    strike component included -- and every such point piles onto one ``s`` value.
-    Untrimmed they drag that end of the fit into a much shallower dip. Measured on
-    the real San Sebastian pair a 17 km overhang turned -7.5 km into -18.3 km.
+    strike component included -- and every such point piles onto one `s` value.
+    Untrimmed they drag that end of the fit into a much shallower dip.
     """
     trace, frame = setup
     clean = _bottom_from_offset(trace, frame, dip_offset(20e3, 70.0))
@@ -433,11 +432,10 @@ def test_bottom_trace_may_cross_the_surface_trace(setup):
     """A bottom trace that crosses reverses the dip direction along strike.
 
     This is the case a list of dips can only express with hand-tuned values
-    straddling 90, and it is what the real San Sebastian bottom trace does: north
-    of the surface trace for the western third, south for the rest. The elements
-    where it passes through vertical are an accident of the fit, so they must be
-    snapped to exactly vertical rather than left in the band where the triangular
-    dislocation loses every digit.
+    straddling 90: a fault that dips one way along part of its length and the
+    other way elsewhere. The elements where it passes through vertical are an
+    accident of the fit, so they must be snapped to exactly vertical rather than
+    left in the band where the triangular dislocation loses every digit.
     """
     trace, frame = setup
     resampled = trace.resample(6e3, frame)
@@ -510,7 +508,7 @@ def test_bottom_trace_folding_guard():
 
 
 def test_bottom_trace_reads_a_file(setup, tmp_path):
-    """A path is accepted, through the same reader ``FAULT`` already uses."""
+    """A path is accepted, through the reader `FaultTrace.from_file` provides."""
     trace, frame = setup
     bottom = _bottom_from_offset(trace, frame, dip_offset(20e3, 70.0))
     path = tmp_path / "bottom.dat"
@@ -605,9 +603,9 @@ def test_bias_w_grades_element_size_with_depth(setup, bias_w):
 
     A surface observation resolves a patch at 2 km far more sharply than one at
     18 km, so uniform depth levels spend parameters where the data cannot
-    constrain them. Measured on the real trace at eight levels over 20 km:
-    ``bias_w=1.15`` runs 1.8 km levels at the surface to 4.2 km at the base,
-    ``1.3`` runs 1.1 km to 5.5 km.
+    constrain them. On this trace at eight levels over 20 km, `bias_w=1.15` runs
+    1.8 km levels at the surface to 4.2 km at the base, and `1.3` runs 1.1 km to
+    5.5 km.
     """
     trace, frame = setup
     mesh = FaultMesh.curved(trace, frame, uniform_dip=90.0, max_depth=20e3,
@@ -636,12 +634,11 @@ def test_bias_w_does_not_disturb_the_vertical_gate(setup):
 
 
 def test_along_strike_grading_is_refused_by_name(setup):
-    """``bias_l`` would need Delaunay, whose winding this mesh exists to avoid.
+    """`bias_l` would need Delaunay, whose winding this mesh exists to avoid.
 
     It must be *refused*, not ignored. Both construction paths are checked because
-    the closed-form ``uniform_dip`` branch does not touch the surface fitter, so an
-    unvalidated keyword would vanish there while raising on the other -- which is
-    exactly what happened before this test existed.
+    the closed-form `uniform_dip` branch does not touch the surface fitter, so an
+    unvalidated keyword would vanish there while raising on the other.
     """
     trace, frame = setup
     paths = (

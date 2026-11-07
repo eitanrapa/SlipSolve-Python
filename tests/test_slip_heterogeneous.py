@@ -1,6 +1,6 @@
-"""3-D elastic heterogeneity on the layered reference (``slipsolve.heterogeneity``).
+"""3-D elastic heterogeneity on the layered reference (`slipsolve.heterogeneity`).
 
-The strain kernels the engine stands on are tested in ``test_slip_strain.py``.
+The strain kernels the engine stands on are tested in `test_slip_strain.py`.
 """
 
 import numpy as np
@@ -132,7 +132,7 @@ from slipsolve.heterogeneity import HeterogeneousEngine, strain_operator  # noqa
 
 
 def _scaled(tables, factor_lam, factor_mu, where):
-    """Moduli for :class:`VoxelModel`: the reference's, scaled where ``where(x, y, depth)``."""
+    """Moduli for `VoxelModel`: the reference's, scaled where `where(x, y, depth)`."""
     def moduli(x, y, depth):
         layer = tables.layer(depth)
         here = where(x, y, depth)
@@ -212,8 +212,8 @@ def test_born_is_first_order_in_the_contrast(coarse_tables):
 def test_a_split_level_integral_resolves_receivers_next_to_a_face(monkeypatch):
     """Receivers 1-3% of a size from a triangle: the capped rule misses, the split matches 400 points.
 
-    Measured (2026-11-04) against a 400-point rule, displacement / strain: 1% of a size 1.4e-2 / 0.26
-    capped, 8e-5 / 4.5e-3 split; 3%, 3.7e-3 / 5.6e-2 and 4e-6 / 1.4e-4.
+    Against a 400-point rule, displacement / strain, at 1% of a size: 1.4e-2 / 0.26 capped, 8e-5 / 4.5e-3
+    split; at 3%: 3.7e-3 / 5.6e-2 and 4e-6 / 1.4e-4.
     """
     import slipsolve.layered_tde as lt
     from slipsolve._tde import tde_disp_hs_unit, tde_strain_hs_unit
@@ -275,7 +275,7 @@ def test_a_voxel_is_its_point_moments(uniform_tables):
     """Against a volume integral of exact point moment sources (direct transforms, no tables).
 
     Receivers a voxel size or more above or below it, where the whole kernel decays in
-    wavenumber. Measured (2026-11-04) displacement 2e-5 to 8e-5, strain 1e-4 to 1.8e-4.
+    wavenumber. The errors are 2e-5 to 8e-5 in displacement and 1e-4 to 1.8e-4 in strain.
     """
     from slipsolve.layered_tde import _combine, _gauss01, combine_strain, tensor_packing
 
@@ -379,12 +379,12 @@ def _slab_tables(model, strain):
 def test_a_layered_band_is_recovered_from_the_reference_and_voxels():
     """Crust B (a soft band in the half-space) solved exactly by its own tables, against crust A plus voxels.
 
-    The band (5-9 km, ``mu x 0.5``, ``lambda x 0.6``: Poisson's ratio changes too) is laterally
+    The band (5-9 km, `mu x 0.5`, `lambda x 0.6`: Poisson's ratio changes too) is laterally
     infinite in B and +-16 km of 2 km voxels here, with the samples within +-8 km: samples
-    over band material the voxels lack lose their local effect (with voxels to +-16 km and
-    samples to +-25 km the full solve stayed 14-17% off whatever the band and the voxel size,
-    2026-11-04). This pins the sign of the moment density, the stiffness block, the packing and
-    the operators together: a sign error is a 2x error.
+    over band material the voxels lack lose their local effect (with samples to +-25 km the
+    full solve stays 14-17% off, whatever the band and the voxel size). This pins the sign of
+    the moment density, the stiffness block, the packing and the operators together: a sign
+    error is a 2x error.
     """
     band = (5000.0, 9000.0, 0.5, 0.6)
     A, B = _slab_tables(_crust(), True), _slab_tables(_crust(band), False)
@@ -428,10 +428,10 @@ def test_bodies_set_the_voxels_whose_centres_they_hold(coarse_tables):
 
 
 def test_a_surface_voxel_leaves_the_free_surface_traction_free(uniform_tables):
-    """At ``z = 0`` over a surface voxel (its eigenstrain subtracted) and around it, ``sigma . e_z = 0``.
+    """At `z = 0` over a surface voxel (its eigenstrain subtracted) and around it, `sigma . e_z = 0`.
 
-    The top face is dropped and the interior term carries the rest. Measured 3e-8 of the peak
-    stress (2026-11-04), inside the footprint and out, uniform and two-layer crusts.
+    The top face is dropped and the interior term carries the rest. The traction is about 3e-8 of
+    the peak stress, inside the footprint and out, in uniform and two-layer crusts.
     """
     v = VoxelSource(LayeredTDE(uniform_tables), (-500.0, 700.0), (-300.0, 600.0), (0.0, 800.0))
     xs = np.array([0.0, 300.0, -250.0, 2000.0, -1800.0, 400.0])
@@ -446,11 +446,11 @@ def test_a_surface_voxel_leaves_the_free_surface_traction_free(uniform_tables):
 
 
 def test_a_long_thin_voxel_is_the_sum_of_its_cubes(uniform_tables):
-    """Past ``MAX_ASPECT`` a voxel is computed as near-cubic pieces: its field near itself is the cubes' sum.
+    """Past `MAX_ASPECT` a voxel is computed as near-cubic pieces: its field near itself is the cubes' sum.
 
     Two triangles a face and a volume rule with as many points along every side under-resolve a long
-    thin voxel next to itself: computed whole, a 7.84 x 1 x 1 km voxel was 3.8% of the peak off 16
-    cubes' sum at its neighbours' centres (2026-11-04), where 16 and 32 cubes agreed to 7e-4.
+    thin voxel next to itself: computed whole, a 7.84 x 1 x 1 km voxel is 3.8% of the peak off 16
+    cubes' sum at its neighbours' centres, where 16 and 32 cubes agree to 7e-4.
     """
     from slipsolve.heterogeneity import MAX_ASPECT
 
@@ -498,8 +498,8 @@ def test_points_on_voxel_faces_are_found_and_refused(uniform_tables):
 
 
 def test_voxels_may_end_on_the_fault_with_contact_but_not_straddle_it(uniform_tables):
-    """``check_clearance(contact=True)``: voxels on one side of a planar fault, a face on its plane, pass; voxels the
-    fault runs through are refused; without ``contact`` the first are refused too (they lie within a voxel of it)."""
+    """`check_clearance(contact=True)`: voxels on one side of a planar fault, a face on its plane, pass; voxels the
+    fault runs through are refused; without `contact` the first are refused too (they lie within a voxel of it)."""
     from slipsolve import FaultMesh, FaultTrace
 
     trace = FaultTrace.from_lonlat(np.array([-80.05, -79.95]), np.array([8.0, 8.0]))
@@ -523,7 +523,7 @@ def test_voxels_may_end_on_the_fault_with_contact_but_not_straddle_it(uniform_ta
 
 
 def test_workers_give_the_serial_operators(uniform_tables, tmp_path):
-    """``workers`` > 1: processes that each load the tables from their file give the serial E, H and Gamma to rounding."""
+    """`workers` > 1: processes that each load the tables from their file give the serial E, H and Gamma to rounding."""
     from slipsolve import FaultMesh, FaultTrace
     from slipsolve import wavenumber as wn
     from slipsolve.basis import make_basis
@@ -554,7 +554,7 @@ def test_workers_give_the_serial_operators(uniform_tables, tmp_path):
 
 
 def test_one_pool_serves_the_engine_operators(uniform_tables, tmp_path):
-    """``HeterogeneousEngine(workers=2)``: one pool for H, E and Gamma, the serial engine's G to rounding."""
+    """`HeterogeneousEngine(workers=2)`: one pool for H, E and Gamma, the serial engine's G to rounding."""
     from slipsolve import FaultMesh, FaultTrace
     from slipsolve import wavenumber as wn
 
@@ -581,7 +581,7 @@ def test_one_pool_serves_the_engine_operators(uniform_tables, tmp_path):
 
 # -- the strain far path: point moments by a volume rule -----------------------------------------
 def _around_voxel(v, n, lo, hi, seed, z_max=30e3):
-    """``n`` points at a box distance of ``lo``-``hi`` voxel sizes from ``v``, at or below the surface."""
+    """`n` points at a box distance of `lo`-`hi` voxel sizes from `v`, at or below the surface."""
     rng = np.random.default_rng(seed)
     pts = []
     while len(pts) < n:
@@ -606,11 +606,11 @@ def test_moment_sources_make_the_unit_moments():
 
 
 def test_the_far_strain_is_the_faces_in_a_uniform_crust(uniform_tables):
-    """Beyond ``strain_far`` sizes, Okada point moments by a Gauss volume rule against the faces (no remainder).
+    """Beyond `strain_far` sizes, Okada point moments by a Gauss volume rule against the faces (no remainder).
 
-    Measured (2026-11-05) at box distances of 2-20 sizes: at most 4e-4 (buried) and 1.2e-3 (at the surface)
-    of each receiver's peak; on the Venezuela v3 tables, where the remainder is not zero, the two paths agree
-    as well, except across an interface from the source, where both sit on the tables' trilinear floor.
+    At box distances of 2-20 sizes they agree to 4e-4 (buried) and 1.2e-3 (at the surface) of each receiver's
+    peak. On layered tables, where the remainder is not zero, the two paths agree as well, except across an
+    interface from the source, where both sit on the tables' trilinear floor.
     """
     engine = LayeredTDE(uniform_tables)
     for seed, box in enumerate((((0.0, 1e3), (0.0, 1e3), (3e3, 4e3)), ((0.0, 1e3), (0.0, 1e3), (0.0, 1e3)),

@@ -1,40 +1,39 @@
 """EDGRN Green's-function tables: what a layered crust does to a point source.
 
 A homogeneous half-space has one elastic modulus everywhere, so its response to a
-buried source is a closed form and :mod:`slipsolve._tde` evaluates it
+buried source is a closed form and `slipsolve._tde` evaluates it
 directly. A layered crust has no closed form: the response has to be built by
 wavenumber integration through the layer stack, which is what Rongjiang Wang's
 **EDGRN** (Wang, Lorenzo-Martin & Roth 2003, *Computers & Geosciences* **29**,
 195-207) does, once, into a table indexed by source depth and epicentral
 distance. **EDCMP** then reads that table and superposes point sources over a
-fault. This module is the table half; :mod:`slipsolve.layered` is the
+fault. This module is the table half; `slipsolve.layered` is the
 superposition half.
 
 Three tables are needed because a general moment tensor decomposes into three
 sources with distinct azimuthal symmetry, and the tables store each with its
 azimuthal dependence stripped out:
 
-===== ============================== ================
-file  source                         azimuthal order
-===== ============================== ================
-ss    ``m12 = m21 = M0``             2
-ds    ``m13 = m31 = M0``             1
-cl    ``m33 = M0, m11 = m22 = -M0/2``0
-===== ============================== ================
+| file | source                        | azimuthal order |
+|------|-------------------------------|-----------------|
+| ss   | `m12 = m21 = M0`              | 2               |
+| ds   | `m13 = m31 = M0`              | 1               |
+| cl   | `m33 = M0, m11 = m22 = -M0/2` | 0               |
 
-so a table row is a function of ``(r, z_source)`` alone and the azimuth is put
-back at evaluation time (``edgmoment.f`` sets ``ms = 2, 1, 0`` for exactly this
-reason). :mod:`slipsolve.layered` does the putting back.
+so a table row is a function of `(r, z_source)` alone and the azimuth is put
+back at evaluation time (`edgmoment.f` sets `ms = 2, 1, 0` for exactly this
+reason). `slipsolve.layered` does the putting back.
 
-**Coordinates here are EDGRN's, not the package's.** ``x`` is north, ``y`` is
-east and ``z`` is **down**; ``uz`` in a table is positive downward. The
-conversion happens at the boundary of :mod:`slipsolve.layered`, which is
-also where the reference does it -- the apparent axis swap at the top of
-``calc_green_gps_3d_edcmp_xyz.m`` is that conversion and not, as it looks, a bug.
+**Coordinates here are EDGRN's, not the package's.** `x` is north, `y` is
+east and `z` is down; `uz` in a table is positive downward. The
+conversion happens at the boundary of `slipsolve.layered`, which is
+also where the reference (SlipSolve-Curve) does it -- the apparent axis swap at the
+top of its `calc_green_gps_3d_edcmp_xyz.m` is that conversion and not, as it looks,
+a bug.
 
 Running EDGRN itself is optional and external, exactly as in the reference: the
-user owns the Earth model. :func:`run_edgrn` will drive it through ``pygrnwang``
-if that is installed, and :meth:`EdgrnTables.homogeneous` synthesises a
+user owns the Earth model. `run_edgrn` will drive it through `pygrnwang`
+if that is installed, and `EdgrnTables.homogeneous` synthesises a
 uniform-medium table analytically so the whole layered pipeline can be tested
 without any Fortran at all.
 """
@@ -46,15 +45,15 @@ from pathlib import Path
 
 import numpy as np
 
-#: Source types, in EDGRN's own order (``istype`` 1, 2, 3).
+#: Source types, in EDGRN's own order (`istype` 1, 2, 3).
 SOURCE_TYPES = ("ss", "ds", "cl")
 
 #: Displacement columns of a table row, in file order.
 _DISPLACEMENT_COLUMNS = ("uz", "ur", "ut")
 
 #: Two vertex depths closer than this, in metres, take the divided difference's
-#: confluent limit in :meth:`VelocityModel.triangle_mean` -- a rows mesh has a
-#: horizontal edge on every element. The limit is off by ``p' (y - x)**2 / 24``.
+#: confluent limit in `VelocityModel.triangle_mean` -- a rows mesh has a
+#: horizontal edge on every element. The limit is off by `p' (y - x)**2 / 24`.
 _CONFLUENT_DEPTH = 1e-3
 
 #: A triangle whose depths span less than this, in metres, is flat: its mean is the
@@ -67,10 +66,10 @@ class VelocityModel:
     """A layered elastic Earth: depth, P and S velocity, density.
 
     The input EDGRN needs, and the source of the depth-dependent rigidity
-    ``mu = rho * vs**2`` that a moment calculation wants. A discontinuity is
+    `mu = rho * vs**2` that a moment calculation wants. A discontinuity is
     written as two rows at the same depth; a gradient as two rows at different
     depths with different values -- EDGRN's own convention, preserved so a model
-    can be round-tripped through an ``edgrn.inp`` unchanged.
+    can be round-tripped through an `edgrn.inp` unchanged.
     """
 
     def __init__(self, depth, vp, vs, rho, name=None):
@@ -93,7 +92,7 @@ class VelocityModel:
     def uniform(cls, vp=6000.0, vs=3464.0, rho=2670.0, max_depth=100e3):
         """One layer -- the model whose answer must match the half-space engine.
 
-        The defaults give ``mu = rho * vs**2`` = 32.0 GPa and a Poisson ratio of
+        The defaults give `mu = rho * vs**2` = 32.0 GPa and a Poisson ratio of
         0.25, i.e. a Poisson solid close to the 30 GPa this package assumes when
         no model is supplied.
         """
@@ -101,7 +100,7 @@ class VelocityModel:
 
     @classmethod
     def from_file(cls, path):
-        """Read ``depth vp vs rho`` rows (metres, m/s, m/s, kg/m^3)."""
+        """Read `depth vp vs rho` rows (metres, m/s, m/s, kg/m^3)."""
         path = Path(path).expanduser()
         rows = []
         for line in path.read_text().splitlines():
@@ -122,22 +121,22 @@ class VelocityModel:
 
         A gradient -- two rows at different depths with different values -- is
         continuous and is not an interface. These are the depths across which
-        :meth:`EdgrnTables.interpolate` must not interpolate.
+        `EdgrnTables.interpolate` must not interpolate.
         """
         return _step_depths(self.depth, self.vp, self.vs, self.rho)
 
     @property
     def mu(self):
-        """Shear modulus per row, ``rho * vs**2``, in pascals."""
+        """Shear modulus per row, `rho * vs**2`, in pascals."""
         return self.rho * self.vs ** 2
 
     @property
     def lam(self):
-        """First Lame parameter per row, ``rho * (vp**2 - 2 vs**2)``."""
+        """First Lame parameter per row, `rho * (vp**2 - 2 vs**2)`."""
         return self.rho * (self.vp ** 2 - 2.0 * self.vs ** 2)
 
     def poisson(self, depth=0.0):
-        """Poisson's ratio at ``depth``."""
+        """Poisson's ratio at `depth`."""
         lam, mu = self.at(depth, "lam"), self.at(depth, "mu")
         return float(lam / (2.0 * (lam + mu)))
 
@@ -157,19 +156,18 @@ class VelocityModel:
 
         Depth is affine across a planar triangle and area is uniform in its
         barycentric coordinates, so by the Hermite-Genocchi formula the mean of
-        ``p(z)`` over the triangle is ``2 P[z1, z2, z3]``: twice the second divided
-        difference of ``P``, the second antiderivative of ``p``. :meth:`at` is
+        `p(z)` over the triangle is `2 P[z1, z2, z3]`: twice the second divided
+        difference of `P`, the second antiderivative of `p`. `at` is
         piecewise linear in depth, with a step wherever two rows share a depth, so
-        ``P`` is piecewise cubic and the mean is exact -- a triangle cut by an
+        `P` is piecewise cubic and the mean is exact -- a triangle cut by an
         interface gets the area-weighted mean of the two layers.
 
-        Sampling :meth:`at` at points inside the triangle cannot do that: which side
+        Sampling `at` at points inside the triangle cannot do that: which side
         of a step a point falls on decides its whole cell, so the error is first
-        order with an erratic constant. Measured on the Venezuela r84 moment,
-        sampling at ``13**2`` sub-triangle centroids per element was 2.6e-3 off and
-        ``8**2`` was 5.4e-4 off; this is exact.
+        order with an erratic constant, and a finer sampling can be worse; this is
+        exact.
 
-        ``depths`` is ``(..., 3)``, sign ignored like :meth:`at`; returns ``(...)``.
+        `depths` is `(..., 3)`, sign ignored like `at`; returns `(...)`.
         """
         z = np.sort(np.abs(np.asarray(depths, dtype=float)), axis=-1)
         if z.shape[-1] != 3:
@@ -186,7 +184,7 @@ class VelocityModel:
                     + slope[k] * h ** 3 / 6.0)
 
         def divided(x, y):
-            """``P[x, y]`` for ``x <= y``; the confluent limit ``P'`` where they meet."""
+            """`P[x, y]` for `x <= y`; the confluent limit `P'` where they meet."""
             close = (y - x) <= _CONFLUENT_DEPTH
             return np.where(close, integral(0.5 * (x + y), 1),
                             (integral(y, 2) - integral(x, 2))
@@ -198,12 +196,12 @@ class VelocityModel:
         return np.where(flat, self.at((a + b + c) / 3.0, field), mean)
 
     def _antiderivatives(self, field):
-        """Knots from depth 0, the property and its slope there, and ``P'`` and ``P``.
+        """Knots from depth 0, the property and its slope there, and `P'` and `P`.
 
         The knots are the rows at or below the surface -- duplicates kept, so a step
         is a zero-width interval that adds nothing -- with depth 0 prepended at
-        :meth:`at`'s own value when no row sits there. ``slope[k]`` is the gradient
-        from knot ``k`` to the next, 0 past the last (the half-space).
+        `at`'s own value when no row sits there. `slope[k]` is the gradient
+        from knot `k` to the next, 0 past the last (the half-space).
         """
         values = np.asarray(getattr(self, field), dtype=float)
         keep = self.depth >= 0.0
@@ -241,21 +239,19 @@ class VelocityModel:
 
 
 class EdgrnTables:
-    """The three EDGRN databases on their shared ``(r, z_source)`` grid.
+    """The three EDGRN databases on their shared `(r, z_source)` grid.
 
-    ``ss``, ``ds`` and ``cl`` are each a dict of ``(nr, nz)`` arrays keyed by
-    ``uz``, ``ur``, ``ut`` -- the displacement at the receiver depth ``zrec`` per
-    unit source area times slip, with the azimuthal factor removed. ``cl``'s
-    ``ut`` is identically zero: an axisymmetric source drives no transverse
+    `ss`, `ds` and `cl` are each a dict of `(nr, nz)` arrays keyed by
+    `uz`, `ur`, `ut` -- the displacement at the receiver depth `zrec` per
+    unit source area times slip, with the azimuthal factor removed. `cl`'s
+    `ut` is identically zero: an axisymmetric source drives no transverse
     motion.
 
-    ``interfaces`` are the depths where the crust's properties step (read from the
-    input file's layer block by :meth:`from_input_file`). Per unit area times slip a
-    table value **jumps** there by about the rigidity ratio, because the moment is
-    ``mu`` times the potency and ``mu`` is the source layer's -- measured on the
-    Venezuela crust, strike-slip values just below / above 2 km differ by 3.6-3.8x
-    against ``mu`` 33.7 / 9.0 GPa = 3.74. :meth:`interpolate` therefore never
-    interpolates across one; see there.
+    `interfaces` are the depths where the crust's properties step (read from the
+    input file's layer block by `from_input_file`). Per unit area times slip a
+    table value jumps there by about the rigidity ratio, because the moment is
+    `mu` times the potency and `mu` is the source layer's. `interpolate` therefore
+    never interpolates across one; see there.
     """
 
     def __init__(self, r, z, tables, zrec=0.0, lam=None, mu=None, attrs=None,
@@ -288,10 +284,9 @@ class EdgrnTables:
     def _layer_stencils(self):
         """The depth intervals that straddle an interface, and each layer's nodes.
 
-        ``None`` when no interface falls strictly inside the depth grid, which keeps
-        :meth:`interpolate` on its plain path. A node lying ON an interface is
-        usable by neither layer: EDGRN assigns it to one side (the stiff one, on the
-        production Venezuela grid's node at exactly 2 km), and which side is not
+        `None` when no interface falls strictly inside the depth grid, which keeps
+        `interpolate` on its plain path. A node lying on an interface is
+        usable by neither layer: EDGRN assigns it to one side, and which side is not
         something to rely on.
         """
         z = self.z
@@ -310,13 +305,13 @@ class EdgrnTables:
     # -- reading -----------------------------------------------------------
     @classmethod
     def from_input_file(cls, path):
-        """Read the three databases an ``edgrn.inp`` names.
+        """Read the three databases an `edgrn.inp` names.
 
-        The directory and the three filenames sit on the **fifth line containing
-        no** ``#``, single-quote delimited -- ``getedgrn.m``'s rule, kept because
+        The directory and the three filenames sit on the fifth line containing
+        no `#`, single-quote delimited -- `getedgrn.m`'s rule, kept because
         it is the only thing that locates the tables. Relative directories are
         resolved against the input file rather than the working directory, which
-        is why the reference has to ``cd`` before calling its own reader.
+        is why the reference has to `cd` before calling its own reader.
         """
         path = Path(path).expanduser()
         lines = [ln for ln in path.read_text().splitlines() if "#" not in ln and ln.strip()]
@@ -338,10 +333,10 @@ class EdgrnTables:
 
     @classmethod
     def from_files(cls, paths, interfaces=None):
-        """Read three already-located database files, keyed ``ss``/``ds``/``cl``.
+        """Read three already-located database files, keyed `ss`/`ds`/`cl`.
 
-        The database files do not carry the layer model, so ``interfaces`` has to be
-        given here to keep :meth:`interpolate` inside layers; :meth:`from_input_file`
+        The database files do not carry the layer model, so `interfaces` has to be
+        given here to keep `interpolate` inside layers; `from_input_file`
         reads them from the input file's layer block.
         """
         header, tables = None, {}
@@ -371,26 +366,26 @@ class EdgrnTables:
         that idea -- its own input file carries a "layered (1) or homogeneous (0)"
         switch and it ships Okada's routines for the second branch. Synthesising
         the tables here gives the same check without any Fortran, and it exercises
-        every part of :mod:`slipsolve.layered`: the discretisation, the
+        every part of `slipsolve.layered`: the discretisation, the
         bilinear interpolation, the azimuthal recombination, the north/east/down
         conventions and the quadrature.
 
-        What it does **not** test is the physics of layering, since the field it
-        tabulates comes from :func:`slipsolve._tde.tde_disp_hs` -- the same
+        What it does not test is the physics of layering, since the field it
+        tabulates comes from `slipsolve._tde.tde_disp_hs` -- the same
         solution the engine is compared against. That is a test of the machinery,
         deliberately, and it is the part with all the transcription risk.
 
         Each source is built as a dislocation small enough to be a point at the
         table's own resolution, and the azimuthal orders are projected out
         numerically rather than derived by hand -- the exact inverse of the
-        recombination in :mod:`slipsolve.layered`. The CLVD, which is not a
-        dislocation at all, comes from three tensile sources::
+        recombination in `slipsolve.layered`. The CLVD, which is not a
+        dislocation at all, comes from three tensile sources:
 
             CLVD = (1/2) * [ T_z - (T_x + T_y) / 2 ]
 
-        because a unit tensile source with normal ``w`` has moment tensor
-        ``lam*I + 2*mu*w(x)w``, so the isotropic parts cancel and what is left is
-        ``mu*(z(x)z - x(x)x/2 - y(x)y/2)`` -- the CLVD, exactly.
+        because a unit tensile source with normal `w` has moment tensor
+        `lam*I + 2*mu*w(x)w`, so the isotropic parts cancel and what is left is
+        `mu*(z(x)z - x(x)x/2 - y(x)y/2)` -- the CLVD, exactly.
         """
         from ._tde import tde_disp_hs
 
@@ -438,28 +433,24 @@ class EdgrnTables:
 
     # -- use ---------------------------------------------------------------
     def interpolate(self, kind, component, distance, depth):
-        """Bilinear lookup in ``(r, z_source)``, EDCMP's own stencil, within layers.
+        """Bilinear lookup in `(r, z_source)`, EDCMP's own stencil, within layers.
 
         Outside the tabulated range the value is taken from the edge cell rather
-        than extrapolated, at every edge: below ``r1`` (as EDCMP does), beyond
-        ``r2`` (where EDCMP pads with zeros instead) and above or below the
+        than extrapolated, at every edge: below `r1` (as EDCMP does), beyond
+        `r2` (where EDCMP pads with zeros instead) and above or below the
         tabulated source depths. A source outside the table therefore takes the
         edge row's value, not zero, so the table must cover the mesh.
 
-        ⚠️ **Never across an interface.** A table value steps by about the rigidity
+        **Never across an interface.** A table value steps by about the rigidity
         ratio where the source crosses one (see the class docstring), so the plain
-        stencil hands every source within one depth spacing of an interface a blend
-        of both layers. On the production Venezuela grid (500 m depth spacing, a
-        node exactly at the 2 km interface that EDGRN puts on the stiff side) the
-        whole 1.5-2 km band of the 9 GPa layer interpolated toward 33.7 GPa values;
-        re-solving the real problem with and without that blend moved the slip by up
-        to **4.1% of peak** (0.41% on a 100 m depth grid).
-        So a query whose depth interval straddles an interface -- or ends on one --
-        takes its two depth nodes from its own layer instead, extrapolating linearly
-        from the nearest two when it sits between the last node and the interface;
-        a query exactly at an interface depth belongs to the layer below it. Every
-        other query is untouched, bit for bit, and a table with no interfaces takes
-        the plain path.
+        stencil would hand every source within one depth spacing of an interface a
+        blend of both layers, which on a coarse depth grid moves the slip by several
+        percent of its peak. So a query whose depth interval straddles an interface
+        -- or ends on one -- takes its two depth nodes from its own layer instead,
+        extrapolating linearly from the nearest two when it sits between the last
+        node and the interface; a query exactly at an interface depth belongs to the
+        layer below it. Every other query takes the plain stencil, bit for bit, and a
+        table with no interfaces takes the plain path.
         """
         table = self.tables[kind][component]
         nr, nz = table.shape
@@ -468,14 +459,10 @@ class EdgrnTables:
 
         distance = np.asarray(distance, dtype=float)
         depth = np.asarray(depth, dtype=float)
-        # ⚠️ `np.minimum(np.maximum(...))` rather than `np.clip`, and it is not
-        # style. This is the hot path of the whole layered engine -- profiled at
-        # 79 000 calls and 70% of assembly time on an 816-element problem -- and
-        # `np.clip` routes through `_wrapfunc` into `_methods._clip`, which
-        # constructs a `finfo` per call for its NaN handling. That showed up as
-        # 316 096 `getlimits.__init__` calls and **20% of total assembly time**,
-        # spent entirely on overhead. The two ufuncs are bit-identical here
-        # (pinned by `test_interpolation_is_unchanged_by_the_clip_rewrite`)
+        # `np.minimum(np.maximum(...))` rather than `np.clip`, for speed: this is the
+        # layered engine's hot path, and `np.clip`'s per-call overhead (it builds a
+        # `finfo` for its NaN handling) was a fifth of assembly time. The two are
+        # bit-identical here (pinned by `test_interpolation_is_unchanged_by_the_clip_rewrite`)
         # because none of these values is ever NaN: `r` and `z` are finite by
         # construction and the caller's distances come from finite geometry.
         fi = np.minimum(np.maximum((distance - self.r[0]) / dr, 0.0), nr - 1)
@@ -497,7 +484,7 @@ class EdgrnTables:
     def _within_layers(self, fj, dz, j0, j1, tj):
         """Replace the depth stencil of the queries that straddle an interface.
 
-        Works on the few such queries only: one gather over ``j0`` finds them, and
+        Works on the few such queries only: one gather over `j0` finds them, and
         the rest of the arrays are returned as they came.
         """
         cuts, straddles, nodes = self._layers
@@ -544,10 +531,10 @@ def _step_depths(depth, vp, vs, rho):
 
 
 def _input_file_interfaces(lines):
-    """The interfaces of an ``edgrn.inp``'s layer block; ``[]`` if it has none.
+    """The interfaces of an `edgrn.inp`'s layer block; `[]` if it has none.
 
-    ``lines`` are the input's comment-free lines: the sixth holds the row count and
-    each row after it is ``index depth vp vs rho``.
+    `lines` are the input's comment-free lines: the sixth holds the row count and
+    each row after it is `index depth vp vs rho`.
     """
     def numbers(line):
         return [float(v) for v in _fortran_floats(line).split()]
@@ -579,10 +566,10 @@ _SOURCE_GEOMETRY = (
 
 
 def _point_dislocation(normal, slip, depth, size):
-    """A tiny triangle with the requested normal, and its ``(ss, ds, ts)``.
+    """A tiny triangle with the requested normal, and its `(ss, ds, ts)`.
 
     Solving for the slip components rather than naming them avoids the sign trap
-    in the triangular-dislocation basis: ``Vstrike = cross(eZ, Vnorm)`` can come
+    in the triangular-dislocation basis: `Vstrike = cross(eZ, Vnorm)` can come
     out anti-parallel to the direction you meant, and the resulting moment tensor
     is then the negative of the one intended -- which produces a perfectly smooth,
     entirely wrong table. Projecting the desired slip vector onto the element's
@@ -612,9 +599,9 @@ def _point_dislocation(normal, slip, depth, size):
 def _project(values, phi, kind, component):
     """Strip the azimuthal factor, inverting the recombination exactly.
 
-    ``values`` is ``(nr, nphi)``. The factors are the ones
-    :mod:`slipsolve.layered` puts back: order 2 for ``ss``, 1 for ``ds``,
-    0 for ``cl``, with ``ut`` carrying the quadrature partner of the ``uz``/``ur``
+    `values` is `(nr, nphi)`. The factors are the ones
+    `slipsolve.layered` puts back: order 2 for `ss`, 1 for `ds`,
+    0 for `cl`, with `ut` carrying the quadrature partner of the `uz`/`ur`
     factor.
     """
     if kind == "cl":
@@ -629,12 +616,12 @@ def _read_table(path, kind):
     """One EDGRN database: its metadata line and its displacement columns.
 
     The column count is read from the file rather than assumed. Stock EDGRN 2.0
-    writes **ten** columns for ``ss`` and ``ds`` but only **seven** for ``cl``
-    (``edgmain.f`` drops ``ut``, ``ert`` and ``etz``, which vanish for an
-    axisymmetric source), while ``getedgrn.m`` and SlipSolve's own converter both
-    read ten and assert the row count -- so a stock ``cl`` file would fail there.
+    writes ten columns for `ss` and `ds` but only seven for `cl`
+    (`edgmain.f` drops `ut`, `ert` and `etz`, which vanish for an
+    axisymmetric source), while `getedgrn.m` and SlipSolve-Curve's own converter both
+    read ten and assert the row count -- so a stock `cl` file would fail there.
     Only the leading displacement columns are used either way; the six strain
-    columns and ``duz/dr`` are read and discarded.
+    columns and `duz/dr` are read and discarded.
     """
     text = Path(path).read_text().splitlines()
     body = [ln for ln in text if ln.strip() and "#" not in ln]
@@ -670,42 +657,39 @@ def _read_table(path, kind):
 
 
 def _fortran_floats(line):
-    """Turn Fortran's ``1.0D+03`` exponent marker into one Python can parse."""
+    """Turn Fortran's `1.0D+03` exponent marker into one Python can parse."""
     return re.sub(r"([0-9])[dD]([+-]?[0-9])", r"\1e\2", line)
 
 
 def write_edgrn_input(path, model, obs_depth=0.0, nr=1601, r_max=400e3,
                       nz=401, z_min=50.0, z_max=50050.0, srate=12.0,
                       directory="edgrnfcts/", names=("edgrn.ss", "edgrn.ds", "edgrn.cl")):
-    """Write an ``edgrn.inp`` for ``model`` on the given ``(r, z)`` grid.
+    """Write an `edgrn.inp` for `model` on the given `(r, z)` grid.
 
     The grid is the table's resolution, and the interpolation in
-    :meth:`EdgrnTables.interpolate` is bilinear, so it wants to be fine enough
-    that the response is nearly linear across a cell near the fault. ``z_min``
+    `EdgrnTables.interpolate` is bilinear, so it wants to be fine enough
+    that the response is nearly linear across a cell near the fault. `z_min`
     is not zero because a source exactly at the free surface radiates nothing.
 
-    ⚠️ **The grid sets EDGRN's own accuracy, not just the interpolation's.**
+    **The grid sets EDGRN's own accuracy, not just the interpolation's.**
     EDGRN resolves the field only down to its grid spacing, and its error follows
-    the *coarser* of the radial and depth spacings. Measured against the exact
-    point source on a homogeneous crust, worst over source types and components
-    for receivers 2-5 km out, at source depths 0.5 / 2 / 5 / 10 km:
+    the *coarser* of the radial and depth spacings. Against the exact point source
+    on a homogeneous crust, worst over source types and components for receivers
+    2-5 km out, at source depths 0.5 / 2 / 5 / 10 km (EDGRN's run time on one
+    desktop CPU):
 
-    ====================================  ===============================  ======
-    grid (``nr x nz``, spacing, depths)   node error                       EDGRN
-    ====================================  ===============================  ======
-    201 x 100, 2 km / 500 m, 0.5-50 km    61 / 78 / 44 / 16 %              4 s
-    1601 x 401, 250 m / 100 m, to 40 km   1.3 / 5.0 / 1.4 / 1.0 %          163 s
-    1601 x 401, 250 m / 125 m, to 50 km   1.8 / 4.9 / 1.4 / 1.0 %          146 s
-    ====================================  ===============================  ======
+    | grid (`nr x nz`, spacing, depths)   | node error              | EDGRN |
+    |-------------------------------------|-------------------------|-------|
+    | 201 x 100, 2 km / 500 m, 0.5-50 km  | 61 / 78 / 44 / 16 %     | 4 s   |
+    | 1601 x 401, 250 m / 100 m, to 40 km | 1.3 / 5.0 / 1.4 / 1.0 % | 163 s |
+    | 1601 x 401, 250 m / 125 m, to 50 km | 1.8 / 4.9 / 1.4 / 1.0 % | 146 s |
 
-    The first row was the default until 2026-10-08. On a real inversion it put
-    16.8% into ``G`` and moved the slip by up to 13.9% of peak, against 0.07% on
-    1601 x 401. The default is now the last row: the same accuracy as the
-    validated production grid, kept to 50 km depth so that sources between 40
-    and 50 km stay inside the table. :meth:`EdgrnTables.interpolate` clamps at
-    the table edge rather than failing, so make sure the table covers the mesh.
-    ``nz`` cannot exceed 401 (EDGRN's compiled ``nzsmax``), so a deeper table
-    means coarser depth spacing. Times are for an x86_64 Mac.
+    A grid as coarse as the first row can move an inversion's slip by more than
+    10% of its peak. The default is the last row, kept to 50 km depth so that
+    sources between 40 and 50 km stay inside the table. `EdgrnTables.interpolate`
+    clamps at the table edge rather than failing, so make sure the table covers the
+    mesh. `nz` cannot exceed 401 (EDGRN's compiled `nzsmax`), so a deeper table
+    means coarser depth spacing.
     """
     path = Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -731,12 +715,12 @@ def run_edgrn(model, workdir, executable=None, **grid):
     """Generate tables by actually running EDGRN, and read them back.
 
     Optional and lazily resolved, in the same style as the package's other
-    external tools. The reference implementation does not do this at all -- its
-    stage 7 only converts EDGRN's text output, on the reasoning that the user owns
-    the Earth model -- so this is a convenience, not a port.
+    external tools. The reference implementation (SlipSolve-Curve) does not do this
+    at all -- it only converts EDGRN's text output, on the reasoning that the user
+    owns the Earth model -- so this is a convenience, not a port.
 
-    Resolution order: an explicit ``executable``, then ``edgrn`` on ``PATH``, then
-    the copy ``pygrnwang`` bundles and builds. Raises with all three named if
+    Resolution order: an explicit `executable`, then `edgrn` on `PATH`, then
+    the copy `pygrnwang` bundles and builds. Raises with all three named if
     none is available.
     """
     workdir = Path(workdir).expanduser()
@@ -761,7 +745,7 @@ def run_edgrn(model, workdir, executable=None, **grid):
 
 
 def _pygrnwang_edgrn():
-    """The EDGRN binary ``pygrnwang`` ships, if it is installed and built."""
+    """The EDGRN binary `pygrnwang` ships, if it is installed and built."""
     try:
         import pygrnwang
     except ImportError:

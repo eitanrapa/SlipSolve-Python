@@ -1,7 +1,7 @@
 """Pins the Green's-function assembly, and above all the sign of slip.
 
-Nothing in the code says whether ``strike_slip = +1`` is left- or right-lateral;
-it falls out of ``Vstrike = cross(eZ, Vnorm)`` composed with the mesh's winding
+Nothing in the code says whether `strike_slip = +1` is left- or right-lateral;
+it falls out of `Vstrike = cross(eZ, Vnorm)` composed with the mesh's winding
 rule, and it has to be *measured*. Getting it backwards is the worst failure mode
 in the package: a polarity bound would then enforce the wrong sense of motion, and
 the inversion would return near-zero slip with a poor fit that looks exactly like
@@ -152,8 +152,8 @@ def test_assembly_is_deterministic():
     """Repeat assembly is bit-identical: no accumulation order to drift.
 
     Worth pinning because the obvious optimisation here is a thread pool over
-    elements, and that would introduce one. (It also measured *slower* -- see the
-    module docstring of :mod:`slipsolve.greens`.)
+    elements, and that would introduce one. (It is also slower: each element's
+    work is too small to beat the dispatch overhead.)
     """
     _, _, mesh = _east_striking(edge_length=8e3)
     rng = np.random.default_rng(1)

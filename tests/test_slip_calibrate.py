@@ -2,15 +2,15 @@
 
 The module under test exists because a synthetic recovery experiment is easy to
 run and easy to get silently wrong. Every test here corresponds to a specific way
-it was got wrong first, so they are acceptance tests for the protocol rather than
+it can go wrong, so they are acceptance tests for the protocol rather than
 coverage of the code.
 
-⚠️ The expensive part of a calibration -- `run_case`, which builds Green's
-functions and runs a sampling loop -- is deliberately **not** exercised here.
+The expensive part of a calibration -- `run_case`, which builds Green's
+functions and runs a sampling loop -- is deliberately not exercised here.
 It is minutes per call even on a toy mesh, and everything it does beyond
 orchestration is already pinned by `test_slip_predict.py` and
-`test_slip_resolution.py`. What is tested is the part that is genuinely new: the
-target's relationship to the bounds, the discretisation ceiling, the scoring
+`test_slip_resolution.py`. What is tested is the rest: the target's
+relationship to the bounds, the discretisation ceiling, the scoring
 convention, and the plan's cost.
 """
 
@@ -40,7 +40,7 @@ DEXTRAL = dict(polarity=(-1, 0, 0), strike=(-8.0, 8.0), dip=(-3.0, 3.0))
 # -- the target must be reachable ------------------------------------------
 
 def test_sign_alternating_target_is_refused_under_a_polarity_bound(mesh):
-    """The bug this module exists to prevent.
+    """The failure this module exists to prevent.
 
     A textbook checkerboard alternates sign. Under `polarity=(-1, 0, 0)` almost
     half of it is in a region the solver cannot enter, so its recovery score
@@ -100,21 +100,19 @@ def test_ceiling_is_pure_geometry_and_flags_the_undersampled_wavelength(mesh):
 
 
 def test_a_mesh_that_loses_its_depth_levels_fails_a_ceiling_mesh0_passed(mesh):
-    """Why `run_case` rechecks the ceiling, and why the check tests BOTH axes.
+    """Why `run_case` rechecks the ceiling, and why the check tests both axes.
 
     `calibration_plan` scores `mesh0`, but every case then adapts away from it,
-    and the adaptation is free to spend its budget along strike. Measured on the
-    real Venezuela geometry, the default `size_max` took 11 depth levels to 5 and
-    the coarsest element to 19.9 km, and the 20 km rung then retained 0.754 where
-    `mesh0` had reported 0.993 -- so a "resolution" failure at that wavelength was
-    partly discretisation, and nothing in the protocol would have said so.
+    and the adaptation is free to spend its budget along strike. An adapted mesh
+    can lose most of its depth levels, and a "resolution" failure at a short
+    wavelength is then partly discretisation, with nothing in the protocol to say so.
 
-    ⚠️ The subtler half: `amplitude_retained` is nearly blind to this. Measured on
-    the trace below at a 20 km cell it reads 1.007 at 11 depth levels and 1.007 at
-    4, falling only at 3 where the sampling lands on the cell's own zeros -- a
-    nearest-neighbour hold preserves variance while destroying the pattern. So
-    `usable` cannot rest on amplitude plus an along-strike Nyquist count; the
-    down-dip count is what sees a collapsed mesh.
+    The subtler half: `amplitude_retained` is nearly blind to this. On this trace
+    at a 20 km cell it reads 1.007 at 11 depth levels and 1.007 at 4, falling only
+    at 3 where the sampling lands on the cell's own zeros -- a nearest-neighbour
+    hold preserves variance while destroying the pattern. So `usable` cannot rest
+    on amplitude plus an along-strike Nyquist count; the down-dip count is what
+    sees a collapsed mesh.
     """
     trace = FaultTrace(_LON, _LAT, name="calib")
     collapsed = FaultMesh.curved(trace, trace.local_frame(), uniform_dip=100.0,
@@ -126,7 +124,7 @@ def test_a_mesh_that_loses_its_depth_levels_fails_a_ceiling_mesh0_passed(mesh):
     assert fine["usable"] and fine["samples_down_dip"] >= 2.0
     assert not coarse["usable"]
     assert coarse["samples_down_dip"] < 2.0
-    # The along-strike axis is untouched, so the old test would have passed both.
+    # The along-strike axis is untouched, so an along-strike count alone passes both.
     assert coarse["samples_per_cell"] == pytest.approx(fine["samples_per_cell"])
     # And amplitude alone would have passed both too -- that is the point.
     assert coarse["amplitude_retained"] > 0.95
@@ -137,8 +135,8 @@ def test_run_case_accepts_mesh_adaptation_overrides():
     """`size_max` must be reachable from a driver, or the collapse is unavoidable.
 
     Signature-level, deliberately: exercising `run_case` needs scenes, Green's
-    functions and a sampling loop, and the thing that broke was simply that there
-    was no way to pass a cap in.
+    functions and a sampling loop, and what matters here is only that a cap can
+    be passed in.
     """
     import inspect
 
@@ -152,10 +150,10 @@ def test_run_case_accepts_mesh_adaptation_overrides():
 def test_score_removes_the_mean_so_a_uniform_offset_cannot_flatter_it():
     """Amplitude ratio on the raw field is not a recovery statistic.
 
-    Measured on real output: a model with pattern correlation 0.03 still returned
-    an amplitude ratio of 0.88, because the uniform component of a magnitude
-    checkerboard is recovered by anything at any damping. Scoring the oscillating
-    part is what stops that reading as success.
+    A model with pattern correlation 0.03 can still return an amplitude ratio of
+    0.88, because the uniform component of a magnitude checkerboard is recovered
+    by anything at any damping. Scoring the oscillating part is what stops that
+    reading as success.
     """
     rng = np.random.default_rng(0)
     want = -1.25 + 1.0 * np.sin(np.linspace(0, 8 * np.pi, 500))

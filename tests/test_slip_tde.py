@@ -1,16 +1,16 @@
 """Pins the triangular-dislocation port against an independent oracle.
 
-:mod:`slipsolve._tde` is a port of ~540 lines of angular-dislocation
+`slipsolve._tde` is a port of ~540 lines of angular-dislocation
 algebra, and essentially every way it can be wrong is silent: a dropped sign or a
 swapped basis vector still returns smooth, plausible-looking displacement. So the
-gate is agreement with :mod:`slipsolve._okada`, which computes the same
+gate is agreement with `slipsolve._okada`, which computes the same
 physics by a completely different route -- a closed form integrated over a
 rectangle rather than a superposition of angular dislocations.
 
 The vertical case gets its own attention throughout: a strike-slip fault mesh is
 built entirely from vertical elements with exactly horizontal edges, which drives
-``beta`` to exactly ``pi/2`` in the free-surface correction and puts every
-``1/cos(beta)`` term on a removable singularity.
+`beta` to exactly `pi/2` in the free-surface correction and puts every
+`1/cos(beta)` term on a removable singularity.
 """
 
 import numpy as np
@@ -50,12 +50,12 @@ def _tde_rectangle(dip_deg, slip, x, y, z, length=LENGTH, width=WIDTH, depth=DEP
 def test_tde_rectangle_matches_okada(dip, name, slip):
     """Two TDEs tiling a rectangle equal Okada's closed form, component for component.
 
-    The mapping is the identity -- Okada's ``U1``/``U2``/``U3`` are
+    The mapping is the identity -- Okada's `U1`/`U2`/`U3` are
     Nikkhoo & Walter's strike/dip/tensile with the same sign -- once the
-    rectangle's down-dip offset is built the way :func:`rect_corners` does it.
+    rectangle's down-dip offset is built the way `rect_corners` does it.
 
     Dips *just* off vertical are excluded here and covered by
-    :func:`test_near_vertical_precision_band`, which explains why.
+    `test_near_vertical_precision_band`, which explains why.
     """
     x, y, z = _surface_grid()
     okada = np.array(okada_disp_surface(x, y, LENGTH, WIDTH, DEPTH, dip, *slip, NU))
@@ -64,7 +64,7 @@ def test_tde_rectangle_matches_okada(dip, name, slip):
     scale = np.abs(okada).max()
     assert scale > 0
     assert np.all(np.isfinite(tde))
-    # Worst measured over this dip set is 1.8e-12 relative (strike-slip at 85 deg).
+    # The worst over this dip set is 1.8e-12 relative (strike-slip at 85 deg).
     np.testing.assert_allclose(tde, okada, atol=1e-11 * scale, rtol=0)
 
 
@@ -72,21 +72,21 @@ def test_near_vertical_precision_band():
     """Both solutions lose precision as the dip approaches -- but does not reach -- 90.
 
     Not a porting error: the two implementations degrade *together*, and each has
-    its own removable singularity there. Okada's ``I1..I5`` divide by
-    ``cos(dip)``; the triangular solution's free-surface correction divides by
-    ``cos(beta)`` for an edge that is nearly, but not exactly, horizontal. At
+    its own removable singularity there. Okada's `I1..I5` divide by
+    `cos(dip)`; the triangular solution's free-surface correction divides by
+    `cos(beta)` for an edge that is nearly, but not exactly, horizontal. At
     exactly 90 degrees both take a clean branch and agree to ~1e-14; a hair away,
     the cancellation is only approximate and digits are lost in proportion to
-    ``1 / cos(dip)``.
+    `1 / cos(dip)`.
 
-    Measured relative disagreement on this geometry, worst of the three slip
+    The relative disagreement on this geometry, worst of the three slip
     components (strike-slip is the worst, dip-slip the best): 2e-14 at exactly
     90, 1.8e-9 at 89.0, 1.7e-10 at 88.0, 1.8e-12 at 85.0 -- and, going the other
     way, 1.4e-5 at 89.99 and 1.2e-2 at 89.999.
 
     The invariant worth pinning is the *trend* -- error shrinking as the dip moves
     away from vertical -- not a tolerance at any one dip. The practical
-    consequence lives in :class:`~slipsolve.mesh.FaultMesh`, which snaps a
+    consequence lives in `slipsolve.mesh.FaultMesh`, which snaps a
     near-vertical dip to exactly 90 rather than sitting in this band.
     """
     x, y, z = _surface_grid()
@@ -264,11 +264,11 @@ def test_matches_cutde():
 
 
 def test_many_triangles_at_once_are_each_triangle():
-    """``tde_disp_hs_unit_many`` against the scalar code, triangle by triangle, to rounding.
+    """`tde_disp_hs_unit_many` against the scalar code, triangle by triangle, to rounding.
 
     Dipping, vertical, buried, surface-reaching, horizontal (both windings) and random triangles,
     one Poisson ratio each; receivers at depth and at the surface. NaN where the scalar code
-    gives NaN (on a triangle's side). Measured 1.7e-14 (2026-11-04).
+    gives NaN (on a triangle's side). They agree to 1.7e-14.
     """
     from slipsolve._tde import tde_disp_hs_unit, tde_disp_hs_unit_many
 

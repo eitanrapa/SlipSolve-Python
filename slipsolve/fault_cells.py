@@ -1,22 +1,23 @@
-"""Cells that follow a fault (plan Part IV 1(b), 2026-11-05): the fault's own triangles extruded horizontally.
+"""Cells that follow a fault: the fault's own triangles extruded horizontally.
 
 A regular voxel grid cannot follow a curved or dipping fault, and a voxel the fault passes through cannot carry a
 departure: its one strain value would straddle the discontinuity. These cells can. Each triangle of the fault mesh is
 extruded along the horizontal fault normal, in layers of given thickness, on one or both sides, so the innermost cells
 share the fault's triangles as faces and every cell ends on the fault or on a neighbour. Extruding horizontally keeps
 each cell within its triangle's depth range, so within its layer when the mesh has element edges on the interfaces;
-neighbouring cells share their faces because each fault vertex moves along ONE normal (its elements' horizontal normals
+neighbouring cells share their faces because each fault vertex moves along one normal (its elements' horizontal normals
 averaged by area), and a shared side quad is split along the same diagonal by both (chosen from its corners alone).
-Thinner layers refine across the fault only; ``split`` divides the triangles for the cells alone, so the cells can be
-finer along the fault than the mesh that carries the slip (benchmark 11: on a thrust that is what sets the error).
+Thinner layers refine across the fault only; `split` divides the triangles for the cells alone, so the cells can be
+finer along the fault than the mesh that carries the slip. For dip-slip the cells' size along the fault is what sets
+the error, for strike-slip their thickness.
 
-:class:`PrismSource` is one cell, a triangular prism ("wedge"): :class:`~slipsolve.heterogeneity.VoxelSource`'s
+`PrismSource` is one cell, a triangular prism ("wedge"): `slipsolve.heterogeneity.VoxelSource`'s
 construction with its own faces (two triangles and three quads, triangulated, outward; faces in the free surface
 dropped), inside test (the faces' planes) and volume rule (collapsed Gauss on the triangle times Gauss-Legendre across,
 mapped with the Jacobian; the map is polynomial, so order 3 gives the volume and centroid exactly). Its far paths and
-remainder are the voxel's. :class:`FaultCells` is the model: interchangeable with
-:class:`~slipsolve.heterogeneity.VoxelModel` in :class:`~slipsolve.heterogeneity.HeterogeneousEngine` for the dense
-solve, ``Gamma`` pair by pair (a curved fault has no translation invariance).
+remainder are the voxel's. `FaultCells` is the model: interchangeable with
+`slipsolve.heterogeneity.VoxelModel` in `slipsolve.heterogeneity.HeterogeneousEngine` for the dense
+solve, `Gamma` pair by pair (a curved fault has no translation invariance).
 """
 import numpy as np
 
@@ -29,7 +30,7 @@ MAX_SPLITS = 4
 
 
 def _mapped_rule(inner, outer, order):
-    """Points ``(q, 3)`` and volume weights ``(q,)`` of the prism ``inner`` -> ``outer`` (vertex i joined to vertex i)."""
+    """Points `(q, 3)` and volume weights `(q,)` of the prism `inner` -> `outer` (vertex i joined to vertex i)."""
     a, b = inner, outer
     bary, w_tri = _rule_gauss(int(order))
     t, w_t = _gauss01(int(order))
@@ -44,7 +45,7 @@ def _mapped_rule(inner, outer, order):
 
 
 def _side_triangles(p, q, r, s):
-    """The quad ``p q r s`` (in order round it) as two triangles, split on the diagonal from its least corner."""
+    """The quad `p q r s` (in order round it) as two triangles, split on the diagonal from its least corner."""
     corners = [p, q, r, s]
     first = min(range(4), key=lambda i: tuple(np.round(corners[i], 6)))
     c = corners[first:] + corners[:first]
@@ -52,11 +53,11 @@ def _side_triangles(p, q, r, s):
 
 
 class PrismSource(VoxelSource):
-    """A triangular prism of uniform moment density: ``inner`` and ``outer`` triangles ``(3, 3)``, vertex i to vertex i.
+    """A triangular prism of uniform moment density: `inner` and `outer` triangles `(3, 3)`, vertex i to vertex i.
 
-    East/north/up metres in the :class:`~slipsolve.frame.LocalFrame`, at or below the surface, in one layer of the
-    tables. Its fields are :class:`~slipsolve.heterogeneity.VoxelSource`'s: per unit moment density in each of the six
-    :func:`~slipsolve.heterogeneity.unit_moments`. A prism longer than :data:`~slipsolve.heterogeneity.MAX_ASPECT`
+    East/north/up metres in the `slipsolve.frame.LocalFrame`, at or below the surface, in one layer of the
+    tables. Its fields are `slipsolve.heterogeneity.VoxelSource`'s: per unit moment density in each of the six
+    `slipsolve.heterogeneity.unit_moments`. A prism longer than `slipsolve.heterogeneity.MAX_ASPECT`
     times its thickness (or thicker than that times its longest edge) is summed as pieces: midpoint subdivision of its
     triangles, or layers across.
     """
@@ -102,7 +103,7 @@ class PrismSource(VoxelSource):
 
     # -- geometry -------------------------------------------------------------------
     def _make_faces(self):
-        """Outward face triangles (those in the free surface dropped) and every face's plane, for :meth:`inside`."""
+        """Outward face triangles (those in the free surface dropped) and every face's plane, for `inside`."""
         a, b = self.inner, self.outer
         candidates = [np.array(a), np.array(b)]
         for i, j in ((0, 1), (1, 2), (2, 0)):
@@ -164,7 +165,7 @@ class PrismSource(VoxelSource):
 
 
 def _leaf_prisms(a, b, splits=0):
-    """The pieces :class:`PrismSource` computes a prism ``a -> b`` as, by its own rule, as ``[(inner, outer), ...]``:
+    """The pieces `PrismSource` computes a prism `a -> b` as, by its own rule, as `[(inner, outer), ...]`:
     geometry only, for the face guard (a flat cell's midpoint pieces have faces of their own inside it)."""
     if splits >= MAX_SPLITS:
         return [(a, b)]
@@ -185,7 +186,7 @@ def _leaf_prisms(a, b, splits=0):
 
 
 def _prism_centroids(inner, outer):
-    """Volumes ``(n,)`` and centroids ``(n, 3)`` of many prisms, exactly (the order-3 mapped rule)."""
+    """Volumes `(n,)` and centroids `(n, 3)` of many prisms, exactly (the order-3 mapped rule)."""
     vols, cents = np.empty(inner.shape[0]), np.empty((inner.shape[0], 3))
     for i, (a, b) in enumerate(zip(inner, outer)):
         p, w = _mapped_rule(a, b, 3)
@@ -195,8 +196,8 @@ def _prism_centroids(inner, outer):
 
 
 def _midpoint_weights(level):
-    """A triangle's midpoint subdivision, ``level`` times: barycentric weights ``(4**level, 3, 3)`` (child, corner,
-    parent vertex), each child wound as its parent, in :class:`PrismSource`'s order."""
+    """A triangle's midpoint subdivision, `level` times: barycentric weights `(4**level, 3, 3)` (child, corner,
+    parent vertex), each child wound as its parent, in `PrismSource`'s order."""
     w = np.eye(3)[None]
     for _ in range(int(level)):
         m = 0.5 * (w + np.roll(w, -1, axis=1))                                 # the midpoints of edges 01, 12, 20
@@ -207,10 +208,10 @@ def _midpoint_weights(level):
 
 
 def _split_prisms(inner, outer, levels):
-    """Each prism ``inner[i]`` -> ``outer[i]`` divided ``levels[i]`` times: the children's ``inner`` and ``outer`` and
+    """Each prism `inner[i]` -> `outer[i]` divided `levels[i]` times: the children's `inner` and `outer` and
     the index of each one's parent, a parent's children together and the parents in order.
 
-    Inner and outer triangles get the same weights, so a child is its parent's map (:func:`_mapped_rule`) restricted to
+    Inner and outer triangles get the same weights, so a child is its parent's map (`_mapped_rule`) restricted to
     a part of the triangle: volumes and centroids add up exactly, also where a side quad twists."""
     counts = 4 ** levels
     parent = np.repeat(np.arange(levels.size), counts)
@@ -223,7 +224,7 @@ def _split_prisms(inner, outer, levels):
 
 
 def _split_levels(split, n):
-    """``split`` as one level for each of ``n`` elements; a mask means level 1 where it is set."""
+    """`split` as one level for each of `n` elements; a mask means level 1 where it is set."""
     levels = np.asarray(split)
     if (not (np.issubdtype(levels.dtype, np.integer) or levels.dtype == bool) or np.any(levels < 0)
             or levels.shape not in ((), (n,))):
@@ -232,11 +233,11 @@ def _split_levels(split, n):
 
 
 class PrismCells:
-    """Cells of uniform departure, each a triangular prism ``inner`` -> ``outer`` (``(n, 3, 3)`` each, vertex i to i).
+    """Cells of uniform departure, each a triangular prism `inner` -> `outer` (`(n, 3, 3)` each, vertex i to i).
 
-    ``lam`` and ``mu`` (Pa, ``(n,)`` or scalars) are the cells' moduli; a cell whose moduli match the reference's to
-    ``tol`` times its ``mu`` is inactive. A model for :class:`~slipsolve.heterogeneity.HeterogeneousEngine`'s dense solve
-    (``Gamma`` pair by pair) and for :class:`CombinedCells`. :class:`FaultCells` builds one from a fault mesh.
+    `lam` and `mu` (Pa, `(n,)` or scalars) are the cells' moduli; a cell whose moduli match the reference's to
+    `tol` times its `mu` is inactive. A model for `slipsolve.heterogeneity.HeterogeneousEngine`'s dense solve
+    (`Gamma` pair by pair) and for `CombinedCells`. `FaultCells` builds one from a fault mesh.
     """
 
     def __init__(self, tables, inner, outer, lam, mu, tol=1e-9, _centroids=None):
@@ -269,13 +270,13 @@ class PrismCells:
         return int(self.ids.size)
 
     def stiffness(self):
-        """``D``, block-diagonal ``(6 n, 6 n)`` sparse: the moment density is ``M = -D eps``."""
+        """`D`, block-diagonal `(6 n, 6 n)` sparse: the moment density is `M = -D eps`."""
         import scipy.sparse as sp
 
         return sp.block_diag(list(stiffness_block(self.dlam[self.active], self.dmu[self.active])), format="csr")
 
     def spec(self, i):
-        """Active cell ``i``'s picklable description, for :func:`~slipsolve.heterogeneity._make_source`."""
+        """Active cell `i`'s picklable description, for `slipsolve.heterogeneity._make_source`."""
         k = self.ids[i]
         return ("prism", self.inner[k], self.outer[k])
 
@@ -283,7 +284,7 @@ class PrismCells:
         return _make_source(engine, self.spec(i))
 
     def contains(self, points):
-        """Which ``points`` ``(m, 3)`` lie strictly inside an active cell (a convex-cell test on each cell's faces)."""
+        """Which `points` `(m, 3)` lie strictly inside an active cell (a convex-cell test on each cell's faces)."""
         points = np.asarray(points, dtype=float).reshape(-1, 3)
         out = np.zeros(points.shape[0], bool)
         for k in self.ids:
@@ -308,7 +309,7 @@ class PrismCells:
         return out
 
     def check_clearance(self, mesh, buffer=None, samples=24, contact=False):
-        """Refuse a fault triangle that passes through an active cell (sampled ``samples`` times an edge)."""
+        """Refuse a fault triangle that passes through an active cell (sampled `samples` times an edge)."""
         n = int(samples)
         i, j = np.meshgrid(np.arange(n + 1), np.arange(n + 1), indexing="ij")
         keep = i + j <= n
@@ -320,8 +321,8 @@ class PrismCells:
         return True
 
     def on_faces(self, x, y, z=None, tol=None):
-        """Surface points on a face of an active cell or of one of the pieces it is computed as (:func:`_leaf_prisms`):
-        within ``tol`` (default 1e-6 of the cell's size) of an edge or corner in the surface plane, where the field
+        """Surface points on a face of an active cell or of one of the pieces it is computed as (`_leaf_prisms`):
+        within `tol` (default 1e-6 of the cell's size) of an edge or corner in the surface plane, where the field
         is singular. Points at depth are not tested."""
         x, y = np.asarray(x, dtype=float).ravel(), np.asarray(y, dtype=float).ravel()
         z = np.zeros(x.size) if z is None else np.asarray(z, dtype=float).ravel()
@@ -351,7 +352,7 @@ class PrismCells:
         return out
 
     def strain_operator(self, engine, log=None, workers=None):
-        """``Gamma`` pair by pair, ``(6 n, 6 n)``: each active cell's field at every active centroid."""
+        """`Gamma` pair by pair, `(6 n, 6 n)`: each active cell's field at every active centroid."""
         return _pairwise_gamma([self], engine, log=log, workers=workers)
 
     def describe(self):
@@ -368,18 +369,18 @@ class PrismCells:
 class FaultCells(PrismCells):
     """Cells that follow a fault mesh: its triangles extruded horizontally, in layers, on one or both sides.
 
-    ``thickness`` (metres) lists the layers' thicknesses outward from the fault; ``sides`` takes ``+1`` (the side the
-    mesh's normals point into) and/or ``-1``. ``moduli`` gives ``(lam, mu)`` (Pa) at the cells: a callable
-    ``f(x, y, depth, distance, side)`` of the cells' centroids, ``distance`` the centroid's distance from the fault along
+    `thickness` (metres) lists the layers' thicknesses outward from the fault; `sides` takes `+1` (the side the
+    mesh's normals point into) and/or `-1`. `moduli` gives `(lam, mu)` (Pa) at the cells: a callable
+    `f(x, y, depth, distance, side)` of the cells' centroids, `distance` the centroid's distance from the fault along
     its layer (the layer's mid-distance), returning arrays. Cells whose moduli differ from the reference's by less than
-    ``tol`` times its ``mu`` are inactive. The cells end on the fault by construction, so the clearance guard holds for
-    the mesh they were built from (:meth:`check_clearance`).
+    `tol` times its `mu` are inactive. The cells end on the fault by construction, so the clearance guard holds for
+    the mesh they were built from (`check_clearance`).
 
-    ``split`` makes the cells finer than that mesh, which otherwise sets their extent along the fault: each triangle is
-    divided at its edges' midpoints that many times for the cells alone, ``4**split`` cells a triangle and layer. A
+    `split` makes the cells finer than that mesh, which otherwise sets their extent along the fault: each triangle is
+    divided at its edges' midpoints that many times for the cells alone, `4**split` cells a triangle and layer. A
     non-negative integer, or one per element (a mask means 1 where set; 0 keeps a triangle whole). The children partition
-    their parent on the same fault and each has its own strain value, unlike the pieces of a flat :class:`PrismSource`,
-    which sum one cell's field for one value. ``moduli`` is asked at the children. ``Gamma`` goes pair by pair, so a
+    their parent on the same fault and each has its own strain value, unlike the pieces of a flat `PrismSource`,
+    which sum one cell's field for one value. `moduli` is asked at the children. `Gamma` goes pair by pair, so a
     uniform split costs ~16x a level: split where the field needs it. Elements at different levels meet at hanging
     corners, which a cell's field does not see (it comes from its own faces alone; where a side quad twists, on a curved
     fault, the two sides' diagonals differ by the twist). A child can still cross a layer interface, which is refused.
@@ -455,7 +456,7 @@ class FaultCells(PrismCells):
 
 
 def _pairwise_gamma(models, engine, log=None, workers=None, blocks=None):
-    """``Gamma`` of the cells of ``models`` (in order), pair by pair; ``blocks`` maps (a, b) to a precomputed block."""
+    """`Gamma` of the cells of `models` (in order), pair by pair; `blocks` maps (a, b) to a precomputed block."""
     import time
 
     from .heterogeneity import _spec_task
@@ -506,14 +507,14 @@ def _pairwise_gamma(models, engine, log=None, workers=None, blocks=None):
 
 
 class CombinedCells:
-    """Several cell models in one solve (plan Part IV 1(b)): cells beside the fault and voxels beyond, say.
+    """Several cell models in one solve: cells beside the fault and voxels beyond, say.
 
-    ``models`` are :class:`~slipsolve.heterogeneity.VoxelModel`, :class:`PrismCells` / :class:`FaultCells` or other
-    models with the same interface, on one set of tables. Each model's own block of ``Gamma`` is its own operator (by
+    `models` are `slipsolve.heterogeneity.VoxelModel`, `PrismCells` / `FaultCells` or other
+    models with the same interface, on one set of tables. Each model's own block of `Gamma` is its own operator (by
     translation for a voxel grid); the blocks between models go pair by pair. The models must not overlap: a voxel centre
     inside an active prism cell, or a prism centroid inside an active voxel, is refused (a voxel only partly inside a cell
-    is not detected: put the voxels' faces on the cells' outer edge, or clear them, :meth:`VoxelModel.keep_clear`).
-    Dense: for the FFT solver use one :class:`~slipsolve.heterogeneity.VoxelModel`.
+    is not detected: put the voxels' faces on the cells' outer edge, or clear them, `VoxelModel.keep_clear`).
+    Dense: for the FFT solver use one `slipsolve.heterogeneity.VoxelModel`.
     """
 
     def __init__(self, *models):
@@ -573,7 +574,7 @@ class CombinedCells:
         return True
 
     def strain_operator(self, engine, log=None, workers=None):
-        """``Gamma``: each model's own block by its own operator, the blocks between models pair by pair."""
+        """`Gamma`: each model's own block by its own operator, the blocks between models pair by pair."""
         from .heterogeneity import strain_operator
 
         live = [m for m in self.models if m.n_active]
@@ -597,7 +598,7 @@ class CombinedCells:
 
 
 def _in_active_voxels(voxels, points):
-    """Which points lie inside an active voxel of a :class:`~slipsolve.heterogeneity.VoxelModel`."""
+    """Which points lie inside an active voxel of a `slipsolve.heterogeneity.VoxelModel`."""
     points = np.asarray(points, dtype=float).reshape(-1, 3)
     ix = np.searchsorted(voxels.x_edges, points[:, 0]) - 1
     iy = np.searchsorted(voxels.y_edges, points[:, 1]) - 1

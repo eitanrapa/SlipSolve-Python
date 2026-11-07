@@ -16,7 +16,7 @@ system rather than solved separately:
   a known right-lateral fault to non-positive strike-slip removes a large part of
   the null space for free.
 
-Parameters are ordered as :mod:`slipsolve.greens` builds them: strike-slip
+Parameters are ordered as `slipsolve.greens` builds them: strike-slip
 for every element, then dip-slip for every element.
 """
 
@@ -24,9 +24,9 @@ import numpy as np
 import scipy.sparse as sp
 
 
-#: Puts Floater's mean-value fallback on the cotangent weight's scale. Exactly
-#: one half for an equilateral pair; 0.527 measured over the real mesh's edges.
-#: See :func:`_edge_weight` for why mixing the two unscaled is a bug.
+#: Puts Floater's mean-value fallback on the cotangent weight's scale; exactly
+#: one half for an equilateral pair. See `_edge_weight` for why the two must
+#: not be mixed unscaled.
 MEAN_VALUE_SCALE = 0.5
 
 
@@ -34,32 +34,31 @@ def neighbor_smoothing(neighbors, ss_ratio=1.0, ds_ratio=1.0, weighting="uniform
                        mesh=None):
     """Rows penalising the slip difference across each shared element edge.
 
-    ``neighbors`` is the ``(m, 3)`` adjacency from
-    :attr:`~slipsolve.mesh.FaultMesh.neighbors`, with ``-1`` for a
-    boundary edge. Returns a sparse ``(2 * n_edges, 2 * m)`` matrix: one row per
+    `neighbors` is the `(m, 3)` adjacency from
+    `slipsolve.mesh.FaultMesh.neighbors`, with `-1` for a
+    boundary edge. Returns a sparse `(2 * n_edges, 2 * m)` matrix: one row per
     undirected edge in each of the strike and dip blocks.
 
-    ``ss_ratio`` and ``ds_ratio`` scale the two blocks independently. A larger
-    ``ds_ratio`` smooths dip-slip harder than strike-slip, which is the usual
+    `ss_ratio` and `ds_ratio` scale the two blocks independently. A larger
+    `ds_ratio` smooths dip-slip harder than strike-slip, which is the usual
     choice on a strike-slip fault where dip-slip is small and poorly resolved --
     the reference implementation defaults it to 3.
 
     **One row per edge, not two.** The reference emits a row for each ordered
-    ``(element, neighbour)`` pair, so every interior edge appears twice; that is
+    `(element, neighbour)` pair, so every interior edge appears twice; that is
     harmless algebraically but doubles the row count and rescales the effective
-    smoothing weight by ``sqrt(2)``. Worth knowing when comparing a weight
+    smoothing weight by `sqrt(2)`. Worth knowing when comparing a weight
     against a run of the MATLAB code.
 
-    ``weighting="uniform"`` -- the default, and what every run before graded
-    meshes existed used -- gives each edge a bare ``[+ratio, -ratio]``, which
-    penalises a *difference* rather than a *gradient*. That is fine while the
-    elements are all much the same size and wrong once they are not: on a mesh
-    whose areas span two orders of magnitude it smooths the coarse deep patches
-    as hard as the fine shallow ones, in metres of slip rather than metres of
-    slip per kilometre. ``weighting="length"`` divides each row by the distance
-    between the two centroids, which is a first-difference approximation to the
-    gradient, and needs ``mesh=``. The node basis's
-    :func:`laplace_beltrami` is already shape- and area-weighted and needs
+    `weighting="uniform"`, the default, gives each edge a bare
+    `[+ratio, -ratio]`, which penalises a *difference* rather than a *gradient*.
+    That is fine while the elements are all much the same size and wrong once
+    they are not: on a mesh whose areas span two orders of magnitude it smooths
+    the coarse deep patches as hard as the fine shallow ones, in metres of slip
+    rather than metres of slip per kilometre. `weighting="length"` divides each
+    row by the distance between the two centroids, which is a first-difference
+    approximation to the gradient, and needs `mesh=`. The node basis's
+    `laplace_beltrami` is already shape- and area-weighted and needs
     none of this.
     """
     neighbors = np.asarray(neighbors)
@@ -108,11 +107,11 @@ def laplace_beltrami(mesh, ss_ratio=1.0, ds_ratio=1.0, form="curvature",
                      mass="voronoi"):
     """Smoothing for a **nodal** slip field: a Laplacian on the fault surface.
 
-    :func:`neighbor_smoothing` differences neighbouring *elements*, which is the
+    `neighbor_smoothing` differences neighbouring *elements*, which is the
     right operator when slip is constant on each. A tent-function field lives on
     the nodes, and the natural penalty there is the surface Laplacian -- the
-    discrete Laplace-Beltrami operator, which is what
-    ``smoothingMatrix_laplace2.m`` builds.
+    discrete Laplace-Beltrami operator, which is what the reference's
+    `smoothingMatrix_laplace2.m` builds.
 
     The edge weights are **hybrid**, and deliberately so. The cotangent weight is
     the standard finite-element one and is exact for a well-shaped triangle, but
@@ -122,11 +121,13 @@ def laplace_beltrami(mesh, ss_ratio=1.0, ds_ratio=1.0, form="curvature",
     otherwise the symmetric mean-value (Floater) weight, which is positive by
     construction, takes over.
 
-    ``form="curvature"`` gives ``ell0**2 * M**(-1/2) * (D - W)`` with ``ell0`` the
-    median edge length -- penalising curvature, and scaled to be dimensionless so
-    a smoothing weight means the same thing on a coarse mesh as a fine one.
-    ``form="dirichlet"`` penalises neighbour differences instead. The reference's
-    spectral normalisation is left out, as it is there too (commented out).
+    With `W` the edge weights, `D` their row sums and `M` the nodal mass,
+    `form="curvature"` gives `M**(-1/2) (D - W)`, penalising curvature, and
+    `form="dirichlet"` gives `D**(-1/2) (D - W)`, penalising neighbour
+    differences. Either is rescaled so its largest absolute row sum is 2, as for
+    `neighbor_smoothing`, so one smoothing weight means the same on a coarse mesh
+    as a fine one and in both parameterizations. The reference's spectral
+    normalisation is left out, as it is there too (commented out).
     """
     nodes = mesh.nodes
     n = mesh.n_nodes
@@ -161,15 +162,12 @@ def laplace_beltrami(mesh, ss_ratio=1.0, ds_ratio=1.0, form="curvature",
     # Normalise to the same scale as `neighbor_smoothing`, whose rows are a plain
     # `[+1, -1]` difference and so have an absolute row sum of 2.
     #
-    # The reference instead multiplies by the median edge length to the power one
-    # or two, aiming at the same thing -- a weight that means the same on a coarse
-    # mesh as a fine one. That prefactor does not get there: with metre units,
-    # ``ell0**2 * M**(-1/2)`` is of order the edge length, so on a 6 km mesh the
-    # operator comes out about **1e4** times stronger than the element smoother
-    # and a smoothing weight of 0.3 drives every parameter to zero (measured:
-    # variance reduction 0.2%, moment 0.2% of the truth). Normalising by the
-    # operator's own norm reaches the intended invariance directly, and keeps one
-    # smoothing weight comparable across both parameterizations.
+    # The reference instead multiplies by the median edge length `ell0` to the
+    # power one or two. In metre units `ell0**2 * M**(-1/2)` is of order the edge
+    # length, so on a kilometre-scale mesh that operator is thousands of times
+    # stronger than the element smoother and a typical weight drives every
+    # parameter to zero. Normalising by the operator's own norm gives the
+    # intended mesh invariance directly.
     row_sum = np.abs(operator).sum(axis=1).max()
     if row_sum > 0:
         operator = operator * (2.0 / float(row_sum))
@@ -181,23 +179,19 @@ def laplace_beltrami(mesh, ss_ratio=1.0, ds_ratio=1.0, form="curvature",
 
 
 def scale_smoothing(smooth, smoothing):
-    """Apply ``smoothing`` to a smoothing operator, scalar or per row.
+    """Apply `smoothing` to a smoothing operator, scalar or per row.
 
-    ``solve`` divides by the row count so one weight means the same thing on a
+    `solve` divides by the row count so one weight means the same thing on a
     coarse mesh as on a fine one; that normalisation is here so the solver and
-    :func:`~slipsolve.resolution._normal_equations` cannot drift apart.
+    `slipsolve.resolution._normal_equations` cannot drift apart.
 
     A **scalar** multiplies the whole operator, which is Tikhonov: one prior
     variance for every regularized quantity, wherever it sits on the fault.
 
     An **array** gives one weight per row, which is what a spatially variable
-    prior needs -- the damping block becomes ``H' diag(w/n)^2 H`` rather than
-    ``(lambda/n)^2 H'H``. See :func:`~slipsolve.resolution.epic_prior` for the
+    prior needs -- the damping block becomes `H' diag(w/n)^2 H` rather than
+    `(lambda/n)^2 H'H`. See `slipsolve.resolution.epic_prior` for the
     one way of choosing those weights that is not arbitrary.
-
-    ⚠️ The scalar path is a plain scalar multiply, bit-identical to what it
-    replaced -- a run configured as before must not move because this grew an
-    option.
     """
     n = max(1, smooth.shape[0])
     weights = np.asarray(smoothing, dtype=float)
@@ -234,24 +228,16 @@ def _edge_weight(nodes, i, j, opposite, rings):
             weight = 0.5 * sum(1.0 / np.tan(a) for a in angles)
             if np.isfinite(weight) and weight > 0:
                 return weight
-    # ⚠️ **The two weights have different UNITS and the fallback must be rescaled.**
-    # The cotangent weight is dimensionless; Floater's is ``.../|ij|``, i.e. one
-    # over a length. On a metre-unit mesh with kilometre edges the fallback comes
-    # out thousands of times weaker, so a node whose edges *all* fall back is left
-    # effectively unregularised -- and that is not hypothetical. Measured on the
-    # real unstructured Venezuela mesh: 13.7% of edges fall back, and node 65 (all
-    # six of its edges obtuse or on the boundary) ended with a smoothing row
-    # **1342x weaker than the median**, model resolution 0.998 -- the best-resolved
-    # of 368 parameters purely because nothing was damping it. It absorbed 4.59 m
-    # of slip against a 2.37 m second place, and *grew* with the smoothing weight
-    # (6.47 m at lambda 300, pinning on the 8 m bound at lambda 1000) because
-    # every other parameter was being damped and it was not.
+    # The two weights have different units, so the fallback must be rescaled.
+    # The cotangent weight is dimensionless; Floater's is `.../|ij|`, one over a
+    # length. Unscaled, on a metre-unit mesh with kilometre edges the fallback is
+    # thousands of times weaker, and a node whose edges all fall back is left
+    # effectively unregularised: it soaks up slip, and grows with the smoothing
+    # weight while every other parameter is damped.
     #
-    # Multiplying by ``|ij| / 2`` puts it on the cotangent's scale. The factor is
-    # not a fudge: for an equilateral pair ``cot(60) = 1/sqrt(3)`` against
-    # ``|e| * mv = 2 tan(30) = 2/sqrt(3)``, exactly one half -- and measured over
-    # the 867 real edges where both weights are valid, ``cot / (mv * |ij|)`` has
-    # median **0.527** (p05 0.233, p95 0.837).
+    # `|ij| / 2` puts it on the cotangent's scale: for an equilateral pair
+    # `cot(60) = 1/sqrt(3)` against `|e| * mv = 2 tan(30) = 2/sqrt(3)`, exactly
+    # one half.
     edge = max(float(np.linalg.norm(nodes[j] - nodes[i])), 1e-15)
     fallback = 0.5 * (_mean_value_weight(nodes, i, j, rings)
                       + _mean_value_weight(nodes, j, i, rings))
@@ -259,7 +245,7 @@ def _edge_weight(nodes, i, j, opposite, rings):
 
 
 def _angle_at(nodes, i, j, k):
-    """The angle at ``k`` in the triangle ``(i, j, k)``."""
+    """The angle at `k` in the triangle `(i, j, k)`."""
     u, v = nodes[i] - nodes[k], nodes[j] - nodes[k]
     norms = np.linalg.norm(u) * np.linalg.norm(v)
     if norms == 0:
@@ -268,7 +254,7 @@ def _angle_at(nodes, i, j, k):
 
 
 def _mean_value_weight(nodes, i, j, rings):
-    """Floater's one-sided weight: ``(tan(a/2) + tan(b/2)) / |ij|``.
+    """Floater's one-sided weight: `(tan(a/2) + tan(b/2)) / |ij|`.
 
     Positive for any triangle, which is exactly why it is the fallback -- the
     cotangent weight is negative on an obtuse pair and would smooth the wrong way.
@@ -285,7 +271,7 @@ def _mean_value_weight(nodes, i, j, rings):
 def _mixed_mass(mesh, kind="voronoi"):
     """Area attributed to each node: mixed Voronoi, or barycentric.
 
-    Meyer et al.'s mixed area -- the Voronoi cell where the triangle is acute, and
+    Meyer et al.'s (2003) mixed area -- the Voronoi cell where the triangle is acute, and
     a half or a quarter of it where it is obtuse, because a Voronoi cell of an
     obtuse triangle falls outside the triangle.
     """
@@ -315,14 +301,14 @@ def zero_slip_boundary(mesh, sides=("bottom", "left", "right"), ratio=1.0):
 
     A mesh is a finite piece of a fault that continues past it, so without this
     the inversion happily puts large slip on the bottom and end elements, where
-    the data constrain it least. ``sides`` names any of ``"bottom"``, ``"top"``,
-    ``"left"``, ``"right"``; the free surface (``"top"``) is normally left
+    the data constrain it least. `sides` names any of `"bottom"`, `"top"`,
+    `"left"`, `"right"`; the free surface (`"top"`) is normally left
     unconstrained, since surface rupture is a real and interesting outcome.
 
-    Returns a sparse ``(k, 2 * m)`` selection matrix with ``ratio`` on the
+    Returns a sparse `(k, 2 * m)` selection matrix with `ratio` on the
     flagged elements' strike and dip parameters -- only the non-zero rows. The
-    reference builds a dense ``2m x 2m`` diagonal per side and stacks three of
-    them, which appends ``6m`` rows of which almost all are zero.
+    reference builds a dense `2m x 2m` diagonal for each enabled side and stacks
+    them, appending `2m` rows per side of which almost all are zero.
     """
     flagged = np.zeros(mesh.n_elements, dtype=bool)
     for side in sides:
@@ -343,14 +329,14 @@ def zero_slip_boundary(mesh, sides=("bottom", "left", "right"), ratio=1.0):
 def slip_bounds(n_elements, strike=(-10.0, 10.0), dip=(-10.0, 10.0), polarity=None):
     """Lower and upper bounds on the parameter vector, in metres.
 
-    ``polarity`` optionally forces the *sense* of slip as
-    ``(strike, dip)`` flags: ``+1`` restricts that component to be
-    non-negative, ``-1`` to be non-positive, ``0`` or ``None`` leaves it free.
+    `polarity` optionally forces the *sense* of slip as
+    `(strike, dip)` flags: `+1` restricts that component to be
+    non-negative, `-1` to be non-positive, `0` or `None` leaves it free.
     A third element is accepted and ignored, so the reference's
-    ``(strike, dip, tensile)`` triples can be passed unchanged.
+    `(strike, dip, tensile)` triples can be passed unchanged.
 
-    Because positive strike-slip is left-lateral (see :mod:`slipsolve`), a
-    known **right-lateral** fault wants ``polarity=(-1, 0)``. This is the
+    Because positive strike-slip is left-lateral (see `slipsolve`), a
+    known **right-lateral** fault wants `polarity=(-1, 0)`. This is the
     cheapest real constraint available: it halves the search space and removes
     the physically absurd alternating-sense solutions that smoothing alone still
     permits.
@@ -377,22 +363,22 @@ def slip_bounds(n_elements, strike=(-10.0, 10.0), dip=(-10.0, 10.0), polarity=No
     return lo, hi
 
 
-#: Total polynomial degree of each ``ramp_columns`` mode. The column count per
-#: track is the usual ``(d + 1) * (d + 2) / 2``: 1, 3, 6, 10.
+#: Total polynomial degree of each `ramp_columns` mode. The column count per
+#: track is the usual `(d + 1) * (d + 2) / 2`: 1, 3, 6, 10.
 RAMP_DEGREE = {"offset": 0, "linear": 1, "quadratic": 2, "cubic": 3}
 
 
 def _ramp_term_label(degree, i):
-    """Suffix for the ``x**(degree - i) * y**i`` term: ``dx``, ``dxy``, ``dxxy``."""
+    """Suffix for the `x**(degree - i) * y**i` term: `dx`, `dxy`, `dxxy`."""
     return "d" + "x" * (degree - i) + "y" * i
 
 
 def _track_regions(ds, sel, name):
-    """``(mask, label)`` per offset column of one track: one, or one per region.
+    """`(mask, label)` per offset column of one track: one, or one per region.
 
-    The region with the most samples keeps the plain ``"{name}:offset"`` label
+    The region with the most samples keeps the plain `"{name}:offset"` label
     (ties go to the lower label), so a track sampled without regions, or whose
-    samples all share one, is built exactly as before.
+    samples all share one, gets the single plain offset column.
     """
     if "region" not in ds:
         return [(sel, f"{name}:offset")]
@@ -406,10 +392,10 @@ def _track_regions(ds, sel, name):
 
 
 def ramp_kind_for(n_columns, n_tracks):
-    """Which :func:`ramp_columns` kind produced ``n_columns`` over ``n_tracks``.
+    """Which `ramp_columns` kind produced `n_columns` over `n_tracks`.
 
     The inverse of the column count, for reading a saved model whose options
-    predate the ``ramp`` key. The map is one-to-one -- 1, 3, 6, 10 columns per
+    lack the `ramp` key. The map is one-to-one -- 1, 3, 6, 10 columns per
     track -- so nothing is guessed; a count that matches no degree raises rather
     than silently rebuilding the wrong design.
     """
@@ -439,57 +425,57 @@ def ramp_columns(obs, kind="linear"):
     entirely fictitious slip, because that is what produces a smooth far-field
     signal.
 
-    ``kind`` is ``"none"`` or one of :data:`RAMP_DEGREE` -- ``"offset"`` (one
-    column per track), ``"linear"`` (plus the two gradients: three), ``"quadratic"``
-    (plus the three second-order terms: six) or ``"cubic"`` (plus the four
+    `kind` is `"none"` or one of `RAMP_DEGREE` -- `"offset"` (one
+    column per track), `"linear"` (plus the two gradients: three), `"quadratic"`
+    (plus the three second-order terms: six) or `"cubic"` (plus the four
     third-order terms: ten). Columns are non-zero only on their own track's rows.
-    Returns ``(matrix, labels)``; the matrix has ``obs.n`` rows.
+    Returns `(matrix, labels)`; the matrix has `obs.n` rows.
 
-    Solving a ramp **jointly** is not the same as pre-removing one with
-    :meth:`~nisar_tools.unwrap.UnwrappedStack.deramp`, and it is the reason the
-    higher degrees exist here at all. A pre-removal fits the polynomial to the data
-    alone, so where a signal mask spans the raster it has to *extrapolate* into a
-    region no pixel constrains -- which is what makes degree >= 3 unusable there.
-    Here the ramp and the slip are estimated together against one design matrix, so
-    the fault model competes for the near-field structure and the ramp is
-    constrained everywhere at once.
+    Solving a ramp **jointly** is not the same as pre-removing one from the
+    interferogram, and it is the reason the higher degrees exist here at all. A
+    pre-removal fits the polynomial to the data alone, so where a signal mask
+    spans the raster it has to *extrapolate* into a region no pixel constrains --
+    which is what makes degree >= 3 unusable there. Here the ramp and the slip
+    are estimated together against one design matrix, so the fault model
+    competes for the near-field structure and the ramp is constrained everywhere
+    at once.
 
-    ⚠️ **That competition is not free, and it is worst exactly at cubic.** The
-    far-field coseismic pattern of a long strike-slip fault is an arctangent step
-    across the trace, and over a finite aperture an arctangent is very well
-    approximated by an odd cubic -- so ``"cubic"`` is the degree whose columns most
-    resemble the signal they sit beside. Nothing here detects that; the columns are
-    unbounded while slip is not, so a ramp that has drifted into eating the
-    earthquake still reports an excellent variance reduction. Measure it: solve at
-    two adjacent degrees and compare peak slip and moment, which is what
-    :func:`~slipsolve.diagnostics.ramp_content` alone cannot settle, having
-    no fault model of its own.
+    That competition is not free, and it is worst at cubic. The far-field
+    coseismic pattern of a long strike-slip fault is an arctangent step across
+    the trace, and over a finite aperture an odd cubic approximates an
+    arctangent well -- so `"cubic"` is the degree whose columns most resemble
+    the signal they sit beside. Nothing here detects that: the columns are
+    unbounded while slip is not, so a ramp that has absorbed part of the
+    earthquake still reports an excellent variance reduction. Solve at two
+    adjacent degrees and compare peak slip and moment;
+    `slipsolve.diagnostics.ramp_content` cannot settle it, having no fault
+    model of its own.
 
-    Columns are raw total-degree monomials in the centred, span-scaled coordinates,
-    built in the same order :func:`~nisar_tools._kernels._poly_columns` uses. They
-    are not orthogonalised against each other, so an individual ``:dxx``
-    coefficient does not read as cleanly as ``:dx`` does; the column *space* is
-    what the fit sees, and it is unaffected. Note the higher-degree columns are
-    also numerically smaller -- the centred coordinates are bounded by about a
-    half, so a cubic column's norm is ~8x an offset column's -- which adds to a
-    joint system whose column norms already span three orders of magnitude.
+    Columns are raw total-degree monomials in the centred, span-scaled
+    coordinates. They are not orthogonalised against each other, so an
+    individual `:dxx` coefficient does not read as cleanly as `:dx` does, and
+    is not comparable between fits of different degree; the column *space* is
+    what the fit sees. The centred coordinates are bounded by about a half, so a
+    cubic column's entries are at most about an eighth of an offset column's,
+    which adds to a joint system whose column norms already span orders of
+    magnitude.
 
     The reference implementation reserves space for this and never uses it -- its
-    ``bounds_new`` takes an ``add_col`` argument that every caller passes as zero.
+    `bounds_new` takes an `add_col` argument that every caller passes as zero.
 
-    **One offset per region.** A track sampled with ``regions=``
-    (:meth:`~slipsolve.sampling.Observations.from_los`) gets an offset for each
+    **One offset per region.** A track sampled with `regions=`
+    (`slipsolve.sampling.Observations.from_los`) gets an offset for each
     region it has samples in, because each region an unwrapper sees on its own
-    carries its own constant: ``"{track}:offset"`` for the region with the most
-    samples, ``"{track}:offset@{label}"`` for the others. The ramp's gradient and
+    carries its own constant: `"{track}:offset"` for the region with the most
+    samples, `"{track}:offset@{label}"` for the others. The ramp's gradient and
     higher terms stay one per track, shared by all its regions -- an orbit or
-    ionosphere ramp does not stop at a coastline. ⚠️ With ``kind="none"`` there
-    are no columns at all, so the regions do nothing.
+    ionosphere ramp does not stop at a coastline. With `kind="none"` there are
+    no columns, so regions have no effect.
 
-    **A kind per track.** ``kind`` may be a ``{track: kind}`` mapping, ``"*"``
-    standing for the tracks it does not name (:func:`ramp_spec`): pixel offsets
+    **A kind per track.** `kind` may be a `{track: kind}` mapping, `"*"`
+    standing for the tracks it does not name (`ramp_spec`): pixel offsets
     beside InSAR want an offset, or a plane, where the interferograms want a cubic,
-    and a track given ``"none"`` gets no columns.
+    and a track given `"none"` gets no columns.
     """
     spec = ramp_spec(kind)
     if spec == "none":
@@ -535,10 +521,10 @@ def ramp_columns(obs, kind="linear"):
 
 
 def ramp_spec(ramp):
-    """``ramp`` as stored: one kind for every track, or a ``{track: kind}`` dict.
+    """`ramp` as stored: one kind for every track, or a `{track: kind}` dict.
 
-    ``"*"`` in a mapping stands for the tracks it does not name. Each kind is
-    ``"none"`` or one of :data:`RAMP_DEGREE`, checked here. A mapping is kept as a
+    `"*"` in a mapping stands for the tracks it does not name. Each kind is
+    `"none"` or one of `RAMP_DEGREE`, checked here. A mapping is kept as a
     plain dict of strings, so it travels in a saved model's options as JSON.
     """
     def check(kind):
@@ -553,7 +539,7 @@ def ramp_spec(ramp):
 
 
 def check_ramp_tracks(spec, tracks):
-    """Refuse a ``{track: kind}`` ramp naming a track the observations lack, or missing one."""
+    """Refuse a `{track: kind}` ramp naming a track the observations lack, or missing one."""
     if not isinstance(spec, dict):
         return
     unknown = sorted(set(spec) - set(tracks) - {"*"})

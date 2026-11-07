@@ -1,51 +1,66 @@
-"""Geodetic slip inversion from line-of-sight displacement.
+"""Geodetic coseismic slip inversion from InSAR, pixel offsets and GNSS.
 
-The rest of the package turns NISAR granules into line-of-sight ground
-displacement. This subpackage turns that displacement into slip on a fault: the
-observations are adaptively downsampled, a triangulated fault surface is built
-from a surface trace, elastic Green's functions relate unit slip on each patch to
-the displacement each observation would see, and a regularized, bounded
-least-squares solve inverts for the slip distribution.
+`slipsolve` turns surface displacement into slip on a fault. Gridded
+line-of-sight observations are adaptively downsampled, a triangulated fault
+surface is built from the fault's surface trace, elastic Green's functions relate
+unit slip on the fault to what each observation would see, and a regularized,
+bounded least-squares solve inverts for the slip distribution. The design is a
+Python port and extension of
+[SlipSolve-Curve](https://github.com/x3zou/SlipSolve-Curve) (MATLAB).
 
-The design follows `SlipSolve-Curve <https://github.com/x3zou/SlipSolve-Curve>`_
-(MATLAB), reimplemented in numpy/scipy. Typical flow::
+A typical run:
 
-    from slipsolve import FaultTrace, FaultMesh, Observations, SlipInversion
+```python
+from slipsolve import FaultMesh, FaultTrace, LosGrid, Observations, SlipInversion
 
-    trace = FaultTrace.from_file("fault.kml")
-    frame = trace.local_frame()
-    mesh = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=3e3)
+trace = FaultTrace.from_file("fault.kml")
+frame = trace.local_frame()
+mesh = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=3e3)
 
-    obs = Observations.concat([
-        Observations.from_los(asc, pair=0, name="asc", frame=frame, fault=trace),
-        Observations.from_los(desc, pair=0, name="desc", frame=frame, fault=trace),
-    ])
+asc = LosGrid.from_grd("asc_los.grd", "asc_e.grd", "asc_n.grd", "asc_u.grd")
+desc = LosGrid.from_grd("desc_los.grd", "desc_e.grd", "desc_n.grd", "desc_u.grd")
+obs = Observations.concat([
+    Observations.from_los(asc, name="asc", frame=frame, trace=trace, exclude_within=1e3),
+    Observations.from_los(desc, name="desc", frame=frame, trace=trace, exclude_within=1e3),
+])
 
-    model = SlipInversion(mesh, obs).solve(smoothing=0.3)
+model = SlipInversion(mesh, obs, ramp="linear").solve(smoothing=0.3)
+print(model.moment_magnitude)
+model.save("model.slip.zip")
+```
 
-Sign conventions, which matter more here than anywhere else in the package:
+Main entry points:
 
-* Displacement is **positive toward the sensor**, and the ENU look vector points
-  from the target *to* the sensor -- both inherited unchanged from
-  :mod:`nisar_tools.geometry`, so the forward model is a plain dot product.
-* Depth is negative: the free surface is ``z = 0`` and the fault lies at
-  ``z < 0``.
-* Positive strike-slip is **left-lateral** (sinistral). Measured, not assumed:
-  every element's strike direction is ``cross(eZ, Vnorm)``, and because
-  :class:`~slipsolve.mesh.FaultMesh` winds each element so ``Vnorm`` is
-  the trace's *left-hand* normal, that direction works out to exactly
-  **minus the trace's tangent**. So positive strike-slip moves the block on the
-  trace's left backwards along the trace and the block on its right forwards --
-  which, viewed from either side, is left-lateral at any strike.
+- Geometry: `FaultTrace`, `LocalFrame` and `FaultMesh` (`vertical`, `curved`
+  for a dipping or curved fault, `join` for several faults).
+- Data: `LosGrid` (a gridded LOS product with its look vectors), `resample_all`
+  and `Observations` (`from_los` quadtree-downsamples a scene, `from_points`
+  takes GNSS, `concat` joins tracks).
+- Green's functions: `HalfSpaceTDE` (the default), `LayeredTDE` and
+  `LayeredPointSource` (a layered crust), `HeterogeneousEngine` (3-D
+  heterogeneity on a `VoxelModel`) and `Bimaterial` (blocks of different
+  rigidity either side of the fault).
+- The solve: `SlipInversion` returns a `SlipModel`, which reports the fit and
+  moment, forward-models, exports and saves.
+- Choosing and judging a model: `blocked_cv_curve` and `gcv_curve` (the
+  smoothing weight), `resolution_report` and `posterior_covariance`,
+  `iterate_sampling` (model-driven resampling and remeshing), `DipSweep` (the
+  dip of each segment) and `calibrate` (synthetic recovery tests).
 
-  The practical consequence: a **right-lateral** fault wants
-  ``polarity=(-1, 0, 0)``, constraining strike-slip negative. The San Sebastian
-  and Sagaing faults are both right-lateral, which is why the reference
-  implementation's Myanmar configuration also pins strike-slip negative.
+Conventions:
 
-* Positive dip-slip moves the hanging wall up. Its sign is the one that flips if
-  an element is wound the other way, so the mesh pins winding rather than
-  policing it after the fact.
+- Displacement is **positive toward the sensor**, and the ENU look vector points
+  from the target *to* the sensor, so the forward model is a plain dot product.
+- Coordinates are metres in one `LocalFrame`; depth is negative, with the free
+  surface at `z = 0`.
+- Positive strike-slip is **left-lateral**: `FaultMesh` winds every element so
+  that its normal is the trace's left-hand normal, which makes its strike
+  direction, `cross(eZ, normal)`, minus the trace's tangent. A right-lateral
+  fault wants `polarity=(-1, 0, 0)` in `SlipInversion.solve`.
+- Positive dip-slip moves the block on the trace's left up the dip. That is
+  reverse motion on a fault dipping to the left of the trace (`uniform_dip`
+  below 90) and normal motion on one dipping to the right. Its sign flips with
+  an element's winding, which is why the mesh pins the winding.
 """
 
 from . import calibrate

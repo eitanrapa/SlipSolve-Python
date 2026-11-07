@@ -1,77 +1,74 @@
 """Segment-by-segment dip sweeps: which dip does each stretch of the fault want?
 
-A geometry sweep lets the data choose the fault's shape. :class:`DipSweep` cuts the
+A geometry sweep lets the data choose the fault's shape. `DipSweep` cuts the
 trace into along-strike segments, gives each its own geometry from a grid -- a
 planar dip (10 or 5 degree steps), or a dip that changes with depth -- and scores
 every combination. Every combination is solved on the same samples with the same
 regularization, so the geometry is the only thing that differs between them.
 
-**Two ways to score.** ``run(score="evidence")`` integrates the slip, the ramp,
+**Two ways to score.** `run(score="evidence")` integrates the slip, the ramp,
 the noise scale and the smoothing weight out analytically
-(:mod:`slipsolve.evidence`), so no rank has to be chosen. ``run(rank=...)``
-scores the bounded solve's misfit at a fixed effective rank. ⚠️ A fixed rank is
-not neutral for geometry: on the 2026-10-11 synthetic (Mw 7.7, two-sided data)
-rms at rank 60 put a 60 degree fault at 57-58 even with an exact forward model,
-because the data supported rank ~190; the evidence put it within 0.3.
+(`slipsolve.evidence`), so no rank has to be chosen. `run(rank=...)`
+scores the bounded solve's misfit at a fixed effective rank. A fixed rank is
+not neutral for geometry: held well below the rank the data support, the rms
+can prefer a dip a few degrees off even with an exact forward model, where the
+evidence does not.
 
-**Uncertainty comes from** :meth:`DipSweep.bootstrap`, not from the evidence.
-The iid evidence ranks geometries robustly, but the posterior it implies was 4-7x
-too narrow on that synthetic. Its estimate re-made on synthetic data drawn from
-a fitted noise model gave intervals that covered the true dip 82-97% of the time
-at 95%. Weighting the evidence by the noise covariance was exact when the
-forward model was, and 2-13 degrees wrong when it was not. The bootstrap reports
-how far the weighted and unweighted estimates disagree; a large disagreement is
-the sign of that failure.
+**Uncertainty comes from** `DipSweep.bootstrap`, not from the evidence.
+The iid evidence ranks geometries robustly, but the posterior it implies is
+several times too narrow. Its estimate re-made on synthetic data drawn from a
+fitted noise model gives intervals with roughly their nominal coverage.
+Weighting the evidence by the noise covariance is exact when the forward model
+is, and can be degrees wrong when it is not. The bootstrap reports how far the
+weighted and unweighted estimates disagree; a large disagreement is the sign of
+that failure.
 
 **Why it is affordable.** Both engines build a node's Green's function as a sum
 over the elements around it, each element computed from its own vertices alone
-(:meth:`~slipsolve.layered.LayeredPointSource._columns`; the half-space engine
+(`slipsolve.layered.LayeredPointSource._columns`; the half-space engine
 projects per-element columns onto the tents). With a node column on every segment
-boundary no element straddles one, so the design matrix of ANY combination is a
-sum of per-segment blocks, each depending on one segment's geometry::
+boundary no element straddles one, so the design matrix of any combination is a
+sum of per-segment blocks, each depending on one segment's geometry:
 
     G(dips) = sum_j  P_j G_j(dip_j)
 
-and the sweep costs one full assembly per geometry VALUE -- seven for 60-120
+and the sweep costs one full assembly per geometry *value* -- seven for 60-120
 degrees in steps of 10 -- instead of one per combination, of which there are
-``7**K``. After that a combination costs one solve.
+`7**K`. After that a combination costs one solve.
 
-**What the geometry is.** Each segment is what :meth:`FaultMesh.curved` builds for
-it: every node stepped along the trace's local normal by ``depth / tan(dip)``, or,
-for a dip that changes with depth, by the integral of ``cot(dip)`` down to that
-depth. Adjacent segments meet on the surface trace and STEP apart below it, by
-``depth * |cot(dip_a) - cot(dip_b)|`` -- 3.5 km at 20 km depth for 80 against 90.
+**What the geometry is.** Each segment is what `FaultMesh.curved` builds for
+it: every node stepped along the trace's local normal by `depth / tan(dip)`, or,
+for a dip that changes with depth, by the integral of `cot(dip)` down to that
+depth. Adjacent segments meet on the surface trace and step apart below it, by
+`depth * |cot(dip_a) - cot(dip_b)|` -- 3.5 km at 20 km depth for 80 against 90.
 The slip does not step: boundary nodes are shared parameters, so the slip field
-stays continuous along strike and only the geometry kinks. This is the torn mesh
-of the Venezuela record (2026-09-21) with slip continuity restored, not a blended
-surface, so rebuild the winning combination as one surface
-(``FaultMesh.curved(surface=...)``) before reporting a model on it.
+stays continuous along strike and only the geometry kinks. The fault is torn,
+not a blended surface, so rebuild the winning combination as one surface
+(`FaultMesh.curved(surface=...)`) before reporting a model on it.
 
-**What is held fixed.** The samples, the ``(s, z)`` node layout, the bounds, the
+**What is held fixed.** The samples, the `(s, z)` node layout, the bounds, the
 ramp columns, the boundary rows and the smoothing operator. The operator is built
-ONCE, on the layout embedded at ``reference_dip``, so the regularization is
+once, on the layout embedded at `reference_dip`, so the regularization is
 identical across geometries rather than re-derived from each one's 3-D metric.
 
-⚠️ Read the result as a profile, not a winner. On Venezuela the dip sweeps' power
-was in rejecting the south-dipping side (13.97 against 16.89 mm rms), not in
-choosing among the north-dipping angles, whose curves were shallow near their
-minimum (2026-09-22). :meth:`SweepResult.profiles` -- each segment's score against
-its dip, the others held at the best -- says more than the argmin. And with
-one-sided coverage a dip preference can be a coverage artefact: recover a planted
-geometry through the same samples (:meth:`DipSweep.predict` and ``data=``) before
-believing one.
+Read the result as a profile, not a winner: a sweep can reject one dip direction
+clearly while its curve is shallow among the angles on the other side.
+`SweepResult.profiles` -- each segment's score against its dip, the others held
+at the best -- says more than the argmin. And with one-sided coverage a dip
+preference can be a coverage artefact: recover a planted geometry through the
+same samples (`DipSweep.predict` and `data=`) before believing one.
 
-**A rigidity contrast as a sweep axis.** ``contrast=`` (a
-:class:`~slipsolve.bimaterial.RigidityContrast`) and ``ratios=`` add one coordinate
+**A rigidity contrast as a sweep axis.** `contrast=` (a
+`slipsolve.bimaterial.RigidityContrast`) and `ratios=` add one coordinate
 per interval of the contrast, after the segments' dips. The scaled mode makes a
 contrast a row and column scaling of the same blocks, so a ratio costs no
 assembly, only a solve or a decomposition. Dip and contrast both make the fault's
-two sides move differently, and on Venezuela's one-sided data they were
-substitutes (2026-10-07); sweep them together. ⚠️ The scaled mode is an
-approximation the data can see. On the Panama synthetic, given exact-mode data, the
-sweep put the dip 5 degrees off and a ratio of 2 at 2.24, and it smeared a step
-along strike (see :mod:`slipsolve.bimaterial`). Read its answer as where to look,
-and take the dip, ratio and moment from ``Bimaterial(exact=True)``.
+two sides move differently, and with one-sided data they can substitute for each
+other; sweep them together. The scaled mode is an approximation the data can
+see: given exact-mode data, a scaled sweep can misread both the dip and the
+ratio, and it smears a step along strike (see `slipsolve.bimaterial`). Read its
+answer as where to look, and take the dip, ratio and moment from
+`Bimaterial(exact=True)`.
 """
 
 import itertools
@@ -98,13 +95,13 @@ from .resolution import JITTER
 from .surface import FaultSurface, centres
 
 #: Dips tried on every segment by default, in degrees: 60 to 120 in steps of 10.
-#: ``FaultMesh.curved(uniform_dip=)``'s convention -- below 90 the fault dips
+#: `FaultMesh.curved(uniform_dip=)`'s convention -- below 90 the fault dips
 #: toward the trace's left-hand side, above 90 toward its right. Read
-#: ``mesh.dip_direction`` to see which way that is on a given trace (on the
-#: Venezuela trace, 80 dips north and 100 dips south).
+#: `mesh.dip_direction` to see which way that is on a given trace (on a trace
+#: drawn from west to east, 80 dips north and 100 dips south).
 DEFAULT_DIPS = tuple(range(60, 121, 10))
 
-#: The scores :meth:`DipSweep.run` can rank combinations by.
+#: The scores `DipSweep.run` can rank combinations by.
 SCORES = ("rms", "weighted_rms", "evidence")
 
 #: A combination has to beat the current one by more than this fraction of its
@@ -122,7 +119,7 @@ def geometry_key(value):
 
     A number is a planar dip in degrees. A sequence of two or more numbers is a
     dip that changes with depth: the dips at evenly spaced depths from the top of
-    the layout to its bottom, linear in between (see :func:`dip_profile_offsets`).
+    the layout to its bottom, linear in between (see `dip_profile_offsets`).
     A sequence whose entries are all equal is the planar dip and is returned as
     one, so the two spellings share a mesh and a Green's-function block.
     """
@@ -143,19 +140,19 @@ def geometry_key(value):
 
 
 def geometry_label(key):
-    """``70`` for a planar dip, ``70>50`` for one that runs from 70 to 50 with depth."""
+    """`70` for a planar dip, `70>50` for one that runs from 70 to 50 with depth."""
     return f"{key:g}" if isinstance(key, float) else ">".join(f"{v:g}" for v in key)
 
 
 def dip_profile_offsets(depths, dips, top=None, bottom=None):
     """Horizontal offset at each depth for a dip that changes with depth.
 
-    ``dips`` are the dips (degrees) at evenly spaced depths from ``top`` to
-    ``bottom`` (by default the shallowest and deepest of ``depths``), linear in
-    depth between them. The offset is the integral of ``cot(dip)`` from ``top``,
-    taken exactly on each piece (``ln sin`` is its antiderivative), so a
-    constant profile reproduces ``depth / tan(dip)`` and the near-vertical
-    snapping of :func:`~slipsolve.trace.dip_offset` is left to the mesh builder.
+    `dips` are the dips (degrees) at evenly spaced depths from `top` to
+    `bottom` (by default the shallowest and deepest of `depths`), linear in
+    depth between them. The offset is the integral of `cot(dip)` from `top`,
+    taken exactly on each piece (`ln sin` is its antiderivative), so a
+    constant profile reproduces `depth / tan(dip)` and the near-vertical
+    snapping of `slipsolve.trace.dip_offset` is left to the mesh builder.
     """
     depths = np.asarray(depths, dtype=float)
     theta = np.radians(np.asarray(dips, dtype=float))
@@ -181,11 +178,11 @@ def dip_profile_offsets(depths, dips, top=None, bottom=None):
 
 
 def segment_breaks(length, count=None, size=None, breaks=None):
-    """Arc lengths of the segment boundaries, ``0 ... length``, in metres.
+    """Arc lengths of the segment boundaries, `0 ... length`, in metres.
 
-    Give exactly one of ``count`` (that many equal segments), ``size`` (segments
-    of about that length) or ``breaks`` (the interior boundaries; ``0`` and
-    ``length`` may be included or left out).
+    Give exactly one of `count` (that many equal segments), `size` (segments
+    of about that length) or `breaks` (the interior boundaries; `0` and
+    `length` may be included or left out).
     """
     length = float(length)
     if sum(v is not None for v in (count, size, breaks)) != 1:
@@ -208,9 +205,9 @@ def segment_breaks(length, count=None, size=None, breaks=None):
 def segmented_layout(breaks, depths, edge_length):
     """A node lattice with a column on every segment boundary.
 
-    Each segment is divided evenly into steps of at most ``edge_length``, so
+    Each segment is divided evenly into steps of at most `edge_length`, so
     every boundary is a lattice column and no triangle straddles one -- the
-    property the block assembly in :class:`DipSweep` rests on.
+    property the block assembly in `DipSweep` rests on.
     """
     breaks = np.asarray(breaks, dtype=float)
     parts = [np.linspace(a, b, max(1, int(np.ceil((b - a) / edge_length))) + 1)[:-1]
@@ -220,22 +217,22 @@ def segmented_layout(breaks, depths, edge_length):
 
 
 def _box_qp(N, g, lo, hi, x0, max_iter=100):
-    """Minimise ``x'Nx/2 - g'x`` under ``lo <= x <= hi``, exactly; the minimiser.
+    """Minimise `x'Nx/2 - g'x` under `lo <= x <= hi`, exactly; the minimiser.
 
-    :func:`slipsolve.inversion.box_qp`, which ``SlipInversion.solve(
-    method="active_set")`` uses too. Started from a nearby solution, as in a
-    sweep, it settles in a few steps.
+    `slipsolve.inversion.box_qp`, which `SlipInversion.solve(method="active_set")`
+    uses too. Started from a nearby solution, as in a sweep, it settles in a few
+    steps.
     """
     return box_qp(N, g, lo, hi, x0, max_iter).x
 
 
 def _better(a, b):
-    """Whether score ``a`` beats ``b`` by more than :data:`IMPROVEMENT` of its size."""
+    """Whether score `a` beats `b` by more than `IMPROVEMENT` of its size."""
     return a < b - IMPROVEMENT * abs(b)
 
 
 def _ratio_grids(contrast, ratios):
-    """One grid of ratios per interval of ``contrast``: shared, per interval, or its own."""
+    """One grid of ratios per interval of `contrast`: shared, per interval, or its own."""
     if contrast is None:
         return []
     m = contrast.n_intervals
@@ -268,24 +265,24 @@ def _evidence_cache_key(covariance):
 class DipSweep:
     """Sweep the geometry of each along-strike segment over a grid.
 
-    ``obs`` is the fixed sample set every geometry is scored on. The segments are
-    ``segments`` equal pieces of the trace (4 if nothing is said),
-    ``segment_length`` metres each, or cut at ``breaks`` (arc lengths in metres).
-    ``dips`` is the grid every segment draws from: planar dips, and tuples for a
-    dip that changes with depth (see :func:`geometry_key`). ``max_depth``,
-    ``edge_length``, ``down_dip_levels``, ``bias_w`` and ``depths`` place the
-    nodes as in :meth:`FaultMesh.curved`. ``engine``, ``ramp`` and
-    ``velocity_model`` mean what they mean to :class:`SlipInversion`, and the
-    remaining keywords are :meth:`SlipInversion.solve`'s regularization and
+    `obs` is the fixed sample set every geometry is scored on. The segments are
+    `segments` equal pieces of the trace (4 if nothing is said),
+    `segment_length` metres each, or cut at `breaks` (arc lengths in metres).
+    `dips` is the grid every segment draws from: planar dips, and tuples for a
+    dip that changes with depth (see `geometry_key`). `max_depth`,
+    `edge_length`, `down_dip_levels`, `bias_w` and `depths` place the
+    nodes as in `FaultMesh.curved`. `engine`, `ramp` and
+    `velocity_model` mean what they mean to `SlipInversion`, and the
+    remaining keywords are `SlipInversion.solve`'s regularization and
     bounds; the slip is always nodal.
 
-    ``reference_dip`` is the geometry the smoothing operator is built on, once,
-    for every combination. 90 measures it in the ``(s, z)`` plane itself.
+    `reference_dip` is the geometry the smoothing operator is built on, once,
+    for every combination. 90 measures it in the `(s, z)` plane itself.
 
-    ``contrast`` puts the fault between blocks of different rigidity, in the
-    scaled mode of :mod:`slipsolve.bimaterial`. ``ratios`` makes its ratio a
+    `contrast` puts the fault between blocks of different rigidity, in the
+    scaled mode of `slipsolve.bimaterial`. `ratios` makes its ratio a
     sweep axis: one grid for every interval of the contrast, or one grid per
-    interval (a one-value grid holds that interval fixed). Without ``ratios``
+    interval (a one-value grid holds that interval fixed). Without `ratios`
     the contrast's own ratios hold. A combination is then the segments' dips
     followed by the intervals' ratios; anywhere a combination is taken, the dips
     alone mean the contrast's own ratios.
@@ -399,7 +396,7 @@ class DipSweep:
                                      [] if self.contrast is None else self.contrast.ratio))
 
     def label(self, dips):
-        """A combination as text: ``80 70`` for the dips, then ``| r 1.5`` for any ratios."""
+        """A combination as text: `80 70` for the dips, then `| r 1.5` for any ratios."""
         combo = self._combination(dips)
         k = self.n_segments
         text = " ".join(geometry_label(v) for v in combo[:k])
@@ -415,7 +412,7 @@ class DipSweep:
                              "end_km": self.breaks[1:] / 1e3})
 
     def _profile_surface(self, key):
-        """The ``cross(s, z)`` field of a dip that changes with depth, on the mesh lattice."""
+        """The `cross(s, z)` field of a dip that changes with depth, on the mesh lattice."""
         z_nodes = -self.depths[::-1]
         top, bottom = float(self.depths.min()), float(self.depths.max())
         offsets = dip_profile_offsets(self.depths, key, top, bottom)
@@ -437,9 +434,9 @@ class DipSweep:
         return self._meshes[key]
 
     def segment_mesh(self, j, dip):
-        """Segment ``j`` (0-based) of the layout, embedded at ``dip``.
+        """Segment `j` (0-based) of the layout, embedded at `dip`.
 
-        Its nodes are ``segment_nodes[j]`` of the global parameter vector, in
+        Its nodes are `segment_nodes[j]` of the global parameter vector, in
         that order; a boundary node appears in both segments it bounds.
         """
         key = (int(j), geometry_key(dip))
@@ -456,7 +453,7 @@ class DipSweep:
         return self._submeshes[key]
 
     def segment_meshes(self, dips):
-        """Every segment at its own geometry, in order -- the stepped fault ``dips`` describes."""
+        """Every segment at its own geometry, in order -- the stepped fault `dips` describes."""
         return [self.segment_mesh(j, v) for j, v in enumerate(self._combination(dips))]
 
     def _combination(self, dips):
@@ -482,7 +479,7 @@ class DipSweep:
 
     # -- the design matrix ---------------------------------------------------
     def _segment_blocks(self, dip):
-        """Each segment's Green's columns at ``dip``, one assembly of the whole fault."""
+        """Each segment's Green's columns at `dip`, one assembly of the whole fault."""
         dip = geometry_key(dip)
         if dip not in self._blocks:
             self._blocks[dip] = [
@@ -492,11 +489,11 @@ class DipSweep:
         return self._blocks[dip]
 
     def design(self, dips):
-        """The nodal Green's matrix of a combination, ``(n_obs, 2 * n)``.
+        """The nodal Green's matrix of a combination, `(n_obs, 2 * n)`.
 
         For one geometry on every segment it is exactly the matrix
-        :class:`SlipInversion` assembles on that mesh, and with a contrast, the
-        matrix a scaled-mode :class:`~slipsolve.bimaterial.Bimaterial` would.
+        `SlipInversion` assembles on that mesh, and with a contrast, the
+        matrix a scaled-mode `slipsolve.bimaterial.Bimaterial` would.
         """
         combo = self._combination(dips)
         k = self.n_segments
@@ -511,11 +508,11 @@ class DipSweep:
         return g
 
     def _contrast_factors(self, ratios):
-        """Row factors, nodal column factors and element rigidity factors at ``ratios``.
+        """Row factors, nodal column factors and element rigidity factors at `ratios`.
 
-        The scaled mode of :mod:`slipsolve.bimaterial`: each sample's row times
-        its block's ``a``, each element's slip times ``1/m``. A node takes its
-        tent's area-weighted mean of ``1/m``, measured on the reference mesh.
+        The scaled mode of `slipsolve.bimaterial`: each sample's row times
+        its block's `a`, each element's slip times `1/m`. A node takes its
+        tent's area-weighted mean of `1/m`, measured on the reference mesh.
         """
         key = tuple(float(r) for r in ratios)
         if key not in self._factors:
@@ -534,9 +531,9 @@ class DipSweep:
         return np.hstack([g, self.ramp]) if self.ramp.shape[1] else g
 
     def predict(self, dips, x):
-        """What parameters ``x`` (slip, then any ramp) predict on geometry ``dips``.
+        """What parameters `x` (slip, then any ramp) predict on geometry `dips`.
 
-        With noise added, the ``data=`` a planted-geometry recovery test needs.
+        With noise added, the `data=` a planted-geometry recovery test needs.
         """
         return self._full_design(dips) @ np.asarray(x, dtype=float)
 
@@ -549,7 +546,7 @@ class DipSweep:
         return out
 
     def _rank(self, N, lam):
-        """Effective rank: the trace of the slip block of ``(N + damping)^-1 N``."""
+        """Effective rank: the trace of the slip block of `(N + damping)^-1 N`."""
         total = N + self._damping(lam)
         total.flat[:: total.shape[0] + 1] += JITTER * np.trace(total) / total.shape[0]
         m = 2 * self.n
@@ -557,7 +554,7 @@ class DipSweep:
         return float(np.sum(columns * N[:, :m]))
 
     def _lam_for_rank(self, N, rank, guess=None):
-        """The smoothing weight giving effective rank ``rank``, by Brent in log-weight."""
+        """The smoothing weight giving effective rank `rank`, by Brent in log-weight."""
         def gap(u):
             return self._rank(N, np.exp(u)) - rank
 
@@ -590,7 +587,7 @@ class DipSweep:
     def _moment_magnitude(self, dips, x):
         """Integrated Mw, summed over the segments' own meshes.
 
-        ``SlipModel.moment`` integrates whatever exposes a mesh, a basis and the
+        `SlipModel.moment` integrates whatever exposes a mesh, a basis and the
         nodal slip, so each segment is handed to it as that and the moments
         added: the elements are partitioned, so nothing is counted twice, and the
         rule stays the package's own rather than a copy of it.
@@ -626,10 +623,10 @@ class DipSweep:
     def evaluate(self, dips, *, rank=None, smoothing=None, data=None):
         """Solve one combination of dips; returns a dict of its scores and solution.
 
-        Exactly one of ``rank`` (an effective rank to hold) or ``smoothing`` (a
-        fixed weight, as :meth:`SlipInversion.solve` takes it). ``data``
+        Exactly one of `rank` (an effective rank to hold) or `smoothing` (a
+        fixed weight, as `SlipInversion.solve` takes it). `data`
         replaces the observed LOS with another vector on the same samples.
-        ``x`` in the result is the parameter vector: strike-slip for every node,
+        `x` in the result is the parameter vector: strike-slip for every node,
         then dip-slip, then any ramp coefficients.
         """
         if (rank is None) == (smoothing is None):
@@ -662,11 +659,11 @@ class DipSweep:
 
     # -- the evidence ---------------------------------------------------------
     def evidence_model(self, covariance=None):
-        """The :class:`~slipsolve.evidence.GeometryEvidence` this sweep scores with.
+        """The `slipsolve.evidence.GeometryEvidence` this sweep scores with.
 
         One per noise model, kept, so every geometry it scores shares one
-        ``alpha^2`` grid. The prior is this sweep's own smoothing operator with
-        its ``sides`` pinned to zero outright.
+        `alpha^2` grid. The prior is this sweep's own smoothing operator with
+        its `sides` pinned to zero outright.
         """
         key = _evidence_cache_key(covariance)
         if key not in self._evidence:
@@ -677,7 +674,7 @@ class DipSweep:
         return self._evidence[key]
 
     def _evidence_solution(self, ev, dec, dh, g, d, alpha2):
-        """Full parameter vectors ``(2n + k, m)`` at each column's ``alpha2``."""
+        """Full parameter vectors `(2n + k, m)` at each column's `alpha2`."""
         m_free = ev.posterior_mean(dec, dh, alpha2)
         x = np.zeros((2 * self.n + self.ramp.shape[1], m_free.shape[1]))
         x[ev.free] = m_free
@@ -687,14 +684,14 @@ class DipSweep:
         return x
 
     def evidence(self, dips, *, data=None, covariance=None):
-        """Score one combination by its marginal likelihood; a dict like :meth:`evaluate`'s.
+        """Score one combination by its marginal likelihood; a dict like `evaluate`'s.
 
-        ``log_evidence`` integrates the slip, ramp, noise scale and smoothing
-        weight out (see :mod:`slipsolve.evidence`); ``alpha2``, ``rank`` and
-        ``sigma2`` are at the integrand's mode, and ``x`` is the posterior-mean
-        solution there -- unbounded, so its ``Mw`` and ``peak`` are a guide only.
-        ``covariance`` is the noise: ``None`` (iid, the robust default),
-        ``"weights"``, or :class:`CovarianceModel`\\ s per track (whitened).
+        `log_evidence` integrates the slip, ramp, noise scale and smoothing
+        weight out (see `slipsolve.evidence`); `alpha2`, `rank` and
+        `sigma2` are at the integrand's mode, and `x` is the posterior-mean
+        solution there -- unbounded, so its `Mw` and `peak` are a guide only.
+        `covariance` is the noise: `None` (iid, the robust default),
+        `"weights"`, or a `CovarianceModel` per track (whitened).
         """
         dips = self._combination(dips)
         d = self.d if data is None else np.asarray(data, dtype=float)
@@ -714,25 +711,24 @@ class DipSweep:
     # -- the search ---------------------------------------------------------
     def run(self, *, rank=None, smoothing=None, score="rms", covariance=None, method="auto",
             max_evaluations=1000, passes=4, start=None, fix=None, data=None, log=None):
-        """Search the combinations of dips; returns a :class:`SweepResult`.
+        """Search the combinations of dips; returns a `SweepResult`.
 
-        ``score="evidence"`` ranks by the marginal likelihood (no ``rank`` or
-        ``smoothing``; ``covariance`` as :meth:`evidence` takes it).
-        ``"rms"`` (unweighted, the figure the Venezuela record quotes) and
-        ``"weighted_rms"`` (the solve's own data term) rank the bounded solve at
-        a fixed ``rank`` or ``smoothing``.
+        `score="evidence"` ranks by the marginal likelihood (no `rank` or
+        `smoothing`; `covariance` as `evidence` takes it).
+        `"rms"` (unweighted) and `"weighted_rms"` (the solve's own data term)
+        rank the bounded solve at a fixed `rank` or `smoothing`.
 
-        ``method="exhaustive"`` scores every combination; ``"coordinate"`` starts
-        from the best uniform geometry (or ``start``) and repeatedly re-chooses one
+        `method="exhaustive"` scores every combination; `"coordinate"` starts
+        from the best uniform geometry (or `start`) and repeatedly re-chooses one
         segment with the others held, until a whole pass changes nothing.
-        ``"auto"`` is exhaustive when there are at most ``max_evaluations``
-        combinations. ``fix={segment: dip}`` (0-based) holds segments at a
+        `"auto"` is exhaustive when there are at most `max_evaluations`
+        combinations. `fix={segment: dip}` (0-based) holds segments at a
         geometry, which need not be on the grid; hold a contrast interval with a
-        one-value grid in ``ratios=``. A contrast's ratios are coordinates like
-        the dips, after them. ``data`` replaces the observed LOS; ``log`` is
+        one-value grid in `ratios=`. A contrast's ratios are coordinates like
+        the dips, after them. `data` replaces the observed LOS; `log` is
         called with one line per new evaluation.
 
-        ⚠️ The coordinate search finds a combination no single segment can
+        The coordinate search finds a combination no single segment can
         improve, which is not guaranteed to be the global best when segments
         trade off against each other; compare it against an exhaustive run on a
         coarser grid when that matters.
@@ -821,28 +817,28 @@ class DipSweep:
     def bootstrap(self, result, *, noise="reml", draws=100, seed=0, compare=True, log=None):
         """Parametric bootstrap of an evidence sweep: each segment's dip with an honest spread.
 
-        The best combination's posterior-mean model predicts the data; ``draws``
-        synthetic data sets add noise drawn from ``noise`` to that prediction,
-        and every combination ``result`` evaluated is re-scored on each. A
+        The best combination's posterior-mean model predicts the data; `draws`
+        synthetic data sets add noise drawn from `noise` to that prediction,
+        and every combination `result` evaluated is re-scored on each. A
         segment's estimate is read off the spline through its profile, so it is
         continuous and not tied to the grid.
 
-        ``noise`` is ``"reml"`` -- fitted to the best model's residual by
-        :func:`~slipsolve.covariance.fit_reml`, per track -- or a
-        :class:`CovarianceModel` (every track) or ``{track: model}`` mapping.
-        With ``compare`` (the default), each replicate is also scored by the
-        other evidence: the noise-weighted one if ``result`` was iid, the iid
-        one if it was weighted. :meth:`BootstrapResult.consistency` then says
+        `noise` is `"reml"` -- fitted to the best model's residual by
+        `slipsolve.covariance.fit_reml`, per track -- or a
+        `CovarianceModel` (every track) or `{track: model}` mapping.
+        With `compare` (the default), each replicate is also scored by the
+        other evidence: the noise-weighted one if `result` was iid, the iid
+        one if it was weighted. `BootstrapResult.consistency` then says
         whether the two estimates disagree by more than noise explains.
 
-        ⚠️ Replicates are re-scored on the combinations ``result`` already
+        Replicates are re-scored on the combinations `result` already
         evaluated, so for a coordinate search the spread is conditional on the
         other segments. Each replicate keeps its own best combination where that
-        combination's profile was scored; otherwise it falls back to ``result``'s.
+        combination's profile was scored; otherwise it falls back to `result`'s.
         Give the grid a step finer than the spread you expect near the best:
         the estimate is splined between grid points, but a profile two points
-        wide carries little information. Mesh and other forward-model error are
-        NOT in these intervals. The weighted-vs-iid comparison is what detects
+        wide carries little information. Mesh and other forward-model errors are
+        not in these intervals; the weighted-vs-iid comparison is what detects
         them.
         """
         if result.score != "evidence":
@@ -908,7 +904,7 @@ class DipSweep:
 def _refine(keys, values, log=False):
     """A profile's continuous maximiser (planar dips, ratios) or best key, and the local grid step.
 
-    ``log`` splines a ratio's profile in log ratio, where its grid is usually
+    `log` splines a ratio's profile in log ratio, where its grid is usually
     even; the step is still reported in the coordinate's own units.
     """
     if any(isinstance(key, tuple) for key in keys) or len(keys) < 3:
@@ -929,16 +925,16 @@ def _refine(keys, values, log=False):
 
 
 class SweepResult:
-    """Every combination a :meth:`DipSweep.run` evaluated, and the best of them.
+    """Every combination a `DipSweep.run` evaluated, and the best of them.
 
-    ``table`` has one row per combination -- ``dip_1 ... dip_K`` in segment order
-    (see ``segments`` for where each lies; a dip that changes with depth is a
-    tuple), then ``ratio_1 ...`` for a contrast's intervals, its score and the
-    other misfits, ``Mw``, the peak slip, and for the bounded solve the smoothing
+    `table` has one row per combination -- `dip_1 ... dip_K` in segment order
+    (see `segments` for where each lies; a dip that changes with depth is a
+    tuple), then `ratio_1 ...` for a contrast's intervals, its score and the
+    other misfits, `Mw`, the peak slip, and for the bounded solve the smoothing
     weight, effective rank and fraction of slip parameters on a bound -- sorted
-    best first. ``score`` is the quantity minimised: the misfit, or minus the log
-    evidence, whose drop from the best is ``delta_log_evidence``.
-    ``solution(dips)`` returns the parameter vector of any evaluated combination.
+    best first. `score` is the quantity minimised: the misfit, or minus the log
+    evidence, whose drop from the best is `delta_log_evidence`.
+    `solution(dips)` returns the parameter vector of any evaluated combination.
     """
 
     def __init__(self, sweep, rows, best, method, score, rank, smoothing,
@@ -974,9 +970,9 @@ class SweepResult:
     def profiles(self):
         """Each coordinate's score against its value, the others at the best.
 
-        Long form: ``parameter`` (``dip`` or ``ratio``), ``segment`` (1-based, for
-        a dip) or ``interval`` (1-based, for a contrast's ratio), ``dip`` or
-        ``ratio``, ``score`` and ``delta`` -- the excess over the best
+        Long form: `parameter` (`dip` or `ratio`), `segment` (1-based, for
+        a dip) or `interval` (1-based, for a contrast's ratio), `dip` or
+        `ratio`, `score` and `delta` -- the excess over the best
         combination's score (for the evidence, the drop in log evidence). Only
         evaluated combinations appear, so an exhaustive run and a finished
         coordinate search give complete profiles.
@@ -1008,12 +1004,12 @@ class SweepResult:
 
 
 class BootstrapResult:
-    """What :meth:`DipSweep.bootstrap` found: estimates, their spread, and a consistency check.
+    """What `DipSweep.bootstrap` found: estimates, their spread, and a consistency check.
 
-    ``observed`` is each segment's estimate on the data and ``replicates`` the
-    ``(draws, segments)`` estimates on the synthetic data sets, both continuous
+    `observed` is each segment's estimate on the data and `replicates` the
+    `(draws, segments)` estimates on the synthetic data sets, both continuous
     for planar dips (and the best key for a dip that changes with depth).
-    ``noise`` holds the per-track models the replicates were drawn from.
+    `noise` holds the per-track models the replicates were drawn from.
     """
 
     def __init__(self, sweep, result, estimates, noise, compare=True):
@@ -1038,9 +1034,8 @@ class BootstrapResult:
                         "estimates rest on the spline between grid points; check with a finer "
                         f"grid around {est:.3f}", stacklevel=3)
         # A coordinate whose best is on its grid's edge cannot move past it, and the
-        # others take up what it would have done. Measured with dip and ratio swept
-        # together: a dip pinned at the edge left the ratio's interval 2-3x too narrow,
-        # and it missed the truth on 2 of 6 seeds (6 of 6 with the grid widened).
+        # others take up what it would have done: with dip and ratio swept together,
+        # a dip pinned at the edge leaves the ratio's interval too narrow.
         for j, best in enumerate(result.best):
             values = sorted({c[j] for c in result._rows if not isinstance(c[j], tuple)})
             if len(values) >= 3 and best in (values[0], values[-1]):
@@ -1053,18 +1048,18 @@ class BootstrapResult:
         return f"segment {j + 1}" if j < self.n_dips else f"ratio {j - self.n_dips + 1}"
 
     def _keys(self, j):
-        """The identifying columns of coordinate ``j``'s row."""
+        """The identifying columns of coordinate `j`'s row."""
         if j < self.n_dips:
             return {"parameter": "dip", "segment": j + 1, "interval": np.nan}
         return {"parameter": "ratio", "segment": np.nan, "interval": j - self.n_dips + 1}
 
     def intervals(self, level=0.95):
-        """Per coordinate: the estimate, its bootstrap sd, and two intervals at ``level``.
+        """Per coordinate: the estimate, its bootstrap sd, and two intervals at `level`.
 
-        ``normal`` is estimate -/+ z sd; ``basic`` reflects the replicates'
+        `normal` is estimate -/+ z sd; `basic` reflects the replicates'
         quantiles about the estimate. A dip that changes with depth gets the
-        share of replicates choosing each candidate instead (``share``). A
-        contrast's ratios follow the dips, with ``parameter`` saying which is which.
+        share of replicates choosing each candidate instead (`share`). A
+        contrast's ratios follow the dips, with `parameter` saying which is which.
         """
         from scipy.stats import norm
         z = float(norm.ppf(0.5 + level / 2))
@@ -1090,10 +1085,10 @@ class BootstrapResult:
     def consistency(self):
         """Weighted minus iid estimate per coordinate, against its spread under the noise model.
 
-        ``z`` is the observed difference less its bootstrap mean, over its
-        bootstrap sd. With the forward model right, ``|z|`` is of order one; on
-        the 2026-10-11 synthetic it was 0.4-0.7 when the mesh was exact and 5.7-47
-        when a coarser mesh had biased the weighted posterior by 2-13 degrees.
+        `z` is the observed difference less its bootstrap mean, over its
+        bootstrap sd. With the forward model right, `|z|` is of order one; a
+        forward-model error that biases the weighted posterior shows up as `|z|`
+        well above that.
         """
         if self._other is None:
             raise ValueError("bootstrap(compare=False) did not score the second estimator")

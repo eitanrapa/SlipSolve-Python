@@ -1,4 +1,4 @@
-"""Pins ``regions=``: one offset per region an unwrapper saw on its own.
+"""Pins `regions=`: one offset per region an unwrapper saw on its own.
 
 An unwrapped interferogram cut along a rupture (so the unwrapper cannot cross it),
 or with islands, has an arbitrary constant in every connected region. The sampler
@@ -81,7 +81,7 @@ def test_connected_labels_islands_and_leaves_one_region_alone(trace, frame):
                                 width_max=20000.0)
     same = Observations.from_los(base, frame=frame, rms_min=0.01, width_min=3000.0,
                                  width_max=20000.0, regions="connected")
-    # one connected region: exactly the old sampler, plus a label
+    # one connected region: exactly the sampler without regions, plus a label
     for name in ("x", "y", "los", "look_e", "count"):
         np.testing.assert_array_equal(one.ds[name].values, same.ds[name].values)
     assert set(same.ds["region"].values) == {1}

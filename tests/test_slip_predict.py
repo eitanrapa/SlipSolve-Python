@@ -8,12 +8,11 @@ requires the data-driven sampler to pile samples into it while the model-driven
 one does not.
 
 It is tempting to assert something stronger -- better model, fewer samples -- and
-that was tried and does **not** hold unconditionally. Measured here at 12 mm of
-noise, data-driven vs model-driven correlation with the truth: 0.944/0.934 white,
-0.895/0.874 correlated over 15 km, 0.852/**0.918** at 30 km. The advantage
-appears only once the noise is long-wavelength enough that extra samples inside
+that does not hold unconditionally: the model-driven sampler recovers the slip
+better only once the noise is long-wavelength enough that extra samples inside
 one atmospheric cell carry no independent information. A synthetic with a single
-correlation length cannot settle that, so it is recorded rather than asserted.
+correlation length cannot settle that, so it is recorded (in
+`test_model_sampling_does_not_chase_a_patch_of_noise`) rather than asserted.
 
 The near-fault retention gets its own test because the failure it prevents is
 invisible here: an initial model with little shallow slip predicts a smooth near
@@ -93,16 +92,16 @@ def test_predicted_los_is_on_the_stacks_grid_and_smooth(setup, coarse):
 def test_predicted_los_tracks_the_observed_field(setup, coarse):
     """It is a prediction of *this* scene, not a generic smooth surface.
 
-    Measured away from the trace, where the comparison is clean: with the true
-    slip substituted the far-field correlation is **1.0000** and the rms
-    difference 0.1 mm, at coarse-grid spacings from 1 to 8 km.
+    Away from the trace, where the comparison is clean, the true slip gives a
+    far-field correlation of 1.0000 and an rms difference of 0.1 mm, at
+    coarse-grid spacings from 1 to 8 km.
 
     Over the whole raster it is much lower (~0.8 even for the true slip), and
     that is *not* a defect in the prediction: the observed raster has been
     resampled onto the shared lattice, which bilinearly smooths the displacement
     step across the fault, while the prediction evaluates it sharply. Evaluating
     the model directly at every pixel with no interpolation at all reproduces the
-    same gap, which is what identifies the cause. ``exclude_within`` removes that
+    same gap, which is what identifies the cause. `exclude_within` removes that
     band from the inversion anyway.
     """
     trace, frame, mesh, _, scenes = setup
@@ -172,11 +171,11 @@ def test_field_chooses_cells_but_data_fills_them(setup, coarse):
 
 
 def test_a_constant_field_stops_splitting_however_noisy_the_data(setup):
-    """The whole point of the change, as a single assertion.
+    """The whole point of model-driven sampling, as a single assertion.
 
     With a flat model there is nothing to resolve, so every cell should come back
-    at ``width_max`` -- even though the observed field underneath is pure noise,
-    which is exactly what drives the data-driven sampler to ``width_min``.
+    at `width_max` -- even though the observed field underneath is pure noise,
+    which is exactly what drives the data-driven sampler to `width_min`.
     """
     from slip_synthetic import LosLike
 
@@ -237,8 +236,8 @@ def test_field_shape_is_checked(setup, coarse):
 
 
 def test_data_driven_sampling_is_untouched(setup):
-    """``field=None`` must reproduce the old behaviour exactly, attrs included --
-    the persist hash keys off ``quadtree``."""
+    """`field=None` must reproduce data-driven sampling exactly, attrs included --
+    the persist hash keys off `quadtree`."""
     trace, frame, mesh, _, scenes = setup
     obs = Observations.from_los(scenes["asc"], name="asc", frame=frame, trace=trace,
                                 **_SAMPLING)
@@ -281,7 +280,7 @@ def test_the_two_way_loop_remeshes_and_still_recovers_the_slip(setup):
     uniform mesh is already well matched to its data it need not. It is that the
     loop *converges*: the mesh stays the size it was asked to be, the recovery
     holds, and the run does not drift into a degenerate model while reporting
-    success, which is exactly what it did before ``budget`` existed.
+    success, which is what it does without `budget`.
     """
     trace, frame, mesh, truth, scenes = setup
     _, model, history = iterate_sampling(
@@ -323,12 +322,12 @@ def test_the_loop_runs_on_an_unstructured_mesh(setup):
 
 
 def test_a_remesh_switches_the_convergence_test_to_the_probe_lattice(setup):
-    """``max |element_slip - previous|`` cannot survive a change of mesh.
+    """`max |element_slip - previous|` cannot survive a change of mesh.
 
     Two rounds on different meshes give different-length vectors, so the number
-    is measured on a fixed ``(s, z)`` lattice belonging to neither. With the mesh
-    held fixed the element-space number is kept verbatim, so an existing run
-    prints exactly what it printed before -- that equivalence is what is checked.
+    is measured on a fixed `(s, z)` lattice belonging to neither. With the mesh
+    held fixed the element-space number is kept verbatim, so a fixed-mesh run
+    reports the same number either way -- that equivalence is what is checked.
     """
     trace, frame, mesh, _, scenes = setup
     kwargs = dict(max_rounds=1, spacing=4000.0, solve_kwargs={"smoothing": 0.3},
@@ -347,14 +346,13 @@ def test_a_remesh_switches_the_convergence_test_to_the_probe_lattice(setup):
 def test_sampling_on_resolution_concentrates_samples_near_the_fault(setup):
     """Lohman & Simons' field, through the sampler that already accepts one.
 
-    What the knob does is move samples, not add them, and the measurement says so
-    on this fixture: ``"model"`` 1974 samples with 33.5% inside 20 km of the
-    trace, ``"resolution"`` 890 with **74.4%**, ``"both"`` 1663 with 39.8%. The
-    resolution field is largest where surface data sees the deep, unresolved
-    elements best, which is close in.
+    What the knob does is move samples, not add them. On this fixture `"model"`
+    gives 1974 samples with 33.5% inside 20 km of the trace, `"resolution"` 890
+    with 74.4%, `"both"` 1663 with 39.8%. The resolution field is largest where
+    surface data sees the deep, unresolved elements best, which is close in.
 
-    ⚠️ Deliberately **not** asserted: that ``"both"`` samples more than either.
-    ``rms_min`` is a fraction of the field's own global scatter, so adding a
+    Deliberately not asserted: that `"both"` samples more than either.
+    `rms_min` is a fraction of the field's own global scatter, so adding a
     field that is large but smooth raises the split threshold everywhere without
     raising a cell's local scatter -- the count can go either way, and it does.
     """
@@ -401,16 +399,16 @@ def test_model_sampling_does_not_chase_a_patch_of_noise(setup, coarse):
     far from the fault, and require the data-driven sampler to pile samples into
     it while the model-driven one does not.
 
-    ⚠️ Deliberately **not** asserted here: that the model-driven sampler gives a
-    better slip model, or uses fewer samples. Measured on this fixture at
-    2 tracks with 12 mm of noise, data-driven vs model-driven correlation with
-    the truth came out 0.944/0.934 for white noise, 0.895/0.874 for noise
-    correlated over 15 km, and 0.852/**0.918** at 30 km. It wins only once the
-    noise is long-wavelength enough that extra samples inside one atmospheric
-    cell stop carrying independent information -- which is the regime real
-    interferograms are in, but is not something a synthetic with a single
-    correlation length can be trusted to prove. The sample count likewise depends
-    entirely on ``rms_fraction`` against the scene's noise, in either direction.
+    Deliberately not asserted here: that the model-driven sampler gives a
+    better slip model, or uses fewer samples. On this fixture, at 2 tracks with
+    12 mm of noise, data-driven vs model-driven correlation with the truth is
+    0.944/0.934 for white noise, 0.895/0.874 for noise correlated over 15 km,
+    and 0.852/0.918 at 30 km. It wins only once the noise is long-wavelength
+    enough that extra samples inside one atmospheric cell stop carrying
+    independent information -- which is the regime real interferograms are in,
+    but is not something a synthetic with a single correlation length can be
+    trusted to prove. The sample count likewise depends entirely on
+    `rms_fraction` against the scene's noise, in either direction.
     """
     from slip_synthetic import LosLike
 
@@ -460,12 +458,12 @@ def test_residual_is_observed_minus_modelled(setup, coarse):
 
 
 def test_iterate_sampling_hands_back_a_reusable_inversion(setup, tmp_path):
-    """``model.inversion`` is what lets the notebook sweep an L-curve over the
+    """`model.inversion` is what lets a caller sweep an L-curve over the
     *refined* sampling without paying for a second Green's matrix.
 
-    Without it the caller has only ``obs``, and rebuilding ``SlipInversion`` from
-    it re-assembles G -- measured at ~25 s for 1106 elements against 8000
-    observations, and the loop has just built exactly that matrix internally.
+    Without it the caller has only `obs`, and rebuilding `SlipInversion` from
+    it re-assembles G -- tens of seconds for a thousand elements against
+    thousands of observations -- when the loop has just built exactly that matrix.
     """
     trace, frame, mesh, _, scenes = setup
     obs, model, _ = iterate_sampling(
@@ -502,11 +500,11 @@ def test_a_loaded_model_has_no_matrix_to_reuse(setup, tmp_path):
 def test_a_degenerate_model_warns_instead_of_quietly_converging(setup):
     """Over-smoothing makes the loop 'converge' on nothing, and it looks fine.
 
-    A flat model predicts a flat field, ``model_rms_min`` then returns ~0, the
+    A flat model predicts a flat field, `model_rms_min` then returns ~0, the
     quadtree splits on floating-point noise, and nothing changes between rounds
-    because nothing is there -- so ``max_change`` goes to zero and the loop stops
-    as if it had succeeded. Hit for real on the D134 scene at ``smoothing=200``:
-    peak slip 0.004 m at a respectable-looking 22% variance reduction.
+    because nothing is there -- so `max_change` goes to zero and the loop stops
+    as if it had succeeded, with millimetres of slip at a respectable-looking
+    variance reduction.
     """
     trace, frame, mesh, _, scenes = setup
     with pytest.warns(RuntimeWarning, match="effectively zero"):
@@ -521,7 +519,7 @@ def test_a_degenerate_model_warns_instead_of_quietly_converging(setup):
 
 
 def test_an_unknown_mesh_structure_is_refused_before_the_first_solve(setup):
-    """A typo in NISAR_ADAPT_STRUCTURE should not cost a round of sampling and
+    """A typo in `mesh_adapt["structure"]` should not cost a round of sampling and
     solving before it surfaces."""
     trace, frame, mesh, truth, scenes = setup
     with pytest.raises(ValueError, match="must be 'rows' or 'unstructured'"):
@@ -557,18 +555,16 @@ def test_an_unknown_size_source_is_refused_before_the_first_solve(setup):
 
 
 def test_conserve_holds_the_element_count_over_a_long_loop(setup):
-    """⚠️ The drift that three rounds hides and eight rounds shows.
+    """The drift that three rounds hide and eight rounds show.
 
-    ``adapt_layout`` resolves ``budget="conserve"`` against whatever mesh it is
-    handed, and ``_fit_budget`` accepts any build within 5% of the target without
-    bisecting. So round N aimed at round N-1's *result*: a +/-5% random walk with
-    no restoring force, measured on the real problem as 1696 -> 1759 -> ... ->
-    1893, **+11.6% compounded over 8 rounds**, every single step inside tolerance
-    and therefore invisible to any per-round check.
+    `adapt_layout` resolves `budget="conserve"` against whatever mesh it is
+    handed, and `_fit_budget` accepts any build within 5% of the target without
+    bisecting. Aimed at round N-1's *result*, round N would take a +/-5% random
+    walk with no restoring force: every single step inside tolerance, and so
+    invisible to any per-round check, while the count compounds over the rounds.
 
-    Pinning "conserve" to the *starting* mesh once is the fix, and this is the
-    test that would have caught it: it looks at the trend across many rounds
-    rather than at any one step.
+    So "conserve" is pinned to the *starting* mesh once, and this test looks at
+    the trend across many rounds rather than at any one step.
     """
     trace, frame, mesh, _, scenes = setup
     _, _, history = iterate_sampling(
@@ -580,7 +576,7 @@ def test_conserve_holds_the_element_count_over_a_long_loop(setup):
     counts = np.array([h["n_elements"] for h in history[1:]], dtype=float)
     assert counts.size >= 6, counts
 
-    # Every round within tolerance of the ORIGINAL count, not of its predecessor.
+    # Every round within tolerance of the original count, not of its predecessor.
     assert np.all(np.abs(counts - mesh.n_elements) <= 0.12 * mesh.n_elements), counts
     # And no trend: a random walk would show one, a pinned target should not.
     slope = np.polyfit(np.arange(counts.size), counts, 1)[0]
@@ -588,11 +584,11 @@ def test_conserve_holds_the_element_count_over_a_long_loop(setup):
 
 
 def test_the_size_clamps_do_not_follow_the_mesh_they_are_bounding(setup):
-    """``size_min``/``size_max`` default from the *current* mesh, so they drift too.
+    """`size_min`/`size_max` must not default from the *current* mesh, or they drift too.
 
-    ``max_ratio`` bounds the per-step ratio, not the cumulative one, so the size
-    spread widened without bound -- 6.5x after 3 rounds, 30x after 8. Resolved
-    against the starting mesh unless the caller was explicit.
+    `max_ratio` bounds the per-step ratio, not the cumulative one, so the size
+    spread would widen without bound over the rounds. They are resolved against
+    the starting mesh unless the caller is explicit.
     """
     from slipsolve.predict import _adapt_spec
 
@@ -645,9 +641,9 @@ def test_sample_slip_on_a_nodal_model_averages_to_element_slip(nodal):
 
 
 def test_sample_slip_is_not_the_voronoi_mosaic_probe_slip_returns(nodal):
-    """The bug this function exists for, stated directly.
+    """What this function exists for, stated directly.
 
-    ``_probe_slip`` looks slip up by nearest centroid. Under ``basis="node"``
+    `_probe_slip` looks slip up by nearest centroid. Under `basis="node"`
     that returns a Voronoi mosaic of per-element means and manufactures
     element-scale facets the model does not have. The two must therefore
     disagree away from the centroids -- if this test ever passes trivially,
@@ -679,12 +675,12 @@ def test_sample_slip_reads_the_containing_element_not_the_nearest_centroid(coars
 
 @pytest.mark.parametrize("which", ["nodal", "element"])
 def test_sample_slip_off_the_mesh_is_nan_and_never_zero(nodal, coarse, which):
-    """⚠️ The silent failure: a unit mismatch must be visible, not read as zero.
+    """The silent failure: a unit mismatch must be visible, not read as zero.
 
-    ``LinearTriInterpolator`` returns a *masked* array, and ``np.asarray`` of one
-    is the fill value rather than ``nan`` -- which is how a difference between
-    two models once came back as exactly 0.000 m everywhere and was read as
-    agreement. Both bases fill with ``nan`` instead.
+    `LinearTriInterpolator` returns a *masked* array, and `np.asarray` of one
+    is the fill value rather than `nan` -- so a difference between two models
+    can come back as exactly 0.000 m everywhere and be read as agreement. Both
+    bases fill with `nan` instead.
     """
     model = nodal if which == "nodal" else coarse[1]
     s = np.array([-5.0e5, 5.0e5, 0.0])

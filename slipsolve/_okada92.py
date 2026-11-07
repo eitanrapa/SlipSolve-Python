@@ -1,18 +1,19 @@
 """Okada (1992): a point source in an elastic half-space, displacement and its gradient at depth.
 
-A vectorised port of ``DC3D0`` with ``DCCON0``, ``DCCON1``, ``UA0``, ``UB0`` and ``UC0`` from
-Y. Okada's ``DC3D.f`` (coded 1991, revised 2002), read on 2026-11-04 from the copy in
-okada_wrapper (github.com/tbenthompson/okada_wrapper). Strike-slip, dip-slip and tensile
-potencies; the inflation source is not ported. Float64 throughout (that copy's driver
-declares its arguments ``REAL*4``).
+A vectorised port of `DC3D0` with `DCCON0`, `DCCON1`, `UA0`, `UB0` and `UC0` from
+Y. Okada's `DC3D.f` (coded 1991, revised 2002), from the copy in okada_wrapper
+(github.com/tbenthompson/okada_wrapper). Strike-slip, dip-slip and tensile potencies; the
+inflation source is not ported. Float64 throughout (that copy's driver declares its
+arguments `REAL*4`).
 
-Okada's frame: ``x`` along strike, ``y`` horizontal and to the left of strike, ``z`` up;
-the source at depth ``depth`` under the origin, on a plane through it that dips at ``dip``
-toward ``-y``; receivers at ``z <= 0``. Potency = moment / ``mu`` (slip x area) for the
+Okada's frame: `x` along strike, `y` horizontal and to the left of strike, `z` up;
+the source at depth `depth` under the origin, on a plane through it that dips at `dip`
+toward `-y`; receivers at `z <= 0`. Potency = moment / `mu` (slip x area) for the
 double couples, opening x area for the tensile source.
 
-Used by :meth:`slipsolve.layered_tde.LayeredTDE.strain`'s far path. Okada, Y. (1992),
-Internal deformation due to shear and tensile faults in a half-space, BSSA 82, 1018-1040.
+Used by the strain far paths of `slipsolve.layered_tde` and `slipsolve.heterogeneity`.
+Okada, Y. (1992), Internal deformation due to shear and tensile faults in a half-space,
+BSSA 82, 1018-1040.
 """
 import numpy as np
 
@@ -21,13 +22,13 @@ _EPS = 1e-6
 
 
 def point_source_unit(alpha, x, y, z, depth, sin_dip, cos_dip):
-    """``DC3D0`` for unit strike-slip, dip-slip and tensile potency: ``(3, n, 12)``.
+    """`DC3D0` for unit strike-slip, dip-slip and tensile potency: `(3, n, 12)`.
 
-    All arguments broadcast to ``(n,)``: ``alpha = (lambda + mu) / (lambda + 2 mu)``, the
-    receiver ``x, y, z`` in Okada's frame (``z <= 0``), the source ``depth > 0`` and the
-    plane's ``sin(dip)``, ``cos(dip)``. The last axis is ``DC3D0``'s output order:
-    ``ux, uy, uz``, their ``x`` derivatives, ``y`` derivatives, ``z`` derivatives. A
-    receiver on the source (``R = 0``) gets zeros, as ``DC3D0`` returns.
+    All arguments broadcast to `(n,)`: `alpha = (lambda + mu) / (lambda + 2 mu)`, the
+    receiver `x, y, z` in Okada's frame (`z <= 0`), the source `depth > 0` and the
+    plane's `sin(dip)`, `cos(dip)`. The last axis is `DC3D0`'s output order:
+    `ux, uy, uz`, their `x` derivatives, `y` derivatives, `z` derivatives. A
+    receiver on the source (`R = 0`) gets zeros, as `DC3D0` returns.
     """
     alpha, x, y, z, depth, sd, cd = np.broadcast_arrays(*(np.asarray(a, dtype=float) for a in
                                                          (alpha, x, y, z, depth, sin_dip, cos_dip)))
@@ -61,7 +62,7 @@ def point_source_unit(alpha, x, y, z, depth, sin_dip, cos_dip):
 
 
 def _dccon1(x, y, d, dip):
-    """``DCCON1``: the station-geometry constants for a point source."""
+    """`DCCON1`: the station-geometry constants for a point source."""
     sd, cd = dip["sd"], dip["cd"]
     d = np.where(np.abs(d) < _EPS, 0.0, d)
     p = y * cd + d * sd
@@ -86,7 +87,7 @@ def _dccon1(x, y, d, dip):
 
 
 def _ua0(g, alp, dip):
-    """``UA0``: part A, ``(3, n, 12)`` for unit strike-, dip- and tensile potency."""
+    """`UA0`: part A, `(3, n, 12)` for unit strike-, dip- and tensile potency."""
     alp1, alp2 = alp[0], alp[1]
     sd, cd, s2d, c2d = dip["sd"], dip["cd"], dip["s2d"], dip["c2d"]
     x, y, d, p, q, s, t = g["x"], g["y"], g["d"], g["p"], g["q"], g["s"], g["t"]
@@ -143,7 +144,7 @@ def _ua0(g, alp, dip):
 
 
 def _ub0(g, alp, dip, z):
-    """``UB0``: part B, ``(3, n, 12)``."""
+    """`UB0`: part B, `(3, n, 12)`."""
     alp3 = alp[2]
     sd, sdsd, sdcd = dip["sd"], dip["sdsd"], dip["sdcd"]
     x, y, d, p, q = g["x"], g["y"], g["d"], g["p"], g["q"]
@@ -220,7 +221,7 @@ def _ub0(g, alp, dip, z):
 
 
 def _uc0(g, alp, dip, z):
-    """``UC0``: part C, ``(3, n, 12)``."""
+    """`UC0`: part C, `(3, n, 12)`."""
     alp4, alp5 = alp[3], alp[4]
     sd, cd, sdsd, sdcd, s2d, c2d = (dip[k] for k in ("sd", "cd", "sdsd", "sdcd", "s2d", "c2d"))
     x, y, d, p, q, s, t = g["x"], g["y"], g["d"], g["p"], g["q"], g["s"], g["t"]
@@ -296,15 +297,15 @@ def _uc0(g, alp, dip, z):
 
 
 def point_source_enu(nu, normal, slips, px, py, pz, x, y, z):
-    """Displacement ``(n, k, 3)`` and strain ``(n, k, 6)`` of point sources, east/north/up.
+    """Displacement `(n, k, 3)` and strain `(n, k, 6)` of point sources, east/north/up.
 
-    Unit potency of each of the ``k`` slip vectors ``slips`` (``(k, 3)``) on a plane with
-    unit ``normal``, at sources ``(px, py, pz)`` (``pz < 0``), seen at receivers
-    ``(x, y, z)`` (``z <= 0``); all ``(n,)``, one source per receiver. A slip vector's part
+    Unit potency of each of the `k` slip vectors `slips` (`(k, 3)`) on a plane with
+    unit `normal`, at sources `(px, py, pz)` (`pz < 0`), seen at receivers
+    `(x, y, z)` (`z <= 0`); all `(n,)`, one source per receiver. A slip vector's part
     in the plane is a double couple and its part along the normal an opening; the side
-    the normal points into moves by ``+slip`` against the other, as for
-    :func:`~slipsolve._tde.tde_disp_hs_unit`. Strain components as
-    :data:`~slipsolve._tde.STRAIN_COMPONENTS` (tensor shears); per unit potency.
+    the normal points into moves by `+slip` against the other, as for
+    `slipsolve._tde.tde_disp_hs_unit`. Strain components as
+    `slipsolve._tde.STRAIN_COMPONENTS` (tensor shears); per unit potency.
     """
     normal = np.asarray(normal, dtype=float)
     normal = normal / np.linalg.norm(normal)
@@ -330,7 +331,7 @@ def point_source_enu(nu, normal, slips, px, py, pz, x, y, z):
     u = np.moveaxis(np.tensordot(unit, coeff, axes=([0], [1])), -1, 1)   # (n, k, 12)
     disp = u[..., :3] @ frame                                         # u_enu = R^T u_ok
     grad_ok = np.stack([u[..., 3:6], u[..., 6:9], u[..., 9:12]], axis=-1)   # [i, j] = d u_i / d x_j
-    grad = frame.T @ grad_ok @ frame        # R^T G R; a three-operand einsum took 3x as long (2026-11-05)
+    grad = frame.T @ grad_ok @ frame        # R^T G R; a three-operand einsum is ~3x slower
     strain = 0.5 * (grad + np.swapaxes(grad, -1, -2))
     i, j = (0, 1, 2, 0, 0, 1), (0, 1, 2, 1, 2, 2)
     return disp, strain[..., i, j]

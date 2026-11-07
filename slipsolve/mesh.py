@@ -1,26 +1,32 @@
 """The triangulated fault surface the inversion solves slip on.
 
-The fault is parameterized by **arc length along the trace and depth**, an
-``(s, z)`` lattice, and the mesh is that lattice's quads cut in two. Two
-consequences make this worth doing rather than triangulating scattered points:
+The fault is parameterized by arc length along the trace and depth, `(s, z)`,
+and the mesh is triangulated in that plane: by default the lattice's quads cut
+in two (see `slipsolve.layout` for graded and unstructured node sets). Two
+consequences make this worth doing rather than triangulating scattered points
+in 3-D:
 
 * **Winding is consistent by construction.** Flipping a triangle's vertex order
   flips its normal, which negates its dip-slip Green's-function column while
-  leaving strike-slip untouched -- so on a strike-slip fault an inconsistent
-  winding gives a plausible model with a randomly-signed dip-slip field. The
-  reference implementation guards this by testing each normal against a fixed
-  axis (``orientTriFromLeft.m``), which has almost no margin on a fault striking
-  near east-west. Generating triangles from the lattice removes the problem
+  leaving strike-slip untouched, so on a strike-slip fault an inconsistent
+  winding gives a plausible model with a randomly-signed dip-slip field.
+  SlipSolve-Curve guards this by testing each normal against a fixed axis
+  (`orientTriFromLeft.m`), which has almost no margin on a fault striking
+  near east-west. Winding the triangles in `(s, z)` removes the problem
   instead of policing it.
-* **Boundary nodes are exact.** "The along-strike ends" is ``s == s.min()`` and
-  ``s == s.max()``, not an ``argmin`` over a map coordinate.
+* **Boundary nodes are exact.** "The along-strike ends" is `s == s.min()` and
+  `s == s.max()`, not an `argmin` over a map coordinate.
 
-:meth:`FaultMesh.vertical` extrudes the trace straight down;
-:meth:`FaultMesh.curved` moves each node cross-strike by a fitted
-``cross(s, z)`` field (see :mod:`slipsolve.surface`). Only the map
-position of a node changes between them -- its ``(s, z)`` parameters, and
-therefore every boundary set, adjacency and persisted array, are identical in
-form -- so nothing downstream has to know which it is looking at.
+Every element's normal lies on the trace's left-hand side, so its strike
+direction `cross(eZ, Vnorm)` points opposite to the trace and positive
+strike-slip is left-lateral (see `FaultMesh.strike`).
+
+`FaultMesh.vertical` extrudes the trace straight down; `FaultMesh.curved`
+moves each node cross-strike by a fitted `cross(s, z)` field (see
+`slipsolve.surface`). Only the map position of a node changes between them
+(its `(s, z)` parameters, and therefore every boundary set, adjacency and
+persisted array, are identical in form), so nothing downstream has to know
+which it is looking at.
 """
 
 import hashlib
@@ -39,38 +45,30 @@ from .layout import (  # noqa: F401  (_lattice_triangles is re-exported)
 )
 from .trace import VERTICAL_TOL_DEG, FaultSegment, dip_offset  # noqa: F401
 
-# There is deliberately NO near-vertical element guard here, and that is a
-# measured decision rather than an oversight. An irregular triangulation puts
-# most of a vertical mesh's elements a hair off 90 degrees -- 107 of 146 within
-# 1e-2 degrees, median 1.8e-12 -- because `arccos(|n_z|)` cannot return exactly
-# 90 when the normal's vertical component is at machine epsilon. That looks like
-# the catastrophic band this package's notes record beside vertical, and it is
-# not: measured against `cutde`, an independent implementation of the same
-# triangular dislocation, that mesh's whole LOS design matrix agrees to
-# **2.4e-14**, the same as a uniform mesh with no such elements at all. A single
-# triangle agrees to 1e-14 at every tilt from 0 to 5 degrees, 1e-14 degrees
-# included. The recorded band is a rectangle-as-two-TDEs disagreement with the
-# *Okada* oracle, which is why the note says cutde tracks `_tde` far more
-# closely than either tracks Okada inside it. A warning here would fire on two
-# thirds of every irregular vertical mesh and teach the reader to ignore it.
+# There is deliberately no near-vertical element guard here. An irregular
+# triangulation leaves most of a vertical mesh's elements a hair off 90 degrees
+# (around 1e-12 degrees, since `arccos(|n_z|)` cannot return exactly 90 when the
+# normal's vertical component is at machine epsilon). That is far below the
+# onset of the band beside vertical (see `trace.VERTICAL_TOL_DEG`), and such a
+# mesh's design matrix agrees with `cutde` to round-off, as a uniform mesh's
+# does. A warning here would fire on most irregular vertical meshes and teach
+# the reader to ignore it.
 
-#: How far a layout may run past either end of the trace, as :meth:`FaultMesh.curved`
-#: resamples it, before it is refused -- a fraction of ``edge_length``. Nodes are
-#: placed by ``np.interp`` on the resampled trace's arc length, which CLAMPS: every
+#: How far a layout may run past either end of the trace, as `FaultMesh.curved`
+#: resamples it, before it is refused, as a fraction of `edge_length`. Nodes are
+#: placed by `np.interp` on the resampled trace's arc length, which clamps: every
 #: node past the end lands on the end point. An end column a few metres over is
-#: harmless (the Venezuela production meshes run 2.19 m past at ``edge_length``
-#: 8 km, 2026-11-02). Interior nodes past the end are not: the Myanmar set-up
-#: (2026-11-02) measured its layout on a finer resampling, 1.7 km longer at its
-#: ``edge_length``, and the remesh put three nodes on one point -- a zero-area
-#: triangle whose Green's functions came back non-finite. A coarser resampling cuts
-#: corners, so the arc length shrinks as ``edge_length`` grows on a wiggly trace.
+#: harmless; interior nodes past the end collapse onto one point, giving zero-area
+#: triangles whose Green's functions are non-finite. A coarser resampling cuts
+#: corners, so on a wiggly trace the arc length shrinks as `edge_length` grows:
+#: measure a layout on the resampling it will be embedded on.
 LAYOUT_OVERRUN_FRACTION = 0.01
 
 
 class FaultMesh:
-    """A triangulated fault surface in local ENU metres, ``z <= 0``.
+    """A triangulated fault surface in local ENU metres, `z <= 0`.
 
-    Built through :meth:`vertical` (or, later, a dipping equivalent) rather than
+    Built through `vertical`, `curved`, `from_layout` or `join` rather than
     directly; the constructor exists to reopen a persisted mesh.
     """
 
@@ -84,7 +82,7 @@ class FaultMesh:
             raise ValueError("nodes must be (n, 3)")
         if triangles.ndim != 2 or triangles.shape[1] != 3:
             raise ValueError("triangles must be (m, 3)")
-        # Metres, negative-up. The reference mixes kilometres and metres between
+        # Metres, z <= 0. SlipSolve-Curve mixes kilometres and metres between
         # the mesh and the layered Green's functions, which is a silent
         # thousand-fold error; refusing anything else here is the cheap guard.
         if np.any(nodes[:, 2] > 0):
@@ -98,11 +96,10 @@ class FaultMesh:
         self.triangles = triangles
         self.params = params
         self.frame = frame
-        # Cell centres of the (s, z) lattice. Not used by the homogeneous
-        # half-space engine, which needs only the element vertices, but they are
-        # where the layered Green's functions place their point sources -- and
-        # the reference fits them as their own surface rather than interpolating
-        # the node grid, so they cannot be reconstructed here.
+        # Cell centres of the (s, z) lattice, carried and persisted with the
+        # mesh. They are fitted as their own surface (as SlipSolve-Curve does)
+        # rather than interpolated from the node grid, so they cannot be
+        # reconstructed here.
         self.centres = None if centres is None else np.asarray(centres, dtype=float)
         self.centre_params = (None if centre_params is None
                               else np.asarray(centre_params, dtype=float))
@@ -113,29 +110,29 @@ class FaultMesh:
     # -- construction ------------------------------------------------------
     @classmethod
     def join(cls, meshes):
-        """One mesh holding several **disjoint** faults, for a joint inversion.
+        """One mesh holding several disjoint faults, for a joint inversion.
 
-        Each input keeps its own nodes, triangles and ``(s, z)``; the pieces are
+        Each input keeps its own nodes, triangles and `(s, z)`; the pieces are
         concatenated and the triangle indices offset. Nothing is re-triangulated
         and no node is merged, so the result has one connected component per input
-        and :attr:`node_components` labels them in the order given.
+        and `node_components` labels them in the order given.
 
-        ⚠️ **The parameter coordinates deliberately OVERLAP.** Every fault's
-        ``s`` starts near zero, so two faults occupy the same ``(s, z)`` rectangle.
-        That is correct for everything that measures per component --
-        :func:`~slipsolve.layout.boundary_node_mask` and
-        :meth:`boundary_nodes` both take the component labels this provides -- and
-        it is exactly the case a *global* boundary test gets silently wrong: under
-        one, the shallower fault has no bottom edge at all and the pair own one
-        along-strike end each instead of two.
+        The parameter coordinates deliberately overlap: every fault's `s`
+        starts near zero, so two faults occupy the same `(s, z)` rectangle.
+        That is correct for everything that measures per component
+        (`slipsolve.layout.boundary_node_mask` and `boundary_nodes` both take
+        the component labels this provides), and it is exactly the case a
+        global boundary test gets silently wrong: under one, the shallower fault
+        has no bottom edge at all and the pair own one along-strike end each
+        instead of two.
 
         It does mean the unrolled section view draws the faults on top of one
-        another. Map view is unaffected, since ``nodes`` are real 3-D positions.
+        another. Map view is unaffected, since `nodes` are real 3-D positions.
 
         Winding is inherited. Each input was checked against its own trace at
         construction, and a joint check against one trace would be meaningless
-        here, so none is done -- pass meshes that came from
-        :meth:`vertical` or :meth:`curved`, not hand-built arrays.
+        here, so none is done: pass meshes that came from `vertical` or
+        `curved`, not hand-built arrays.
         """
         meshes = list(meshes)
         if not meshes:
@@ -163,16 +160,16 @@ class FaultMesh:
 
     @classmethod
     def vertical(cls, trace, frame=None, max_depth=20e3, edge_length=3e3, top_depth=0.0):
-        """Extrude ``trace`` straight down into a vertical fault.
+        """Extrude `trace` straight down into a vertical fault.
 
-        ``max_depth`` and ``edge_length`` are metres; ``top_depth`` is the depth
-        of the shallowest node (``0`` = surface-breaking). The along-strike
+        `max_depth` and `edge_length` are metres; `top_depth` is the depth
+        of the shallowest node (`0` = surface-breaking). The along-strike
         spacing is set by resampling the trace, so it is uniform in arc length
         even though the digitised vertices are not.
 
-        The extrusion is *exact*: every depth level shares one map position, so
+        The extrusion is exact: every depth level shares one map position, so
         the element edges are exactly horizontal and vertical and the dip is
-        exactly 90 degrees -- rather than ``max_depth / tan(dip)`` with ``dip``
+        exactly 90 degrees, rather than `max_depth / tan(dip)` with `dip`
         set to 90, which would leave a sub-millimetre tilt in the numerically
         awkward band beside vertical.
         """
@@ -225,66 +222,64 @@ class FaultMesh:
                along_spacing=None, balance=MAX_COUNT_RATIO, **fit_kwargs):
         """A fault that dips, built from one dip per deep segment.
 
-        The reference implementation's normal workflow: a surface trace, a set of
-        straight *deep segments* in plan view, and one dip for each. Each
-        segment is pushed down-dip to give a bottom line at ``max_depth``; a
-        smooth surface is fitted through those lines and the trace
-        (:class:`~slipsolve.surface.FaultSurface`); and the mesh nodes are
-        that surface sampled on the ``(s, z)`` lattice.
+        SlipSolve-Curve's normal workflow: a surface trace, a set of straight
+        *deep segments* in plan view, and one dip for each. Each segment is
+        pushed down-dip to give a bottom line at `max_depth`; a smooth surface
+        is fitted through those lines and the trace
+        (`slipsolve.surface.FaultSurface`); and the mesh nodes are that surface
+        sampled on the `(s, z)` lattice.
 
         Four ways to say what the geometry is, in decreasing generality:
 
-        * ``surface=`` -- a :class:`~slipsolve.surface.FaultSurface` you
-          fitted yourself.
-        * ``bottom_trace=`` -- a digitised bottom edge, at ``bottom_depth``
-          (default ``max_depth``). The dip is whatever connects the two traces,
+        * `surface=`: a `slipsolve.surface.FaultSurface` you fitted yourself.
+        * `bottom_trace=`: a digitised bottom edge, at `bottom_depth`
+          (default `max_depth`). The dip is whatever connects the two traces,
           so it varies continuously along strike and may reverse direction where
-          the bottom trace crosses the surface trace -- which a list of dips can
+          the bottom trace crosses the surface trace, which a list of dips can
           only express with hand-tuned values straddling 90 degrees.
-        * ``segments=`` and ``dips=`` -- the reference's
-          ``cfg.geometry.segmentFiles`` / ``segmentDipDegrees``. ``segments`` may
+        * `segments=` and `dips=`: SlipSolve-Curve's
+          `cfg.geometry.segmentFiles` / `segmentDipDegrees`. `segments` may
           be an integer, in which case the trace is chopped into that many equal
-          chords and ``dips`` gives one dip each.
-        * ``uniform_dip=`` -- one dip for the whole fault.
+          chords and `dips` gives one dip each.
+        * `uniform_dip=`: one dip for the whole fault.
 
-        ``uniform_dip`` is computed **analytically**, not fitted: every node
-        simply steps ``depth / tan(dip)`` along its own local normal. The
-        reference runs its gridder even in this case, but there is nothing for a
-        gridder to decide when the answer is known in closed form, and going
-        through it would leave ``curved(uniform_dip=90)`` agreeing with
-        :meth:`vertical` only to the fit's tolerance instead of exactly.
+        `uniform_dip` is computed analytically, not fitted: every node
+        simply steps `depth / tan(dip)` along its own local normal.
+        SlipSolve-Curve runs its gridder even in this case, but there is nothing
+        for a gridder to decide when the answer is known in closed form, and
+        going through it would leave `curved(uniform_dip=90)` agreeing with
+        `vertical` only to the fit's tolerance instead of exactly.
 
-        ``bias_w`` thickens the depth levels geometrically downward (the
-        reference's ``cfg.mesh.biasW = 1.15``), putting the fine resolution where
-        the data resolves slip. ``bias_w=1`` gives even levels. Measured on the
-        real trace at ``down_dip_levels=8``: ``bias_w=1.15`` runs 1.8 km levels at
-        the surface to 4.2 km at 20 km depth, and ``1.3`` runs 1.1 km to 5.5 km.
+        `bias_w` thickens the depth levels geometrically downward
+        (SlipSolve-Curve's `cfg.mesh.biasW`), putting the fine resolution where
+        the data resolve slip. `bias_w=1` gives even levels. For a 20 km fault
+        with `down_dip_levels=8`, `bias_w=1.15` runs from 1.8 km levels at the
+        surface to 4.2 km at the base, and `1.3` from 1.1 km to 5.5 km.
 
         Three knobs place the nodes freely, in increasing generality; all three
         keep the geometry arguments above untouched, because how a node is
         carried onto the fitted surface does not depend on where it sits.
 
-        * ``depths=`` -- the depth levels outright, any spacing, in place of the
-          ``down_dip_levels``/``bias_w`` geometric progression.
-        * ``nodes_per_level=`` (a scalar, one value per level, or a callable of
-          depth) or ``along_spacing=`` (the same thing in metres) -- **a
-          different number of nodes at each depth level**. Rows of unequal count
-          have no quads to split, so those meshes are triangulated by Delaunay
-          in ``(s, z)`` and wound by
-          :func:`~slipsolve.layout.orient_triangles`; a uniform count
-          still takes the classic lattice split, bit for bit.
-        * ``layout=`` -- a :class:`~slipsolve.layout.MeshLayout` you built
-          yourself, including a fully unstructured one from
-          :func:`~slipsolve.layout.lloyd_layout`. The depth extent then
-          comes from the layout rather than from ``max_depth``.
+        * `depths=`: the depth levels outright, any spacing, in place of the
+          `down_dip_levels`/`bias_w` geometric progression.
+        * `nodes_per_level=` (a scalar, one value per level, or a callable of
+          depth) or `along_spacing=` (the same thing in metres): a different
+          number of nodes at each depth level. Rows of unequal count have no
+          quads to split, so those meshes are triangulated by Delaunay in
+          `(s, z)` and wound by `slipsolve.layout.orient_triangles`; a uniform
+          count still takes the classic lattice split, bit for bit.
+        * `layout=`: a `slipsolve.layout.MeshLayout` you built yourself,
+          including a fully unstructured one from
+          `slipsolve.layout.lloyd_layout`. The depth extent then comes from the
+          layout rather than from `max_depth`.
 
-        ``balance`` caps how fast the node count may change between adjacent
+        `balance` caps how fast the node count may change between adjacent
         levels (2:1 by default). It is a shape guard, not a preference: a fine
         row against a coarse one is what makes Delaunay reach across for a long
         thin triangle.
 
-        ``bias_l`` is accepted only as ``1``. It is the reference's along-strike
-        counterpart -- a single geometric ratio applied along strike -- which is
+        `bias_l` is accepted only as `1`. It is SlipSolve-Curve's along-strike
+        counterpart (a single geometric ratio applied along strike), which is
         not what the knobs above give you, and it has no meaning once the levels
         may hold different node counts anyway.
         """
@@ -380,11 +375,11 @@ class FaultMesh:
     def from_layout(cls, layout, trace, frame=None, **kwargs):
         """Build a mesh on a node layout chosen elsewhere.
 
-        The seam an optimizer works through: :mod:`slipsolve.layout`
-        decides where the nodes go in ``(s, z)`` and this carries them onto the
-        very surface :meth:`curved` fits, so geometry and discretisation can be
-        varied independently. Every geometry keyword of :meth:`curved` applies;
-        the depth extent comes from the layout.
+        The seam an optimizer works through: `slipsolve.layout` decides where
+        the nodes go in `(s, z)` and this carries them onto the very surface
+        `curved` fits, so geometry and discretisation can be varied
+        independently. Every geometry keyword of `curved` applies; the depth
+        extent comes from the layout.
         """
         return cls.curved(trace, frame, layout=layout, **kwargs)
 
@@ -399,14 +394,14 @@ class FaultMesh:
 
     @property
     def vertices(self):
-        """The three vertex positions per element, shape ``(m, 3, 3)``."""
+        """The three vertex positions per element, shape `(m, 3, 3)`."""
         return self.nodes[self.triangles]
 
     @property
     def param_vertices(self):
-        """The three vertex ``(s, z)`` per element, shape ``(m, 3, 2)``.
+        """The three vertex `(s, z)` per element, shape `(m, 3, 2)`.
 
-        The unrolled counterpart of :attr:`vertices`: arc length along strike and
+        The unrolled counterpart of `vertices`: arc length along strike and
         depth, which is exactly what the mesh is parameterized by, so the section
         it draws is an exact picture of the fault rather than a projection of one.
         """
@@ -414,10 +409,10 @@ class FaultMesh:
 
     @property
     def normals(self):
-        """Unit normals, ``normalize(cross(P2 - P1, P3 - P1))``.
+        """Unit normals, `normalize(cross(P2 - P1, P3 - P1))`.
 
-        The same expression :mod:`slipsolve._tde` uses, so these *are* the
-        elements' own ``Vnorm`` and fix the sign of both slip components.
+        The same expression `slipsolve._tde` uses, so these are the elements'
+        own `Vnorm`, from which their strike and dip directions follow.
         """
         v = self.vertices
         n = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
@@ -434,17 +429,17 @@ class FaultMesh:
 
     @property
     def element_params(self):
-        """Each element's ``(s, z)`` centroid -- the coordinates to plot slip in."""
+        """Each element's `(s, z)` centroid, the coordinates to plot slip in."""
         return self.params[self.triangles].mean(axis=1)
 
     @property
     def dip(self):
         """Dip in degrees: 0 for a horizontal element, 90 for a vertical one.
 
-        Folded into ``[0, 90]`` by the ``abs``, which is the convention the
-        reference's ten-column model table uses -- so an element dipping 60
+        Folded into `[0, 90]` by the `abs`, which is the convention
+        SlipSolve-Curve's ten-column model table uses, so an element dipping 60
         degrees one way and one dipping 60 the other report the same number. Read
-        :attr:`dip_direction` alongside it to tell them apart.
+        `dip_direction` alongside it to tell them apart.
         """
         return np.degrees(np.arccos(np.clip(np.abs(self.normals[:, 2]), 0.0, 1.0)))
 
@@ -452,9 +447,9 @@ class FaultMesh:
     def dip_direction(self):
         """Azimuth in degrees of the down-dip direction, clockwise from north.
 
-        What :attr:`dip` throws away. On a vertical fault the down-dip vector is
+        What `dip` throws away. On a vertical fault the down-dip vector is
         straight down and this is degenerate, so it falls back to the normal's
-        own azimuth -- which for a vertical element is still meaningful (it is
+        own azimuth, which for a vertical element is still meaningful (it is
         the side the fault faces) and is never used to place anything.
         """
         n = self.normals
@@ -468,20 +463,21 @@ class FaultMesh:
 
     @property
     def strike(self):
-        """Azimuth in degrees of the element's own ``cross(eZ, Vnorm)``.
+        """Azimuth in degrees of the element's own `cross(eZ, Vnorm)`.
 
-        This is the strike direction :mod:`slipsolve._tde` measures
-        strike-slip along, *not* necessarily the geological strike of the trace --
-        for an east-striking fault the two are 180 degrees apart. Stored so the
-        layered Green's functions, which need a strike angle, take it from the
-        same place the displacements do.
+        This is the strike direction `slipsolve._tde` measures strike-slip
+        along, not the direction the trace was digitised in: with every normal
+        on the trace's left-hand side it points the opposite way (west for a
+        trace digitised eastward), which is why positive strike-slip is
+        left-lateral. It is also the strike written to the model tables, so they
+        agree with the displacements.
         """
         n = self.normals
         return np.degrees(np.arctan2(-n[:, 1], n[:, 0])) % 360.0
 
     @property
     def neighbors(self):
-        """Element adjacency, ``(m, 3)``, ``-1`` where an edge is on a boundary.
+        """Element adjacency, `(m, 3)`, `-1` where an edge is on a boundary.
 
         Built from a shared-edge map rather than from a triangulation object, so
         it works for any mesh this class can hold.
@@ -505,39 +501,34 @@ class FaultMesh:
     def boundary_elements(self, side):
         """Elements touching one edge of the fault, as a boolean mask.
 
-        ``side`` is ``"bottom"``, ``"top"``, ``"left"`` or ``"right"``. Resolved
-        in ``(s, z)`` parameter space, so "left" and "right" mean the along-strike
+        `side` is `"bottom"`, `"top"`, `"left"` or `"right"`. Resolved
+        in `(s, z)` parameter space, so "left" and "right" mean the along-strike
         ends whatever direction the fault happens to run. Picking them from a map
-        coordinate instead -- ``argmin``/``argmax`` of northing, say -- is nearly
+        coordinate instead (`argmin`/`argmax` of northing, say) is nearly
         degenerate for an east-west fault and would anchor an interior node at any
-        restraining bend reaching further north than an endpoint;
-        ``test_boundary_elements_are_the_along_strike_ends`` plants exactly that
-        trace.
+        restraining bend reaching further north than an endpoint.
 
-        ⚠️ **That is not what the reference does, though this docstring used to say
-        so** (corrected 2026-09-07 against the cloned MATLAB). SlipSolve selects
+        SlipSolve-Curve's nodal inversion (`zero_slip_boundary.m`) selects
         boundary patches by index arithmetic on its structured
-        ``(fault, patch, layer)`` numbering -- ``zero_slip_boundary.m`` takes
-        ``patch_this_segment(layer_this_segment == top_layer_no)``, or the first
-        and last patch of each layer for ``'left'``/``'right'`` -- and never reads
-        a coordinate at all. The departure that matters is that exact equality in
-        parameter space still works on an **unstructured** mesh, where there is no
+        `(fault, patch, layer)` numbering, and its element-basis stages
+        (`zero_slip_boundary_curve.m`) take the deepest level and the
+        minimum and maximum northing in each depth level. Exact equality in
+        parameter space also works on an unstructured mesh, where there is no
         index to do arithmetic on.
         """
         return self.boundary_nodes(side)[self.triangles].any(axis=1)
 
     def boundary_nodes(self, side):
-        """Nodes on one edge of the fault, as a boolean mask over ``nodes``.
+        """Nodes on one edge of the fault, as a boolean mask over `nodes`.
 
         The single implementation of "which nodes are on an edge"; the element
-        mask above, ``NodeBasis.boundary`` and ``SlipModel.surface_displacement``
+        mask above, `NodeBasis.boundary` and `SlipModel.surface_displacement`
         all read it, so an irregular mesh cannot have three answers.
 
-        Measured per connected piece (:attr:`node_components`), so a mesh
-        carrying two faults gives each its own four edges rather than one
-        rectangle around the pair. On a single fault -- every mesh any builder
-        here produces -- there is one component and this is the global test it
-        has always been.
+        Measured per connected piece (`node_components`), so a mesh carrying
+        two faults gives each its own four edges rather than one rectangle
+        around the pair. On a single fault there is one component and this is
+        the plain global test.
         """
         components = self.node_components
         labels = None if components.max() == 0 else components
@@ -547,8 +538,8 @@ class FaultMesh:
     def node_components(self):
         """Which connected piece of the mesh each node belongs to.
 
-        All zeros for a single fault. Derived from ``triangles`` rather than
-        stored, because that is what it *is*: two faults in one mesh share a
+        All zeros for a single fault. Derived from `triangles` rather than
+        stored, because that is what it is: two faults in one mesh share a
         frame and a parameterization and no triangles.
         """
         return node_components(self.triangles, self.n_nodes)
@@ -557,9 +548,9 @@ class FaultMesh:
     def digest(self):
         """A short hash of the geometry, for a stage's params dict.
 
-        ``Workspace.hash_params`` JSON-serialises what it is given, so a mesh
-        cannot go in directly -- and leaving it out would let a re-run at a
-        different ``edge_length`` silently reuse a stale store.
+        Stage parameters are hashed as JSON, so a mesh cannot go in directly,
+        and leaving it out would let a re-run at a different `edge_length`
+        silently reuse a stale store.
         """
         h = hashlib.sha256()
         h.update(np.ascontiguousarray(self.nodes, dtype=np.float64).tobytes())
@@ -567,11 +558,11 @@ class FaultMesh:
         return h.hexdigest()[:16]
 
     def has_centres(self):
-        """Whether the cell-centre grid is present (needed by the layered engine)."""
+        """Whether the cell-centre grid is present."""
         return self.centres is not None
 
     def to_dataset(self):
-        """The mesh as an :class:`xarray.Dataset` on ``node`` and ``element``."""
+        """The mesh as an `xarray.Dataset` on `node` and `element`."""
         ds = xr.Dataset(
             {
                 "node_x": ("node", self.nodes[:, 0]),
@@ -603,7 +594,7 @@ class FaultMesh:
         nodes = np.column_stack([ds["node_x"].values, ds["node_y"].values, ds["node_z"].values])
         # params[:, 1] is rebuilt from node_z rather than persisted, which is
         # exact for every mesh this class builds: the fitted surface moves a node
-        # in map view only, so its parameter depth *is* its Cartesian z.
+        # in map view only, so its parameter depth is its Cartesian z.
         params = np.column_stack([ds["node_s"].values, ds["node_z"].values])
         frame = ds.attrs.get("frame")
         centres = centre_params = None
@@ -667,9 +658,9 @@ class FaultMesh:
                 f"depth={self.attrs.get('max_depth', 0) / 1e3:.0f}km>")
 
 
-#: Surface-fit options ``FaultMesh.curved`` forwards, so an unknown one is caught
-#: where the caller typed it rather than deep inside the gridder -- or, on the
-#: closed-form ``uniform_dip`` path, not at all.
+#: Surface-fit options `FaultMesh.curved` forwards, so an unknown one is caught
+#: where the caller typed it rather than deep inside the gridder, or, on the
+#: closed-form `uniform_dip` path, not at all.
 _FIT_KWARGS = frozenset({
     "surface_weight_ratio", "samples_per_cell",
     "interp", "regularizer", "autoscale", "solver", "weights",
@@ -677,14 +668,14 @@ _FIT_KWARGS = frozenset({
 
 
 def _depth_levels(top_depth, max_depth, n_levels, bias_w=1.0):
-    """Depth of each node level, thickening downward by ``bias_w`` per level.
+    """Depth of each node level, thickening downward by `bias_w` per level.
 
-    ``bias_w = 1`` gives even levels. Above 1 the shallow levels are thin, which
+    `bias_w = 1` gives even levels. Above 1 the shallow levels are thin, which
     is where slip is resolved: a surface observation sees a patch at 2 km far more
     sharply than one at 18 km, so uniform levels spend parameters where the data
-    cannot constrain them. The reference builds the same geometric progression
-    (``widthFactors = biasW .^ (0:layerCount-1)``) but solves for the level
-    *count* from a target top thickness; taking the count as given is the same
+    cannot constrain them. SlipSolve-Curve builds the same geometric progression
+    (`widthFactors = biasW .^ (0:layerCount-1)`) but solves for the level
+    count from a target top thickness; taking the count as given is the same
     family of grids with the knob the caller actually wants to turn.
     """
     n_levels = max(2, int(n_levels))
@@ -700,15 +691,15 @@ def _depth_levels(top_depth, max_depth, n_levels, bias_w=1.0):
 def _snap_vertical_columns(cross, depths):
     """Pull near-vertical steps of the fitted surface onto exactly vertical.
 
-    :data:`~slipsolve.trace.VERTICAL_TOL_DEG` guards the *input* dip, but a
+    `slipsolve.trace.VERTICAL_TOL_DEG` guards the input dip, but a
     fitted surface that leans one way at one end and the other way at the other
     has to pass through vertical somewhere, and the elements it passes through
-    are not asked for by anybody -- they are wherever the fit happens to cross.
-    Those elements land in the triangular-dislocation solution's catastrophic
-    near-vertical band, where the error reaches 190x the signal.
+    are not asked for by anybody: they are wherever the fit happens to cross.
+    Those elements can land in the near-vertical band where the
+    triangular-dislocation solution loses all accuracy.
 
-    A step from depth level ``j`` to ``j+1`` is in the band when the cross-strike
-    change over it is under ``dz * tan(tol)`` -- half a metre over a 3 km level.
+    A step from depth level `j` to `j+1` is in the band when the cross-strike
+    change over it is under `dz * tan(tol)`, half a metre over a 3 km level.
     Snapping copies the shallower value down, which makes that step exactly
     vertical and therefore exactly in the safe regime, at a cost bounded by the
     same half metre.
@@ -724,11 +715,11 @@ def _snap_vertical_columns(cross, depths):
 def _resolve_layout(layout, depths, nodes_per_level, along_spacing, stations,
                     top_depth, max_depth, down_dip_levels, bias_w, edge_length,
                     balance):
-    """The ``(s, z)`` node layout, and the depth levels to fit the surface on.
+    """The `(s, z)` node layout, and the depth levels to fit the surface on.
 
-    The two are the same list for a row-structured layout -- which is what keeps
-    a node's parameter depth equal to its Cartesian ``z``, the invariant
-    ``from_dataset`` and every boundary test rest on. A freeform cloud has no
+    The two are the same list for a row-structured layout, which is what keeps
+    a node's parameter depth equal to its Cartesian `z`, the invariant
+    `from_dataset` and every boundary test rest on. A freeform cloud has no
     rows to fit, so the surface gets its own even lattice over the same depth
     range and the nodes are interpolated off it.
     """
@@ -778,7 +769,7 @@ def _resolve_layout(layout, depths, nodes_per_level, along_spacing, stations,
 def _require_layout_on_trace(layout, stations, edge_length):
     """Refuse a layout whose nodes run past the resampled trace's ends.
 
-    See :data:`LAYOUT_OVERRUN_FRACTION`. A layout shorter than the trace is fine
+    See `LAYOUT_OVERRUN_FRACTION`. A layout shorter than the trace is fine
     (it meshes part of it); one longer is clamped node by node onto the end point.
     """
     s = layout.params[:, 0]
@@ -803,9 +794,9 @@ def _require_layout_on_trace(layout, stations, edge_length):
 def _layout_attrs(layout):
     """Provenance for a layout, keeping the lattice's own keys where they apply.
 
-    ``n_along`` means nothing once levels differ, so an irregular layout records
-    ``nodes_per_level`` instead; ``layout`` is folded in only when it is not the
-    classic uniform one, so an existing mesh's attrs are unchanged.
+    `n_along` means nothing once levels differ, so an irregular layout records
+    `nodes_per_level` instead; `layout` is folded in only when it is not the
+    classic uniform one, so a uniform mesh keeps the lattice's attrs.
     """
     kind = layout.attrs.get("layout", "freeform")
     out = {} if kind == "uniform" else {"layout": kind}
@@ -822,11 +813,11 @@ def _layout_attrs(layout):
 
 
 def _sample_cross(cross, s_fit, depths, params):
-    """Cross-strike offset at arbitrary ``(s, z)``, bilinear on the fit lattice.
+    """Cross-strike offset at arbitrary `(s, z)`, bilinear on the fit lattice.
 
-    Exact on the lattice's own knots: ``searchsorted`` puts a node sitting on a
+    Exact on the lattice's own knots: `searchsorted` puts a node sitting on a
     knot at weight exactly 1, so a row-structured layout would get the same
-    numbers as the per-level path in :func:`_place_layout`.
+    numbers as the per-level path in `_place_layout`.
     """
     s = params[:, 0]
     depth = -params[:, 1]
@@ -842,11 +833,11 @@ def _sample_cross(cross, s_fit, depths, params):
 
 
 def _place_layout(layout, resampled, frame, s_fit, depths, cross, tx, ty):
-    """Carry an ``(s, z)`` layout into 3-D through the fitted cross-strike field.
+    """Carry an `(s, z)` layout into 3-D through the fitted cross-strike field.
 
-    A node's ``z`` is copied across untouched -- the surface moves nodes in map
-    view only -- which is what keeps ``params[:, 1] == nodes[:, 2]`` exact, and
-    with it every boundary test and ``from_dataset``'s reconstruction.
+    A node's `z` is copied across untouched (the surface moves nodes in map
+    view only), which is what keeps `params[:, 1] == nodes[:, 2]` exact, and
+    with it every boundary test and `from_dataset`'s reconstruction.
     """
     params = layout.params
     nodes = np.empty((layout.n_nodes, 3))

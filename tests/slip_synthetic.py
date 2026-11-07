@@ -1,13 +1,12 @@
-"""Synthetic ``LOSStack`` builders shared by the slip-inversion tests.
+"""Synthetic LOS-stack builders shared by the slip-inversion tests.
 
-Lives beside the tests as an importable module, the same arrangement
-``legacy_reference`` uses: pytest puts this directory on ``sys.path``, so both
-``test_slip_sampling`` and ``test_slip_inversion`` can build the same scenes
-without duplicating the plumbing or growing the package's own conftest.
+Lives beside the tests as an importable module: pytest puts this directory on
+`sys.path`, so every test file can build the same scenes without duplicating
+the plumbing or growing a conftest.
 
-Two fields are offered. :func:`analytic_los_stack` is an arctangent ramp across
+Two fields are offered. `analytic_los_stack` is an arctangent ramp across
 the fault -- cheap, so it can cover a whole raster, and adequate for testing the
-sampler. :func:`forward_los_stack` is the real elastic forward model of a given
+sampler. `forward_los_stack` is the real elastic forward model of a given
 slip distribution, which is what a recovery test needs; it is evaluated only at
 the points asked for, because a full raster would be millions of dislocation
 evaluations.
@@ -36,18 +35,17 @@ GEOMETRIES = {
 def look_vector(incidence_deg, heading_deg):
     """Target->sensor ENU unit vector for a **left**-looking pass.
 
-    Matches :mod:`nisar_tools.geometry`'s convention: ``los_up`` is positive and
-    equals ``cos(incidence)``.
+    Matches `nisar_tools.geometry`'s convention: `los_up` is positive and
+    equals `cos(incidence)`.
 
-    Left-looking, because that is what NISAR is -- and these fixtures used to be
-    right-looking, which put every slip test on the wrong side of the orbit from
-    the data the package actually processes. Sanity check against a real
-    granule: ascending ``los_east`` is **+0.68**, descending **-0.61**.
+    Left-looking, as NISAR is, so the tests sit on the same side of the orbit as
+    the data. For comparison, a real NISAR granule has ascending `los_east` near
+    +0.68 and descending near -0.61.
     """
     inc = np.deg2rad(incidence_deg)
     # A left-looking radar illuminates 90 degrees anticlockwise of its heading,
     # so on an ascending (roughly northward) pass the swath lies west of the
-    # ground track and the sensor is EAST of the target. The horizontal part of
+    # ground track and the sensor is east of the target. The horizontal part of
     # the target->sensor vector points back at the spacecraft.
     az = np.deg2rad(heading_deg - 90.0)
     return (-np.sin(inc) * np.sin(az), -np.sin(inc) * np.cos(az), np.cos(inc))
@@ -56,15 +54,13 @@ def look_vector(incidence_deg, heading_deg):
 class LosLike:
     """A minimal stand-in for a LOS raster product.
 
-    The **slip** module reads only `.ds` -- verified by grep across
-    `sampling.py` and `predict.py` -- which is why these fixtures do not need
-    the NISAR `LOSStack`, and why the slip tests stay runnable without it.
+    Sampling and prediction read only `.ds`, so these fixtures do not need
+    `nisar_tools`' `LOSStack`, and the tests run without it.
 
-    `x`, `y` and `crs` exist for `nisar_tools.resample`, which is raster work
-    and legitimately needs the grid; they delegate to `.ds` so there is one
-    source of truth. Constructed from a Dataset and reconstructable the same
-    way, which is what `calibrate.unmask_geometry` relies on when it does
-    `type(stack)(ds)`.
+    `x`, `y` and `crs` exist for `slipsolve.resample`, which is raster work
+    and needs the grid; they delegate to `.ds` so there is one source of truth.
+    Constructed from a Dataset and reconstructable the same way, which is what
+    `calibrate.unmask_geometry` relies on when it does `type(stack)(ds)`.
     """
 
     def __init__(self, ds):
@@ -86,8 +82,8 @@ class LosLike:
     def epsg(self):
         """The EPSG code, or a loud failure when there is not one.
 
-        ⚠️ A product resampled into a `LocalFrame` is gridded in a transverse
-        Mercator centred on the study area, which has **no EPSG code at all**.
+        A product resampled into a `LocalFrame` is gridded in a transverse
+        Mercator centred on the study area, which has no EPSG code at all.
         `resample_to_frame` therefore pops the attribute, and anything that then
         asks for it must fail rather than receive a stale code from before the
         warp -- that would silently georeference the result somewhere else
@@ -105,7 +101,7 @@ class LosLike:
 
 
 def _grid(frame, epsg, half_x, half_y, spacing):
-    """A north-up raster in ``epsg`` covering a box of the local frame."""
+    """A north-up raster in `epsg` covering a box of the local frame."""
     t = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
     lon, lat = frame.to_lonlat(np.array([-half_x, half_x]), np.array([-half_y, half_y]))
     ux, uy = t.transform(lon, lat)
@@ -115,9 +111,9 @@ def _grid(frame, epsg, half_x, half_y, spacing):
 
 
 def _stack(los, x, y, look, epsg, name, sign=1, incidence=35.0):
-    # ``sign`` is recorded but deliberately NOT applied to ``los``: a real stack's
-    # displacement is positive toward the sensor whatever ``sign`` was passed,
-    # because ``phase_to_los`` already applied it. The attribute is provenance.
+    # `sign` is recorded but deliberately not applied to `los`: a real stack's
+    # displacement is positive toward the sensor whatever `sign` was passed,
+    # because `phase_to_los` already applied it. The attribute is provenance.
     e, n, u = look
     shape = los.shape
     ds = xr.Dataset(
@@ -164,19 +160,19 @@ def analytic_los_stack(trace, frame, geometry="asc", epsg=32619, spacing=800.0,
 def forward_los_stack(mesh, slip, trace, frame, geometry="asc", epsg=32619,
                       spacing=2000.0, half_x=140e3, half_y=90e3,
                       noise=0.0, nan_rows=0, seed=0):
-    """The elastic response of ``slip``, sampled onto a raster.
+    """The elastic response of `slip`, sampled onto a raster.
 
     Deliberately coarse by default: every pixel costs a full dislocation
     evaluation against every element, so a 500 m grid over this fault would be
     tens of millions of them. A recovery test wants a coarse *raster* and then a
     quadtree of it, not a fine one.
 
-    **The line of sight is reached the long way round** -- ENU displacement ->
-    range change -> interferometric phase -> :func:`phase_to_los` -- rather than
+    The line of sight is reached the long way round -- ENU displacement ->
+    range change -> interferometric phase -> `phase_to_los` -- rather than
     by asking the engine for scalar LOS directly. Going straight there would use
     the same sign convention the inversion then inverts, making the recovery test
-    self-consistent under a global flip and blind to exactly the error that had
-    a dextral fault inverting as sinistral.
+    self-consistent under a global flip and blind to a sign error that makes a
+    dextral fault invert as sinistral.
     """
     from slipsolve.greens import HalfSpaceTDE
 
@@ -205,14 +201,12 @@ def tapered_slip(mesh, peak=-2.0, along_centre=0.55, along_width=40e3,
                  locking_depth=12e3, rake=0.0):
     """A single slip patch: Gaussian along strike, tapering with depth.
 
-    Negative ``peak`` at ``rake=0`` is right-lateral (see
-    :mod:`slipsolve`), which is the sense of the San Sebastian and Sagaing
-    systems, and is the default.
+    Negative `peak` at `rake=0` is right-lateral (positive `strike_slip` is
+    left-lateral; see `slipsolve`), and is the default.
 
-    ``rake`` splits the patch between the two components the usual way -- 0 is
-    pure strike-slip, 90 is pure dip-slip with the hanging wall up. It defaults
-    to 0 because that is what the phase-one fixtures planted, but a recovery test
-    on a **dipping** mesh should use a non-zero rake: with dip-slip identically
+    `rake` splits the patch between the two components the usual way -- 0 is
+    pure strike-slip, 90 is pure dip-slip with the hanging wall up. A recovery
+    test on a dipping mesh should use a non-zero rake: with dip-slip identically
     zero, half the design matrix is never exercised and an error in the dip-slip
     columns cannot show up in the answer.
     """
@@ -240,17 +234,17 @@ def correlated_noise(shape, spacing, sill, range_m, nugget=0.0,
 
     The whole point of the covariance tests is that they must not verify the
     estimator against itself. So the field is synthesised from the covariance
-    directly -- build ``C`` on the wrapped lag grid, take its DFT, filter white
+    directly -- build `C` on the wrapped lag grid, take its DFT, filter white
     noise by the square root, come back -- and the fit is then asked to return the
-    ``sill``/``range_m``/``nugget`` that went in.
+    `sill`/`range_m`/`nugget` that went in.
 
-    ``pad`` embeds in a larger periodic grid so the wrap-around does not
+    `pad` embeds in a larger periodic grid so the wrap-around does not
     contaminate the lags being tested; 3x is comfortable for an exponential, whose
     correlation is under 5% past 3 ranges.
 
     The correlated part and the nugget are generated separately, because that is
     what they are: the nugget is white by definition, and a field built with the
-    nugget folded into ``C`` would embed a discontinuity at zero lag that the FFT
+    nugget folded into `C` would embed a discontinuity at zero lag that the FFT
     cannot represent.
     """
     ny, nx = int(shape[0]), int(shape[1])
@@ -288,8 +282,8 @@ def correlated_noise(shape, spacing, sill, range_m, nugget=0.0,
 class Workspace:
     """A minimal stand-in for the raster package's stage store.
 
-    ⚠️ `SlipModel.persist` and `Observations.persist` take a workspace as an
-    **argument** -- nothing in `slipsolve` imports one -- so the package does not
+    `SlipModel.persist` and `Observations.persist` take a workspace as an
+    argument -- nothing in `slipsolve` imports one -- so the package does not
     depend on this; only the round-trip tests do. The contract is one method,
     `store(name, ds, params, overwrite=False)`, which writes and returns the
     reopened dataset. Reopening rather than returning `ds` is the part that

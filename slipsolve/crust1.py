@@ -1,15 +1,14 @@
-"""CRUST1.0 (Laske, Masters, Ma & Pasyanos 2013) as moduli for :class:`~slipsolve.heterogeneity.VoxelModel`.
+"""CRUST1.0 (Laske, Masters, Ma & Pasyanos 2013) as moduli for `slipsolve.heterogeneity.VoxelModel`.
 
 CRUST1.0 gives, on 1-degree cells, the tops of nine layers (water, ice, three sediments, three crystalline crust, and
-the mantle below the Moho) with Vp, Vs and density in each: four files of 64,800 rows (``crust1.bnds``, ``.vp``,
-``.vs``, ``.rho``; km below sea level as negative elevations, km/s, g/cm^3), cells from 89.5 N 179.5 W eastward, then
+the mantle below the Moho) with Vp, Vs and density in each: four files of 64,800 rows (`crust1.bnds`, `.vp`,
+`.vs`, `.rho`; km below sea level as negative elevations, km/s, g/cm^3), cells from 89.5 N 179.5 W eastward, then
 southward. A cell is an average over its square, so a point takes the cell holding it.
 
-Depths here are below the ROCK surface: water and ice are dropped and each column is measured from its own top, as
-the layered reference (:class:`~slipsolve.wavenumber.RemainderTables`) flattens topography and bathymetry. The static
+Depths here are below the rock surface: water and ice are dropped and each column is measured from its own top, as
+the layered reference (`slipsolve.wavenumber.RemainderTables`) flattens topography and bathymetry. The static
 load of a water column is not modelled; its rock is. Within a column the moduli are piecewise constant in depth, so
-:meth:`Crust1.average` integrates them exactly over any depth range (the arithmetic, Voigt, mean of ``lambda`` and
-``mu``).
+`Crust1.average` integrates them exactly over any depth range (the arithmetic, Voigt, mean of `lambda` and `mu`).
 """
 from pathlib import Path
 
@@ -20,7 +19,7 @@ WATER, ICE, MANTLE = 0, 1, 8
 
 
 class Crust1:
-    """CRUST1.0's cells: ``bounds`` (layer tops, km, elevation), ``vp``, ``vs`` (km/s), ``rho`` (g/cm^3), each ``(64800, 9)``."""
+    """CRUST1.0's cells: `bounds` (layer tops, km, elevation), `vp`, `vs` (km/s), `rho` (g/cm^3), each `(64800, 9)`."""
 
     def __init__(self, bounds, vp, vs, rho):
         arrays = [np.asarray(a, dtype=float) for a in (bounds, vp, vs, rho)]
@@ -45,7 +44,7 @@ class Crust1:
         return row * 360 + col
 
     def column(self, k):
-        """Cell ``k``'s solid layers below its rock surface: ``(top, bottom, lam, mu)``, metres and Pa.
+        """Cell `k`'s solid layers below its rock surface: `(top, bottom, lam, mu)`, metres and Pa.
 
         Water and ice are dropped, and layers of zero thickness; the mantle runs to infinity.
         """
@@ -67,9 +66,9 @@ class Crust1:
         return self._columns[k]
 
     def average(self, lon, lat, top, bottom):
-        """``(lam, mu)``: thickness-weighted means over ``top``-``bottom`` (m below the rock surface) at each point.
+        """`(lam, mu)`: thickness-weighted means over `top`-`bottom` (m below the rock surface) at each point.
 
-        All arguments broadcast together; the cell is the one holding ``(lon, lat)``.
+        All arguments broadcast together; the cell is the one holding `(lon, lat)`.
         """
         lon, lat, top, bottom = np.broadcast_arrays(*(np.asarray(a, dtype=float) for a in (lon, lat, top, bottom)))
         if np.any(bottom <= top) or np.any(top < 0.0):

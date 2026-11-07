@@ -1,4 +1,4 @@
-"""Pins faults between blocks of different rigidity (:mod:`slipsolve.bimaterial`).
+"""Pins faults between blocks of different rigidity (`slipsolve.bimaterial`).
 
 The scaled mode is a row and column scaling of any engine, so it is tested
 against the plain engine's own matrix. The exact mode is tested on what defines
@@ -165,7 +165,7 @@ def test_the_exact_field_jumps_by_the_slip_and_nowhere_else():
 
 
 def test_a_new_ratio_reuses_the_interface():
-    """``with_contrast`` and ``response_matrix`` give what a fresh solve at that ratio gives."""
+    """`with_contrast` and `response_matrix` give what a fresh solve at that ratio gives."""
     trace = FaultTrace.from_lonlat(np.array([-80.0, -79.6]), np.array([8.0, 8.0]))
     frame = trace.local_frame()
     mesh = FaultMesh.curved(trace, frame, uniform_dip=70.0, max_depth=10e3, edge_length=5e3)
@@ -190,12 +190,12 @@ def test_a_new_ratio_reuses_the_interface():
 
 
 def test_the_exact_field_is_continuous_across_a_step_along_strike():
-    """The scaled mode steps by the ratio of the two intervals' ``a``; the exact one hardly does.
+    """The scaled mode steps by the ratio of the two intervals' `a`; the exact one hardly does.
 
     Element-constant discontinuities leave the exact field a few percent off within
-    about an element of the boundary (measured 1-7% just across it, at the surface
-    and at depth, against the scaled mode's 50%), so this asks for most of the
-    step to go, not all of it.
+    about an element of the boundary (1-7% just across it, at the surface and at
+    depth, against the scaled mode's 50%), so this asks for most of the step to
+    go, not all of it.
     """
     trace = FaultTrace.from_lonlat(np.array([-80.0, -79.45]), np.array([8.0, 8.0]))
     frame = trace.local_frame()
@@ -216,12 +216,12 @@ def test_the_exact_field_is_continuous_across_a_step_along_strike():
 
 
 def _antiplane(xs, dip, depth, r):
-    """2-D strike-slip, uniform slip from the trace to ``depth`` (km), dipping toward +x.
+    """2-D strike-slip, uniform slip from the trace to `depth` (km), dipping toward +x.
 
     The fault plane, continued to 200 depths, is the boundary between a block
-    with ``mu`` on the +x side and ``r mu`` on the -x side. Screw dislocations with
+    with `mu` on the +x side and `r mu` on the -x side. Screw dislocations with
     their free-surface images; the discontinuity on the boundary solves
-    ``D + 2k Fbar(D) = s``, ``Fbar`` coming from the images alone (a straight line
+    `D + 2k Fbar(D) = s`, `Fbar` coming from the images alone (a straight line
     sees nothing of itself). Returns the homogeneous and the bimaterial surface
     displacement per unit slip.
     """
@@ -249,9 +249,8 @@ def _antiplane(xs, dip, depth, r):
 def test_the_exact_mode_reduces_to_the_2d_solution():
     """Mid-length of a long 60 degree fault: the contrast's effect is the 2-D one.
 
-    Measured at full resolution (a 400 km fault at 50 degrees, 5 km elements, the
-    default reach): correlation 0.998 and 94% of the 2-D amplitude. This coarse
-    version keeps the test to a minute.
+    A coarse mesh keeps the test to a minute, so the bounds are loose; a finer
+    mesh on a longer fault agrees more closely.
     """
     dip, r, depth = 60.0, 2.0, 15.0
     trace = FaultTrace.from_lonlat(np.array([-82.0, -79.3]), np.array([8.0, 8.0]))
@@ -276,7 +275,7 @@ def test_the_exact_mode_reduces_to_the_2d_solution():
 
 
 # -- a layered crust ---------------------------------------------------------------
-#: Two layers with a strong shallow contrast, like the top of the Venezuela crust.
+#: Two layers with a strong shallow contrast: a 2 km sedimentary lid over crystalline crust.
 TWO_LAYERS = VelocityModel([0.0, 2000.0, 2000.0, 60e3], [3750.0, 3750.0, 6100.0, 6100.0],
                            [1950.0, 1950.0, 3500.0, 3500.0], [2370.0, 2370.0, 2750.0, 2750.0])
 
@@ -424,10 +423,9 @@ def test_the_layered_exact_mode_reduces_to_the_2d_layered_solution(layered):
     """Mid-length of a long 60 degree fault in a layered crust, against finite elements.
 
     The finite elements share nothing with the 3-D path: no Green's function, no
-    remainder tables, no triangular dislocation. Measured at 5 km elements on a
-    298 km fault with the Venezuela crust: contrast effect 0.998 of the 2-D one,
-    correlation 0.9992 (the half-space version of the same check: 0.995, 0.9967).
-    This coarse version (7.5 km elements, two layers) measured 0.994 and 0.997.
+    remainder tables, no triangular dislocation. This coarse version (7.5 km
+    elements, two layers) gives 0.994 of the 2-D effect and correlation 0.997;
+    finer meshes agree more closely.
     """
     dip, depth, r = 60.0, 15.0, 2.0
     trace = FaultTrace.from_lonlat(np.array([-82.0, -79.3]), np.array([8.0, 8.0]))
@@ -501,10 +499,10 @@ def test_the_exact_field_meets_its_interface_conditions_at_a_depth_break():
 def test_a_shallow_contrast_reduces_to_the_2d_solution():
     """Mid-length of a long 60 degree fault, the hanging wall softer above 6 km only, against FEM.
 
-    ⚠️ The horizontal boundary must reach past the data, as the across-strike ones must:
-    cut 1 depth out (15 km, receivers to 45 km) it read correlation -0.41. At 4 depths, on a
-    400 km fault: shallow-only 1.03 of the 2-D effect (corr 0.997), uniform 1.00, deep-only
-    (below 7.5 km) 0.93 -- 0.83 on 165 km, so a deep contrast is the slower to reach 2-D.
+    The horizontal boundary must reach past the data, as the across-strike ones must: cut
+    one depth out (15 km, with receivers to 45 km) the effect does not even correlate with
+    the 2-D one, hence `cross=4.0`. A deep-only contrast needs a longer fault than a shallow
+    one to reach the 2-D limit.
     """
     dip, depth, r, cut = 60.0, 15.0, 2.0, 6e3
     trace = FaultTrace.from_lonlat(np.array([-82.0, -79.3]), np.array([8.0, 8.0]))
@@ -584,10 +582,10 @@ def test_a_planted_contrast_and_dip_are_recovered(setup):
 def test_the_bootstrap_gives_the_ratio_an_interval(setup):
     """Dip and ratio trade off even with two-sided data; with both grids wide enough it covers.
 
-    Measured over 6 seeds (5 mm noise, 602 samples): ratio 2 recovered as
-    1.94-2.06, sd 0.054-0.067, every interval covering, |z| under 1. With the dip
-    grid only 88-92 a dip pinned on its edge made the ratio's interval 2-3x too
-    narrow and it missed twice, which is what the edge warning is for.
+    Over several noise seeds the planted ratio 2 is recovered within about 0.06,
+    with an sd near 0.06 and every interval covering. A grid too narrow pins the
+    best value on its edge and makes the interval too narrow, which is what the
+    edge warning is for.
     """
     trace, frame, _, obs = setup
     contrast = RigidityContrast(trace, side="north", ratio=1.0, frame=frame)
@@ -613,7 +611,7 @@ def test_the_bootstrap_gives_the_ratio_an_interval(setup):
 
 
 def test_the_exact_interface_assembles_the_same_in_worker_processes(setup, tmp_path):
-    """``InterfaceSolve(workers=2)``: Fbar and the response matrix equal the serial ones (layered kernel, depth break)."""
+    """`InterfaceSolve(workers=2)`: Fbar and the response matrix equal the serial ones (layered kernel, depth break)."""
     from slipsolve.bimaterial import InterfaceSolve
 
     trace, frame, mesh, obs = setup
@@ -636,7 +634,7 @@ def test_the_exact_interface_assembles_the_same_in_worker_processes(setup, tmp_p
 
 
 def test_the_interface_operator_can_be_built_unfactored(setup):
-    """``factor=False``: Fbar alone, the same as the factored solve's; a solve built from it factors as usual."""
+    """`factor=False`: Fbar alone, the same as the factored solve's; a solve built from it factors as usual."""
     from slipsolve.bimaterial import InterfaceSolve
 
     trace, frame, mesh, obs = setup

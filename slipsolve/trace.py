@@ -3,13 +3,11 @@
 Everything about the fault -- where the mesh goes, which way is along-strike,
 which side of it a quadtree cell sits on -- is derived from a polyline of
 lon/lat vertices. Traces are usually digitised in Google Earth and arrive as
-KML, so both KML and the plain two-column ASCII that ``gmt kml2gmt`` produces are
+KML, so both KML and the plain two-column ASCII that `gmt kml2gmt` produces are
 read here.
 
-KML is XML, so it is parsed with the standard library rather than by shelling out
-to GMT: ``pygmt`` is an optional extra in this package (see
-:mod:`nisar_tools.mask`) and requiring it merely to read a list of coordinates
-would be a poor trade.
+KML is parsed with the standard library rather than by shelling out to GMT,
+which would make GMT a dependency just to read a list of coordinates.
 """
 
 import re
@@ -24,7 +22,7 @@ _KML_NS = {"kml": "http://www.opengis.net/kml/2.2"}
 
 
 def _read_kml(path):
-    """Every ``<coordinates>`` block of a KML, concatenated, as lon/lat.
+    """Every `<coordinates>` block of a KML, concatenated, as lon/lat.
 
     The namespace is declared on the root of every KML Google Earth writes, but
     hand-edited files sometimes drop it, so the search falls back to matching on
@@ -53,10 +51,9 @@ def _read_kml(path):
 def _read_text(path):
     """Whitespace-separated lon/lat, skipping comments and GMT segment headers.
 
-    ``gmt kml2gmt`` emits one ``> -L"name"`` multisegment header before the
-    coordinates (which is what the usual ``| tail -n +2`` strips), and GMT tables
-    use ``#`` for comments. Both are skipped here so the raw ``kml2gmt`` output
-    works whether or not it was trimmed.
+    `gmt kml2gmt` emits one `> -L"name"` multisegment header before the
+    coordinates, and GMT tables use `#` for comments. Both are skipped here so
+    the raw `kml2gmt` output works whether or not it was trimmed.
     """
     lon, lat = [], []
     for line in Path(path).read_text().splitlines():
@@ -91,9 +88,8 @@ class FaultTrace:
         # and every consumer downstream has to work around it: arc length gets a
         # duplicated value, so any derivative with respect to it divides by zero
         # and comes back NaN, and the point-to-segment projection needs a
-        # `vv == 0` guard. Traces assembled from more than one source routinely
-        # have them -- the Boconó/San Sebastián trace, spliced from a GEM
-        # catalogue and optical mapping, repeats one vertex at the join.
+        # `vv == 0` guard. Traces spliced from more than one source often repeat
+        # a vertex at the join.
         keep = np.concatenate([[True], (np.diff(lon) != 0) | (np.diff(lat) != 0)])
         self.n_duplicates_dropped = int((~keep).sum())
         if keep.sum() < 2:
@@ -106,7 +102,7 @@ class FaultTrace:
     # -- construction ------------------------------------------------------
     @classmethod
     def from_file(cls, path, name=None):
-        """Read a trace from ``.kml`` or from two-column ASCII."""
+        """Read a trace from `.kml` or from two-column ASCII."""
         path = Path(path).expanduser()
         lon, lat = _read_kml(path) if path.suffix.lower() == ".kml" else _read_text(path)
         return cls(lon, lat, name=name or path.stem)
@@ -117,11 +113,11 @@ class FaultTrace:
 
     # -- frame -------------------------------------------------------------
     def local_frame(self, **kwargs):
-        """A :class:`~slipsolve.frame.LocalFrame` centred on this trace.
+        """A `slipsolve.frame.LocalFrame` centred on this trace.
 
-        The origin is the trace's midpoint in arc length, not the mean vertex --
-        vertices are unevenly spaced (4.2-13.7 km on the Venezuela trace), so the
-        mean would be pulled toward whichever end was digitised more finely.
+        The origin is the trace's midpoint in arc length, not the mean vertex:
+        digitised vertices are unevenly spaced, so the mean would be pulled
+        toward whichever end was digitised more finely.
         """
         mid_lon, mid_lat = self.midpoint()
         return LocalFrame(mid_lon, mid_lat, **kwargs)
@@ -139,7 +135,7 @@ class FaultTrace:
         return frame.to_lonlat(xm, ym)
 
     def to_local(self, frame):
-        """Project the vertices into ``frame``; returns ``(x, y)`` in metres."""
+        """Project the vertices into `frame`; returns `(x, y)` in metres."""
         return frame.to_local(self.lon, self.lat)
 
     # -- geometry ----------------------------------------------------------
@@ -150,7 +146,7 @@ class FaultTrace:
         return float(_arc_length(x, y)[-1])
 
     def resample(self, spacing, frame=None):
-        """A new trace with vertices equally spaced by ``spacing`` metres.
+        """A new trace with vertices equally spaced by `spacing` metres.
 
         The mesh needs a regular along-strike lattice; a digitised trace does
         not have one. Resampling is done in the local frame (metres) and the
@@ -181,15 +177,14 @@ class FaultTrace:
         return dx / norm, dy / norm
 
     def normals(self, frame=None):
-        """Unit **left-hand** normals, i.e. ``(-t_y, t_x)`` per vertex.
+        """Unit left-hand normals, `(-t_y, t_x)` per vertex.
 
         This is the reference direction that fixes triangle winding, and hence
         the sign of slip, across the whole mesh. Deriving it from the trace
-        rather than from a fixed axis is deliberate: SlipSolve's
-        ``orientTriFromLeft.m`` tests the normal against ``[1 0 0]``, which is
-        degenerate for a fault striking near east-west (the Venezuela trace
-        strikes 84 degrees, so its normal is very nearly the y axis and the test
-        collapses).
+        rather than from a fixed axis is deliberate: SlipSolve-Curve's
+        `orientTriFromLeft.m` tests the normal against `[1 0 0]`, which is
+        degenerate for a fault striking near east-west, whose normal is nearly
+        the y axis.
         """
         tx, ty = self.tangents(frame)
         return -ty, tx
@@ -197,8 +192,8 @@ class FaultTrace:
     def side(self, x, y, frame, tol=0.0):
         """Which side of the trace each local-frame point lies on.
 
-        Returns ``+1`` on the left-hand side (the side :meth:`normals` points
-        to), ``-1`` on the right, and ``0`` within ``tol`` metres of the trace.
+        Returns `+1` on the left-hand side (the side `normals` points
+        to), `-1` on the right, and `0` within `tol` metres of the trace.
         The sign is taken from the *nearest* segment, so it stays meaningful for
         a curving, multi-segment trace.
         """
@@ -214,19 +209,19 @@ class FaultTrace:
         return np.sqrt(d2)
 
     def to_curvilinear(self, x, y, frame):
-        """Map local-frame points to ``(arc length, signed cross-strike offset)``.
+        """Map local-frame points to `(arc length, signed cross-strike offset)`.
 
-        The curvilinear coordinate system the fault surface is fitted in: ``s`` is
-        the arc length of the closest point on the trace, and ``cross`` is the
-        signed perpendicular distance, positive on the side
-        :meth:`normals` points to. Together with :meth:`from_curvilinear` this is
-        the change of variables that lets a dipping fault be described as
-        ``cross = f(s, depth)`` -- one scalar field over a rectangle -- rather than
-        as a surface in three dimensions.
+        The curvilinear coordinate system the fault surface is fitted in: `s` is
+        the arc length of the closest point on the trace, and `cross` is the
+        signed perpendicular distance, positive on the side `normals` points
+        to. Together with `from_curvilinear` this is the change of variables
+        that lets a dipping fault be described as `cross = f(s, depth)` (one
+        scalar field over a rectangle) rather than as a surface in three
+        dimensions.
 
-        The reference implementation instead picks whichever of the map axes the
-        trace spans further and treats that as "along" (``build_fault_geometry.m``'s
-        ``fitCrossX = yRange >= xRange``). That is degenerate for a fault striking
+        SlipSolve-Curve instead picks whichever of the map axes the trace spans
+        further and treats that as "along" (`build_fault_geometry.m`'s
+        `fitCrossX = yRange >= xRange`). That is degenerate for a fault striking
         near 45 degrees and mis-parameterises any trace that curves through it;
         arc length is well defined at every strike.
         """
@@ -238,12 +233,12 @@ class FaultTrace:
         return s, np.sign(cross) * np.sqrt(d2)
 
     def from_curvilinear(self, s, cross, frame):
-        """The inverse of :meth:`to_curvilinear`; returns local-frame ``(x, y)``.
+        """The inverse of `to_curvilinear`; returns local-frame `(x, y)`.
 
         Positions on the trace are interpolated in arc length, and the offset is
-        applied along the interpolated left-hand normal -- the same normal
-        :class:`~slipsolve.mesh.FaultMesh` winds its elements against, so a
-        positive ``cross`` always puts the fault surface on the same side.
+        applied along the interpolated left-hand normal, the same normal
+        `slipsolve.mesh.FaultMesh` winds its elements against, so a positive
+        `cross` always puts the fault surface on the same side.
         """
         px, py = self.to_local(frame)
         s_vertex = _arc_length(px, py)
@@ -266,9 +261,7 @@ class FaultTrace:
 
         The limit on how far the trace can be projected down dip: an offset that
         exceeds this folds the fault surface back through itself, and the
-        resulting mesh has inverted elements. Measured on the San Sebastian trace
-        resampled to 3 km this is 74.4 km, so a 20 km fault at 45 degrees (a
-        20 km offset) is safe -- but a tighter bend would not be.
+        resulting mesh has inverted elements.
         """
         frame = frame or self.local_frame()
         x, y = self.to_local(frame)
@@ -285,15 +278,15 @@ class FaultTrace:
     def _nearest_segment(self, x, y, frame):
         """Closest segment for each point: squared distance, side, index, position.
 
-        The side comes from the cross product against the *clamped* closest-point
+        The side comes from the cross product against the clamped closest-point
         offset rather than the raw vertex offset, so points near a concave corner
         are classified by the geometry that actually is nearest to them instead of
         by whichever segment's infinite extension happens to win.
 
         Where the nearest point is a vertex, the side is that of the two segments
         together (their unit directions added, a pseudo-normal). One segment alone can
-        answer wrongly past a bend sharper than 90 degrees, even for a point tens of km
-        away. Below 90 degrees the two always agree, so nothing else changes.
+        answer wrongly past a bend sharper than 90 degrees, even for a distant point;
+        below 90 degrees the two always agree.
         """
         px, py = self.to_local(frame)
         x = np.atleast_1d(np.asarray(x, dtype=float)).ravel()
@@ -337,16 +330,16 @@ class FaultTrace:
 class FaultSegment:
     """A straight deep-control segment: where one stretch of fault goes at depth.
 
-    The reference implementation's unit of dip. A fault is divided into a handful
-    of segments -- each a straight line in the local frame -- and each is given
-    one dip; the segment's *bottom* line is that line pushed down-dip, and the
-    fitted surface is what smoothly connects those bottom lines to the surface
-    trace. So a segment is not a piece of the trace, it is the piece of the
-    *plan view* whose dip is being asserted.
+    SlipSolve-Curve's unit of dip. A fault is divided into a handful of
+    segments, each a straight line in the local frame, and each is given one
+    dip; the segment's bottom line is that line pushed down-dip, and the fitted
+    surface is what smoothly connects those bottom lines to the surface trace.
+    So a segment is not a piece of the trace, it is the piece of the plan view
+    whose dip is being asserted.
 
-    Coordinates are local-frame metres, not lon/lat: the reference reads them
-    straight out of a four-number file (``build_fault_geometry.m`` divides by
-    1e3 to reach its kilometre units).
+    Coordinates are local-frame metres, not lon/lat, as in SlipSolve-Curve's
+    four-number segment files (`build_fault_geometry.m` divides by 1e3 to
+    reach its kilometre units).
     """
 
     def __init__(self, x_begin, y_begin, x_end, y_end, name=None):
@@ -360,7 +353,7 @@ class FaultSegment:
 
     @classmethod
     def from_file(cls, path):
-        """Read ``x_begin y_begin x_end y_end`` (metres) from whitespace ASCII."""
+        """Read `x_begin y_begin x_end y_end` (metres) from whitespace ASCII."""
         path = Path(path).expanduser()
         fields = [float(v) for v in re.split(r"[\s,]+", path.read_text().strip()) if v]
         if len(fields) < 4:
@@ -376,7 +369,7 @@ class FaultSegment:
 
     @classmethod
     def from_trace(cls, trace, frame, count=1):
-        """Split ``trace`` into ``count`` straight segments of equal arc length.
+        """Split `trace` into `count` straight segments of equal arc length.
 
         The convenience path for "I have a trace and one dip per stretch of it"
         without hand-writing segment files. Endpoints are taken on the trace, so
@@ -399,23 +392,21 @@ class FaultSegment:
                          self.y_end - self.y_begin]) / self.length
 
     def project(self, depth, dip_deg):
-        """The segment pushed ``depth`` metres down at ``dip_deg``; two endpoints.
+        """The segment pushed `depth` metres down at `dip_deg`; two endpoints.
 
-        A port of ``project_segment_3d``: the horizontal offset is
-        ``depth / tan(dip)`` along the segment's **left-hand** normal
-        ``(-s_y, s_x)``. Returns ``(x, y)`` arrays of length two, both at
-        ``z = -depth``.
+        A port of SlipSolve-Curve's `project_segment_3d`: the horizontal offset
+        is `depth / tan(dip)` along the segment's left-hand normal
+        `(-s_y, s_x)`. Returns `(x, y)` arrays of length two, both at
+        `z = -depth`.
 
-        A dip greater than 90 degrees is legal and meaningful -- ``tan`` goes
-        negative and the fault leans the other way. The reference's Myanmar
-        configuration uses ``[75 75 70 80 85 90 100]``, so this is exercised, not
-        hypothetical; do not clamp it into ``[0, 90]``.
+        A dip greater than 90 degrees is legal and meaningful: `tan` goes
+        negative and the fault leans the other way. Do not clamp it into
+        `[0, 90]`.
 
-        At exactly 90 the offset is written as a literal zero rather than
-        ``depth / tan(pi/2)``, which in float64 is 1.2e-12 m rather than 0. That
-        residue is harmless in itself, but a literal zero is what makes a
-        vertical mesh built through here bit-identical to
-        :meth:`~slipsolve.mesh.FaultMesh.vertical`.
+        Near vertical (see `VERTICAL_TOL_DEG`) the offset is a literal zero
+        rather than `depth / tan(pi/2)`, which in float64 is not quite 0; the
+        literal zero makes a vertical mesh built through here bit-identical to
+        `slipsolve.mesh.FaultMesh.vertical`.
         """
         offset = dip_offset(depth, dip_deg)
         sx, sy = self.strike_vector()
@@ -430,38 +421,25 @@ class FaultSegment:
                 f"length={self.length / 1e3:.1f}km>")
 
 
-#: A dip this close to vertical is treated as exactly vertical.
+#: A dip this close to vertical (degrees) is treated as exactly vertical.
 #:
 #: Both the triangular-dislocation solution and Okada's have a removable
-#: singularity at 90 degrees which each handles cleanly *at* 90 and loses
-#: catastrophically beside. Measured here (a rectangle as two triangular elements
-#: against :mod:`slipsolve._okada`, max-abs relative error on the
-#: strike-slip component)::
-#:
-#:     dip      85      89    89.9   89.99  89.999  89.9999   90.000
-#:          4.9e-12 1.4e-10 2.4e-07 1.2e-04 2.6e-02  1.9e+02  2.2e-14
-#:
-#: It is a *resonance*, not a gradual decay: the error is negligible at exactly
-#: 90, grows to 190x the signal a ten-thousandth of a degree away, and falls back
-#: to nothing by 85. ``cutde`` -- an independent port of the same algorithm --
-#: tracks our answer far more closely than either tracks Okada's inside the band,
-#: which identifies it as a cancellation shared by the formulation rather than an
-#: artefact of the oracle. A self-comparison sweep puts the band's onset near
-#: 1e-6 degrees at element sizes of 300 m, 3 km and 30 km alike, so it is an angle
-#: and not a length.
-#:
-#: 1e-2 degrees clears the whole band with two orders of margin, leaves a worst
-#: unsnapped error of 1.2e-4 relative, and costs 3.5 m of geometry at 20 km depth
-#: -- nothing beside a 3 km element. (This constant used to live in ``mesh.py``
-#: at 1e-6, which would let 89.9999 through, and was referenced nowhere.)
+#: singularity at 90 degrees, which each handles cleanly at 90 and loses beside
+#: it. Against `slipsolve._okada`, the strike-slip error of a rectangle as two
+#: triangles is round-off at 90, 190x the signal 1e-4 degrees away, 1.2e-4 at
+#: 1e-2 degrees and negligible by 85. The band is a cancellation in the
+#: formulation itself (`cutde`, an independent port, shares it); it starts about
+#: 1e-6 degrees from vertical whatever the element size, so it is an angle, not
+#: a length. 1e-2 degrees clears it and moves the geometry by 3.5 m at 20 km
+#: depth.
 VERTICAL_TOL_DEG = 1e-2
 
 
 def dip_offset(depth, dip_deg):
-    """Horizontal down-dip offset ``depth / tan(dip)``, snapped near vertical.
+    """Horizontal down-dip offset `depth / tan(dip)`, snapped near vertical.
 
-    Shared by :meth:`FaultSegment.project` and the mesh builders so that
-    "vertical" means the same thing everywhere. See :data:`VERTICAL_TOL_DEG`.
+    Shared by `FaultSegment.project` and the mesh builders so that
+    "vertical" means the same thing everywhere. See `VERTICAL_TOL_DEG`.
     """
     dip_deg = np.asarray(dip_deg, dtype=float)
     vertical = np.abs(dip_deg - 90.0) < VERTICAL_TOL_DEG

@@ -2,7 +2,7 @@
 
 The sweep rests on one identity -- the design matrix of any combination of dips is
 the sum of per-segment blocks -- and on a solver that must agree with
-:meth:`SlipInversion.solve`. Both are tested against the direct path. Recovery is
+`SlipInversion.solve`. Both are tested against the direct path. Recovery is
 the acceptance test, as for the inversion itself: a stepped fault with a
 different dip on each segment, forward-modelled independently (element-constant
 slip on the joined segment meshes, through a raster and a quadtree), must come
@@ -36,9 +36,9 @@ SOLVE = dict(ss_ratio=1.0, ds_ratio=3.0, boundary_ratio=1.0,
 
 
 def _stepped_truth(trace, frame, dips):
-    """The two-segment fault the sweep should find, built WITHOUT the sweep.
+    """The two-segment fault the sweep should find, built without the sweep.
 
-    Same layout recipe (``segmented_layout`` on the same breaks and levels), each
+    Same layout recipe (`segmented_layout` on the same breaks and levels), each
     segment cut out of a uniform-dip mesh by its elements' arc length, and the
     pieces joined -- so the truth's geometry does not come from the code whose
     block assembly is under test.
@@ -293,7 +293,7 @@ def test_the_evidence_estimate_is_exact_without_noise(single):
 def test_the_bootstrap_interval_covers_the_truth_and_the_check_stays_quiet(single):
     """Exact forward model, correlated noise: ~95% coverage and z of order one.
 
-    Measured over 40 seeds: estimates 70.34 +- 0.78, coverage 0.90, z sd 0.96.
+    Over 40 seeds: estimates 70.34 +- 0.78, coverage 0.90, z sd 0.96.
     Twelve seeds keep the test quick; the bounds leave room for that scatter.
     """
     sweep, signal, model, factors = single

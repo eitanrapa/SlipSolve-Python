@@ -1,18 +1,18 @@
-"""The voxels' strain equation without forming ``Gamma``: FFT convolution and Krylov (2026-11-05).
+"""The voxels' strain equation without forming `Gamma`: FFT convolution and Krylov.
 
-:class:`~slipsolve.heterogeneity.HeterogeneousEngine` solves ``(I + Gamma D) eps = E`` for the
-strain at the voxels. Its dense path assembles ``Gamma`` (``(6 n)^2``) and factors it, which
-stops at ~10k voxels on 128 GB. On a regular grid in a layered reference ``Gamma`` is
+`slipsolve.heterogeneity.HeterogeneousEngine` solves `(I + Gamma D) eps = E` for the
+strain at the voxels. Its dense path assembles `Gamma` (`(6 n)^2`) and factors it, which
+stops at ~10k voxels on 128 GB. On a regular grid in a layered reference `Gamma` is
 translation invariant laterally: the block between two depth rows depends only on the
 lateral offset, so applying it is a 2-D convolution per pair of rows, an FFT product
-(:class:`ConvolutionGamma`), and the equation is solved by GMRES (:func:`gmres`) with each
-voxel's own ``6 x 6`` block as the preconditioner. Memory is ``O(n)`` in the voxels apart from
-the kernels, ``O(nx ny nz^2)``.
+(`ConvolutionGamma`), and the equation is solved by GMRES (`gmres`) with each
+voxel's own `6 x 6` block as the preconditioner. Memory is `O(n)` in the voxels apart from
+the kernels, `O(nx ny nz^2)`.
 
-The kernels are the dense path's numbers: one :class:`~slipsolve.heterogeneity.VoxelSource`
+The kernels are the dense path's numbers: one `slipsolve.heterogeneity.VoxelSource`
 per source row, at every lateral offset of the active voxels' bounding box (the dense path
 evaluates only the offsets that occur between active voxels). So the two paths differ only
-by the FFT's rounding and the solve's tolerance (``tests/test_slip_voxel_solve.py``).
+by the FFT's rounding and the solve's tolerance (`tests/test_slip_voxel_solve.py`).
 """
 import os
 import time
@@ -23,8 +23,8 @@ import scipy.fft as sfft
 
 from .heterogeneity import VoxelSource, _steps
 
-#: Relative residual :func:`gmres` stops at, by default: far below the voxels' own
-#: discretisation error (~1e-2 of the effect at 1 km cells, benchmarks 8 and 9).
+#: Relative residual `gmres` stops at, by default: far below the voxels' own
+#: discretisation error (about 1e-2 of the heterogeneity's effect at 1 km cells).
 GMRES_TOLERANCE = 1e-6
 
 #: Krylov vectors kept before a restart.
@@ -37,16 +37,15 @@ GMRES_MAX_ITER = 400
 SOLVE_BLOCK = 32
 
 #: Threads the kernels' batched product is split over, in chunks of frequencies (None: every CPU). numpy runs a
-#: batched ``matmul`` one small product at a time, effectively on one thread whatever BLAS's own count: measured
-#: 2026-11-05 on the Venezuela CRUST1.0 grid (5,280 frequencies of 90 x 90, 16-64 columns), 17-20 ms a column with BLAS
-#: at one or four threads, 3.6-4.3 ms on 6 pool threads and 2.3-3.2 ms on 12 with BLAS at ONE thread each. With BLAS
-#: multithreaded inside the pool it ran slower (13-75 ms, OpenBLAS's concurrent calls), so the pool holds BLAS at one
-#: thread while it runs (:func:`_blas_control`); without that control the product stays serial.
+#: batched `matmul` one small product at a time, effectively on one thread whatever BLAS's own count, so splitting it
+#: over a thread pool scales with the threads. BLAS must then run at one thread inside the pool (concurrent
+#: multithreaded OpenBLAS calls are slower than serial ones), so the pool holds it there while it runs
+#: (`_blas_control`); without that control the product stays serial.
 PRODUCT_THREADS = None
 
 
 def _blas_control():
-    """OpenBLAS's ``(get, set)`` thread-count functions, found through ctypes among the loaded libraries, or None."""
+    """OpenBLAS's `(get, set)` thread-count functions, found through ctypes among the loaded libraries, or None."""
     import ctypes
 
     try:
@@ -60,11 +59,11 @@ def _blas_control():
 
 
 def batched_matmul(a, b, threads=PRODUCT_THREADS):
-    """``a @ b`` over their leading axes (both C-contiguous), split in chunks of the leading axes over a thread pool.
+    """`a @ b` over their leading axes (both C-contiguous), split in chunks of the leading axes over a thread pool.
 
-    Each chunk is numpy's own ``matmul`` on one BLAS thread (the count is restored after), so the result is the
-    serial product's, chunk by chunk. Serial when ``threads`` is 1, the leading axes are short, or BLAS's thread count
-    cannot be controlled (:func:`_blas_control`).
+    Each chunk is numpy's own `matmul` on one BLAS thread (the count is restored after), so the result is the
+    serial product's, chunk by chunk. Serial when `threads` is 1, the leading axes are short, or BLAS's thread count
+    cannot be controlled (`_blas_control`).
     """
     threads = (os.cpu_count() or 1) if threads is None else int(threads)
     lead = a.shape[:-2]
@@ -93,18 +92,18 @@ def batched_matmul(a, b, threads=PRODUCT_THREADS):
 
 
 class ConvolutionGamma:
-    """``Gamma`` of a :class:`~slipsolve.heterogeneity.VoxelModel` as one 2-D convolution per pair of depth rows.
+    """`Gamma` of a `slipsolve.heterogeneity.VoxelModel` as one 2-D convolution per pair of depth rows.
 
-    ``matvec(m)`` is ``Gamma @ m`` for ``m`` of shape ``(6 n,)`` or ``(6 n, k)``, ``n`` the
+    `matvec(m)` is `Gamma @ m` for `m` of shape `(6 n,)` or `(6 n, k)`, `n` the
     active voxels in the model's order: the moment densities scattered onto the bounding box
-    of the active voxels, ``rfft2`` laterally, one batched product with the kernels of every
+    of the active voxels, `rfft2` laterally, one batched product with the kernels of every
     pair of rows, inverse transform, gathered back. The kernels take
-    ``px * (py // 2 + 1) * (6 nz)^2`` complex numbers (:attr:`nbytes`), ``px >= 2 nx - 1`` and
-    ``py >= 2 ny - 1`` the padded lateral sizes.
+    `px * (py // 2 + 1) * (6 nz)^2` complex numbers (`nbytes`), `px >= 2 nx - 1` and
+    `py >= 2 ny - 1` the padded lateral sizes.
 
-    ``workers`` > 1 computes the kernels' pairs of rows in that many processes
-    (:func:`~slipsolve.layered_tde.engine_pool`); ``fft_workers`` threads the transforms and ``product_threads`` the
-    kernels' batched product (:func:`batched_matmul`; None: every CPU).
+    `workers` > 1 computes the kernels' pairs of rows in that many processes
+    (`slipsolve.layered_tde.engine_pool`); `fft_workers` threads the transforms and `product_threads` the
+    kernels' batched product (`batched_matmul`; None: every CPU).
     """
 
     def __init__(self, voxels, engine, log=None, workers=None, fft_workers=-1, product_threads=PRODUCT_THREADS):
@@ -140,8 +139,8 @@ class ConvolutionGamma:
             for r, iz_r in enumerate(self.rows):
                 z = np.full(di.size, -0.5 * (z_edges[iz_r] + z_edges[iz_r + 1]))
                 tasks.append((s, r, bounds, centre[0] + di * dx, centre[1] + dj * dy, z))
-        #: ``(px, py // 2 + 1, 6 nz, 6 nz)``: ``[kx, ky, 6 r + a, 6 s + b]``, strain ``a`` in row ``r``
-        #: per moment density ``b`` in row ``s``.
+        #: `(px, py // 2 + 1, 6 nz, 6 nz)`: `[kx, ky, 6 r + a, 6 s + b]`, strain `a` in row `r`
+        #: per moment density `b` in row `s`.
         self.kernels = np.zeros((px, py // 2 + 1, 6 * nz, 6 * nz), dtype=complex)
         zero = int(np.flatnonzero((di == 0) & (dj == 0))[0])
         row_self = np.empty((nz, 6, 6))
@@ -173,7 +172,7 @@ class ConvolutionGamma:
         if log:
             log(f"Gamma kernels: {nz} rows x {di.size} offsets a pair, {nx} x {ny} -> {px} x {py} padded, "
                 f"{self.nbytes / 1e9:.2f} GB [{time.time() - t0:.0f}s]")
-        #: Each voxel's own ``6 x 6`` block of ``Gamma`` (``[a, b]``), its row's zero offset.
+        #: Each voxel's own `6 x 6` block of `Gamma` (`[a, b]`), its row's zero offset.
         self.self_blocks = row_self[self.iz]
 
     @property
@@ -182,11 +181,11 @@ class ConvolutionGamma:
 
     @property
     def size(self):
-        """Unknowns, ``6 n``."""
+        """Unknowns, `6 n`."""
         return 6 * self.ix.size
 
     def matvec(self, m):
-        """``Gamma @ m``, ``m`` ``(6 n,)`` or ``(6 n, k)``."""
+        """`Gamma @ m`, `m` `(6 n,)` or `(6 n, k)`."""
         m = np.asarray(m, dtype=float)
         single = m.ndim == 1
         m = m.reshape(self.ix.size, 6, -1)
@@ -205,7 +204,7 @@ class ConvolutionGamma:
         return out[:, 0] if single else out
 
     def dense(self):
-        """``Gamma`` as a dense ``(6 n, 6 n)`` array, column by column (small grids: tests)."""
+        """`Gamma` as a dense `(6 n, 6 n)` array, column by column (small grids: tests)."""
         out = np.empty((self.size, self.size))
         eye = np.eye(self.size)
         for start in range(0, self.size, 256):
@@ -214,11 +213,11 @@ class ConvolutionGamma:
 
 
 class StrainSystem:
-    """``(I + Gamma D) eps = E`` with ``Gamma`` a :class:`ConvolutionGamma`, solved by :func:`gmres`.
+    """`(I + Gamma D) eps = E` with `Gamma` a `ConvolutionGamma`, solved by `gmres`.
 
-    ``D`` is the voxels' stiffness departure (:func:`~slipsolve.heterogeneity.stiffness_block`),
-    the moment density being ``-D eps``. Right-preconditioned by each voxel's own block,
-    ``P_v = I + Gamma_vv D_v``: the Eshelby self-interaction, leaving GMRES the voxels'
+    `D` is the voxels' stiffness departure (`slipsolve.heterogeneity.stiffness_block`),
+    the moment density being `-D eps`. Right-preconditioned by each voxel's own block,
+    `P_v = I + Gamma_vv D_v`: the Eshelby self-interaction, leaving GMRES the voxels'
     interactions with each other.
     """
 
@@ -234,7 +233,7 @@ class StrainSystem:
         self.iterations = []
 
     def apply(self, eps):
-        """``(I + Gamma D) eps`` for ``eps`` ``(6 n, k)``."""
+        """`(I + Gamma D) eps` for `eps` `(6 n, k)`."""
         n = self.d.shape[0]
         e = eps.reshape(n, 6, -1)
         moment = np.einsum("nab,nbk->nak", self.d, e).reshape(6 * n, -1)
@@ -245,7 +244,7 @@ class StrainSystem:
         return np.einsum("nab,nbk->nak", self.p_inv, y.reshape(n, 6, -1)).reshape(6 * n, -1)
 
     def solve(self, rhs, tol=GMRES_TOLERANCE, restart=GMRES_RESTART, max_iter=GMRES_MAX_ITER, block=SOLVE_BLOCK):
-        """``eps`` for each column of ``rhs`` ``(6 n, cols)``, in blocks of ``block`` columns."""
+        """`eps` for each column of `rhs` `(6 n, cols)`, in blocks of `block` columns."""
         rhs = np.asarray(rhs, dtype=float)
         single = rhs.ndim == 1
         rhs = rhs.reshape(rhs.shape[0], -1)
@@ -265,18 +264,17 @@ class StrainSystem:
 
 
 def gmres(operator, b, tol=GMRES_TOLERANCE, restart=GMRES_RESTART, max_iter=GMRES_MAX_ITER):
-    """Restarted GMRES on every column of ``b`` ``(n, k)`` at once: ``(x, products)``.
+    """Restarted GMRES on every column of `b` `(n, k)` at once: `(x, products)`.
 
-    ``operator(v)`` maps ``(n, j)`` to ``(n, j)`` and is applied to the columns not yet
-    converged. A column stops when its residual is within ``tol`` of its right-hand side's
-    norm (a zero column gives zero); one still above it after ``max_iter`` products raises,
+    `operator(v)` maps `(n, j)` to `(n, j)` and is applied to the columns not yet
+    converged. A column stops when its residual is within `tol` of its right-hand side's
+    norm (a zero column gives zero); one still above it after `max_iter` products raises,
     naming how far it got. Arnoldi by modified Gram-Schmidt, Givens rotations per column.
 
     The live columns are kept contiguous: a column that converges inside a cycle is finished
-    there (its correction added to ``x``) and dropped from the cycle's arrays, so the
+    there (its correction added to `x`) and dropped from the cycle's arrays, so the
     orthogonalisation runs on views. Indexing the live columns out of the full arrays at every
-    step cost three times the FFT products on the CRUST1.0 grid (2026-11-05: 20 s of a 34 s
-    solve of 32 columns, 195k unknowns); the iterates are the same.
+    step instead can cost more than the FFT products themselves; the iterates are the same.
     """
     b = np.asarray(b, dtype=float)
     n, k = b.shape

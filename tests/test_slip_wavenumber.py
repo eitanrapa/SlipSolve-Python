@@ -1,4 +1,4 @@
-"""Static layered Green's functions by wavenumber integration (``slipsolve.wavenumber``)."""
+"""Static layered Green's functions by wavenumber integration (`slipsolve.wavenumber`)."""
 
 import numpy as np
 import pytest
@@ -7,8 +7,8 @@ from slipsolve import wavenumber as wn
 from slipsolve._tde import tde_disp_hs
 from slipsolve.edgrn import VelocityModel, _point_dislocation, _project, _SOURCE_GEOMETRY
 
-#: A two-layer crust with a strong shallow contrast and different Poisson ratios,
-#: like the top of the Venezuela model.
+#: A two-layer crust with a strong shallow contrast and different Poisson ratios:
+#: a 2 km sedimentary lid over crystalline crust.
 TWO_LAYERS = VelocityModel([0.0, 2000.0, 2000.0, 60e3],
                            [3750.0, 3750.0, 6100.0, 6100.0],
                            [1950.0, 1950.0, 3500.0, 3500.0],

@@ -1,4 +1,4 @@
-"""The voxels' strain equation by FFT and GMRES (``slipsolve.voxel_solve``) against the dense path."""
+"""The voxels' strain equation by FFT and GMRES (`slipsolve.voxel_solve`) against the dense path."""
 
 import numpy as np
 import pytest
@@ -117,9 +117,9 @@ def test_the_fft_engine_is_the_dense_engine(coarse_tables, tmp_path):
 
 
 def test_a_subset_of_the_surface_operator_is_its_columns(coarse_tables):
-    """``los_operator(subset=)`` gives those voxels' columns of the whole operator, to rounding: since 2026-11-05 a
-    row's voxels go through one reference voxel at shifted receivers, and which voxel is the reference, and how many
-    receivers share a call, depend on the voxels asked for."""
+    """`los_operator(subset=)` gives those voxels' columns of the whole operator, to rounding: a row's voxels go
+    through one reference voxel at shifted receivers, and which voxel is the reference, and how many receivers share
+    a call, depend on the voxels asked for."""
     from slipsolve.heterogeneity import los_operator
 
     engine = LayeredTDE(coarse_tables)

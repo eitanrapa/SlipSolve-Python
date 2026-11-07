@@ -2,29 +2,29 @@
 
 A vectorized numpy port of Nikkhoo & Walter (2015), "Triangular dislocation: an
 analytical, artefact-free solution", *Geophysical Journal International* **201**,
-1117-1139, doi:10.1093/gji/ggv035 -- the reference implementation being the
-author's ``TDdispHS.m``.
+1117-1139, doi:10.1093/gji/ggv035, from the author's `TDdispHS.m`.
 
 A triangular element is what lets a fault curve. A rectangular (Okada) patch can
 only tile a plane, so a curved or segmented fault built from rectangles has gaps
 and overlaps along every bend, and those produce spurious near-field
 displacement. Triangles tile any surface exactly.
 
-The half-space solution is assembled from three pieces, exactly as the reference
+The half-space solution is assembled from three pieces, exactly as `TDdispHS.m`
 does: the full-space dislocation, its mirror image across the free surface, and a
 harmonic correction that cancels the normal tractions the first two leave on that
 surface.
 
-Conventions, which are the reference's and are load-bearing everywhere
-downstream:
+Conventions, which are Nikkhoo & Walter's and which everything downstream
+depends on:
 
 * Coordinates are east, north, up in a flat Cartesian frame, with the free
-  surface at ``z = 0``. **All z must be <= 0.**
+  surface at `z = 0`. All z must be <= 0.
 * The slip components are named for the element's own strike and dip:
-  ``Vnorm = normalize(cross(P2 - P1, P3 - P1))``,
-  ``Vstrike = cross(eZ, Vnorm)``, ``Vdip = cross(Vnorm, Vstrike)``. Winding
-  therefore fixes the sign of both strike- and dip-slip -- see
-  :class:`~slipsolve.mesh.FaultMesh`, which pins it against the fault
+  `Vnorm = normalize(cross(P2 - P1, P3 - P1))`,
+  `Vstrike = cross(eZ, Vnorm)`, `Vdip = cross(Vnorm, Vstrike)`. Winding
+  therefore matters: reversing a triangle's vertex order flips `Vnorm` and
+  `Vstrike`, which leaves its strike-slip field unchanged and negates its
+  dip-slip field. `slipsolve.mesh.FaultMesh` pins winding against the fault
   trace rather than against a fixed axis.
 
 The original file carries an MIT permission grant; this port is a derivative work
@@ -47,10 +47,10 @@ import numpy as np
 def tde_disp_hs(x, y, z, p1, p2, p3, ss, ds, ts, nu=0.25):
     """Displacement from one triangular dislocation in an elastic half-space.
 
-    ``x``, ``y``, ``z`` are the observation coordinates (any common shape, ``z <=
-    0``); ``p1``, ``p2``, ``p3`` are the vertices as length-3 sequences; ``ss``,
-    ``ds``, ``ts`` are the strike-, dip- and tensile-slip components. Returns
-    ``(ue, un, uv)`` flattened to 1-D, in the same units as the slip.
+    `x`, `y`, `z` are the observation coordinates (any common shape, `z <= 0`);
+    `p1`, `p2`, `p3` are the vertices as length-3 sequences; `ss`, `ds`, `ts`
+    are the strike-, dip- and tensile-slip components. Returns `(ue, un, uv)`
+    flattened to 1-D, in the same units as the slip.
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
@@ -68,17 +68,17 @@ def tde_disp_hs(x, y, z, p1, p2, p3, ss, ds, ts, nu=0.25):
         return zero, zero.copy(), zero.copy()
 
     # An observation sitting exactly on the dislocation surface is a genuine
-    # singularity, and the solution is *meant* to come back non-finite there --
+    # singularity, and the solution is meant to come back non-finite there:
     # slipsolve.greens catches it and tells the caller to exclude
     # observations near the trace. Divide-by-zero warnings from that case are
-    # noise, not news. (numpy's error state is per-thread, so this is safe under
-    # the thread pool that assembles the design matrix.)
+    # noise, not news. (numpy's error state is per-thread, so this is safe to
+    # call from threads.)
     with np.errstate(divide="ignore", invalid="ignore"):
         ue_ms, un_ms, uv_ms = _disp_fs(x, y, z, p1, p2, p3, ss, ds, ts, nu)
         ue_fsc, un_fsc, uv_fsc = _disp_har_func(x, y, z, p1, p2, p3, ss, ds, ts, nu)
 
         # The image dislocation is the element mirrored through z = 0. Copy
-        # first: the reference mutates its inputs, which is harmless in MATLAB's
+        # first: TDdispHS.m mutates its inputs, which is harmless in MATLAB's
         # copy-on-write world and a bug here.
         q1, q2, q3 = p1.copy(), p2.copy(), p3.copy()
         q1[2], q2[2], q3[2] = -q1[2], -q2[2], -q3[2]
@@ -90,13 +90,13 @@ def tde_disp_hs(x, y, z, p1, p2, p3, ss, ds, ts, nu=0.25):
 
 
 def tde_disp_hs_unit(x, y, z, p1, p2, p3, nu=0.25):
-    """:func:`tde_disp_hs` for unit strike-, dip- and tensile-slip at once: ``(3, 3, npts)``.
+    """`tde_disp_hs` for unit strike-, dip- and tensile-slip at once: `(3, 3, npts)`.
 
     Axis 0 is the slip component (strike, dip, tensile), axis 1 east/north/up. Every
     term of the solution is a Burgers-vector component times a function of the
     geometry alone, so the three slips share all the geometry and the cost is
-    close to one call's, not three. Equal to three :func:`tde_disp_hs` calls to
-    rounding (``tests/test_slip_tde.py``).
+    close to one call's, not three. Equal to three `tde_disp_hs` calls to
+    rounding (`tests/test_slip_tde.py`).
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
@@ -119,42 +119,38 @@ def tde_disp_hs_unit(x, y, z, p1, p2, p3, nu=0.25):
     return ms + image + fsc
 
 
-#: Central-difference step of :func:`tde_strain_hs_unit`, as a fraction of each point's
-#: distance to the triangle. Measured against ``cutde``'s analytic strain (2026-11-04; four
-#: triangles, vertical, dipping, shallow, one reaching the surface): worst over components
-#: and slips, relative to the point's largest strain, 1e-4 gives <= 1.4e-7 within 10
-#: triangle sizes and <= 1e-5 beyond 100. A larger step loses to truncation near the
-#: triangle (1e-3: 1e-6 to 1e-5 everywhere), a smaller one to round-off far away (1e-5:
-#: 1.6e-4 beyond 100 sizes, where the displacement is a small difference of large terms).
-#: Richardson extrapolation of 1e-3 and 2e-3 agrees with ``cutde`` to 1e-9 within 10 sizes,
-#: so the reference is good there; beyond 100 sizes both carry ~1e-6 of round-off.
+#: Central-difference step of `tde_strain_hs_unit`, as a fraction of each point's
+#: distance to the triangle. Against `cutde`'s analytic strain, relative to the point's
+#: largest strain, 1e-4 gives errors of about 1e-7 within 10 triangle sizes and 1e-5
+#: beyond 100. A larger step loses to truncation near the triangle, a smaller one to
+#: round-off far away, where the displacement is a small difference of large terms.
 STRAIN_STEP = 1e-4
 
-#: The smallest step :func:`tde_strain_hs_unit` takes, in units in the last place of the
+#: The smallest step `tde_strain_hs_unit` takes, in units in the last place of the
 #: coordinates; a point whose step would be smaller is on the triangle and gets NaN.
 STRAIN_MIN_STEP_ULPS = 1e4
 
-#: Order of the six strain components :func:`tde_strain_hs_unit` returns, ``cutde``'s:
-#: tensor components (``xy`` is half the engineering shear), east/north/up.
+#: Order of the six strain components `tde_strain_hs_unit` returns, `cutde`'s:
+#: tensor components (`xy` is half the engineering shear), east/north/up.
 STRAIN_COMPONENTS = ("xx", "yy", "zz", "xy", "xz", "yz")
 
 
 def tde_strain_hs_unit(x, y, z, p1, p2, p3, nu=0.25, step=STRAIN_STEP):
-    """Strain of unit strike-, dip- and tensile-slip on one triangle in a half-space: ``(3, 6, npts)``.
+    """Strain of unit strike-, dip- and tensile-slip on one triangle in a half-space: `(3, 6, npts)`.
 
-    Axis 0 is the slip component (strike, dip, tensile) as :func:`tde_disp_hs_unit` has
-    it, axis 1 the components of :data:`STRAIN_COMPONENTS`. Units: strain per unit slip.
+    Axis 0 is the slip component (strike, dip, tensile) as `tde_disp_hs_unit` has
+    it, axis 1 the components of `STRAIN_COMPONENTS`. Units: strain per unit slip.
 
-    By central differences of :func:`tde_disp_hs_unit`, with a step of ``step`` times each
-    point's distance to the triangle (:data:`STRAIN_STEP`), all stencil points in one call.
+    By central differences of `tde_disp_hs_unit`, with a step of `step` times each
+    point's distance to the triangle (`STRAIN_STEP`), all stencil points in one call.
     A point closer to the free surface than its step takes the one-sided second-order
-    difference downward for ``d/dz``, so points at ``z = 0`` are fine; there the field is
+    difference downward for `d/dz`, so points at `z = 0` are fine; there the field is
     traction-free. A point on the triangle itself has no strain (it is singular on the
     edges and two-valued on the face) and gets NaN, as does one so close that its step
-    would be under :data:`STRAIN_MIN_STEP_ULPS` units in the last place of its coordinates.
+    would be under `STRAIN_MIN_STEP_ULPS` units in the last place of its coordinates.
 
-    Nikkhoo & Walter's ``TDstressHS`` gives the same analytically. It is not ported: these
-    differences cost six displacement calls, agree with ``cutde`` (an independent port of
+    Nikkhoo & Walter's `TDstressHS` gives the same analytically. It is not ported: these
+    differences cost six displacement calls, agree with `cutde` (an independent port of
     it) to 1e-5 or better, and the kernels they feed carry 1e-4 to 1e-3 of table error.
     """
     x = np.asarray(x, dtype=float).ravel()
@@ -193,10 +189,10 @@ def tde_strain_hs_unit(x, y, z, p1, p2, p3, nu=0.25, step=STRAIN_STEP):
 
 
 def tde_strain_hs_unit_many(x, y, z, triangles, nu=0.25, step=STRAIN_STEP, h=None):
-    """:func:`tde_strain_hs_unit` for many triangles at once: ``(n_triangles, 3, 6, npts)``.
+    """`tde_strain_hs_unit` for many triangles at once: `(n_triangles, 3, 6, npts)`.
 
     One central-difference stencil per point serves every triangle, through
-    :func:`tde_disp_hs_unit_many`. Its step is ``h`` (metres, per point) or ``step`` times
+    `tde_disp_hs_unit_many`. Its step is `h` (metres, per point) or `step` times
     the point's distance to the nearest of the triangles: no more than each triangle's own
     step, so truncation only falls and round-off grows by at most the ratio of distances.
     """
@@ -237,9 +233,9 @@ def tde_strain_hs_unit_many(x, y, z, triangles, nu=0.25, step=STRAIN_STEP, h=Non
 
 
 def distance_to_triangle(triangle, points):
-    """Each point's distance to the nearest point of the triangle, ``(npoints,)``.
+    """Each point's distance to the nearest point of the triangle, `(npoints,)`.
 
-    ``triangle`` is ``(3, 3)`` and ``points`` ``(npoints, 3)``, in any one Cartesian frame.
+    `triangle` is `(3, 3)` and `points` `(npoints, 3)`, in any one Cartesian frame.
     """
     triangle = np.asarray(triangle, dtype=float)
     points = np.asarray(points, dtype=float)
@@ -256,7 +252,7 @@ def distance_to_triangle(triangle, points):
 
 
 def barycentric(triangle, points):
-    """Barycentric coordinates of points in the triangle's plane, ``(npoints, 3)``."""
+    """Barycentric coordinates of points in the triangle's plane, `(npoints, 3)`."""
     triangle = np.asarray(triangle, dtype=float)
     points = np.asarray(points, dtype=float)
     v0 = triangle[0]
@@ -268,16 +264,16 @@ def barycentric(triangle, points):
 
 
 def tde_disp_hs_unit_many(x, y, z, triangles, nu=0.25):
-    """:func:`tde_disp_hs_unit` for many triangles at once: ``(n_triangles, 3, 3, npts)``.
+    """`tde_disp_hs_unit` for many triangles at once: `(n_triangles, 3, 3, npts)`.
 
-    ``triangles`` is ``(n_triangles, 3, 3)`` (vertices, east/north/up) and ``nu`` one value or
+    `triangles` is `(n_triangles, 3, 3)` (vertices, east/north/up) and `nu` one value or
     one per triangle. The same algebra as the scalar code, every operation on
-    ``(n_triangles, npts)`` arrays: the scalar code costs ~10 ms a call in numpy overhead
+    `(n_triangles, npts)` arrays: the scalar code costs ~10 ms a call in numpy overhead
     whatever the number of points, and a tent's level-set integral makes dozens of calls
     on a handful of receivers. The two angular configurations are one pass (the
     configuration only flips the sign of each side vector) and so are the free-surface
     correction's two branches (they differ only in the angle). Equal to the scalar code
-    to rounding (``tests/test_slip_tde.py``).
+    to rounding (`tests/test_slip_tde.py`).
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
@@ -303,7 +299,7 @@ def tde_disp_hs_unit_many(x, y, z, triangles, nu=0.25):
 
 
 def _element_basis_many(tris, image=False):
-    """:func:`_element_basis` for ``(n, 3, 3)`` triangles: three ``(n, 3)`` arrays."""
+    """`_element_basis` for `(n, 3, 3)` triangles: three `(n, 3)` arrays."""
     p1, p2, p3 = tris[:, 0], tris[:, 1], tris[:, 2]
     vnorm = np.cross(p2 - p1, p3 - p1)
     vnorm = vnorm / np.linalg.norm(vnorm, axis=1, keepdims=True)
@@ -325,7 +321,7 @@ _UNIT_BZ = np.array([0.0, 1.0, 0.0])[:, None, None]  # dip drives bz
 
 
 def _disp_fs_many(x, y, z, tris, nu):
-    """:func:`_disp_fs_m` for unit slips and many triangles: ``(n_tri, 3 slips, 3 ENU, npts)``."""
+    """`_disp_fs_m` for unit slips and many triangles: `(n_tri, 3 slips, 3 ENU, npts)`."""
     vnorm, vstrike, vdip = _element_basis_many(tris, image=True)
     at = np.stack([vnorm, vstrike, vdip], axis=1)                    # rows: the TD frame
     p1, p2, p3 = tris[:, 0], tris[:, 1], tris[:, 2]
@@ -382,7 +378,7 @@ def _disp_fs_many(x, y, z, tris, nu):
 
 
 def _trimodefinder_many(x, y, z, p1, p2, p3):
-    """:func:`_trimodefinder` with ``(n_tri, npts)`` points and ``(n_tri, 2)`` vertices."""
+    """`_trimodefinder` with `(n_tri, npts)` points and `(n_tri, 2)` vertices."""
     p1x, p1y = p1[:, 0, None], p1[:, 1, None]
     p2x, p2y = p2[:, 0, None], p2[:, 1, None]
     p3x, p3y = p3[:, 0, None], p3[:, 1, None]
@@ -402,7 +398,7 @@ def _trimodefinder_many(x, y, z, p1, p2, p3):
 
 
 def _disp_har_func_many(x, y, z, tris, nu):
-    """:func:`_disp_har_func_m` for unit slips and many triangles: ``(n_tri, 3 slips, 3 ENU, npts)``."""
+    """`_disp_har_func_m` for unit slips and many triangles: `(n_tri, 3 slips, 3 ENU, npts)`."""
     vnorm, vstrike, vdip = _element_basis_many(tris, image=False)
     burgers = np.stack([vstrike, vdip, vnorm])                        # (3 slips, n_tri, 3 ENU)
     total = 0.0
@@ -412,11 +408,11 @@ def _disp_har_func_many(x, y, z, tris, nu):
 
 
 def _ang_setup_fsc_many(x, y, z, burgers, pa, pb, nu):
-    """:func:`_ang_setup_fsc_m` for many sides: ``(n_tri, 3 slips, 3 ENU, npts)``.
+    """`_ang_setup_fsc_m` for many sides: `(n_tri, 3 slips, 3 ENU, npts)`.
 
-    The side's frame is the reflection ``[[c, s, 0], [s, -c, 0], [0, 0, -1]]`` with ``(c, s)``
+    The side's frame is the reflection `[[c, s, 0], [s, -c, 0], [0, 0, -1]]` with `(c, s)`
     its horizontal direction: symmetric, so the same matrix maps both ways (which is why the
-    scalar port's ``column_stack`` agrees with the reference's transposed matrix).
+    scalar port's `column_stack` agrees with `TDdispHS.m`'s transposed matrix).
     """
     side = pb - pa
     length = np.linalg.norm(side, axis=1)
@@ -447,12 +443,12 @@ def _ang_setup_fsc_many(x, y, z, burgers, pa, pb, nu):
 
 
 def _rotate_m(a, u, v, w):
-    """``a @ [u; v; w]`` for components with a leading slip axis; ``(3, m, npts)``."""
+    """`a @ [u; v; w]` for components with a leading slip axis; `(3, m, npts)`."""
     return np.stack([a[i, 0] * u + a[i, 1] * v + a[i, 2] * w for i in range(3)])
 
 
 def _disp_fs_m(x, y, z, p1, p2, p3, ss, ds, ts, nu):
-    """:func:`_disp_fs` with ``ss``, ``ds``, ``ts`` of shape ``(m, 1)``; returns ``(m, 3, npts)``."""
+    """`_disp_fs` with `ss`, `ds`, `ts` of shape `(m, 1)`; returns `(m, 3, npts)`."""
     bx, by, bz = ts, ss, ds
     m = bx.shape[0]
     vnorm, vstrike, vdip = _element_basis(p1, p2, p3, image=True)
@@ -504,7 +500,7 @@ def _disp_fs_m(x, y, z, p1, p2, p3, ss, ds, ts, nu):
 
 
 def _setup_d_m(x, y, z, alpha, bx, by, bz, nu, tri_vertex, side_vec):
-    """:func:`_setup_d` with a leading slip axis on the Burgers vector and the result."""
+    """`_setup_d` with a leading slip axis on the Burgers vector and the result."""
     a = np.array([[side_vec[2], -side_vec[1]],
                   [side_vec[1], side_vec[2]]])
     r1 = a @ np.vstack([y - tri_vertex[1], z - tri_vertex[2]])
@@ -516,7 +512,7 @@ def _setup_d_m(x, y, z, alpha, bx, by, bz, nu, tri_vertex, side_vec):
 
 
 def _disp_har_func_m(x, y, z, p1, p2, p3, ss, ds, ts, nu):
-    """:func:`_disp_har_func` with a leading slip axis; returns ``(m, 3, npts)``."""
+    """`_disp_har_func` with a leading slip axis; returns `(m, 3, npts)`."""
     bx, by, bz = ts, ss, ds
     vnorm, vstrike, vdip = _element_basis(p1, p2, p3, image=False)
     a = np.column_stack([vnorm, vstrike, vdip])
@@ -528,7 +524,7 @@ def _disp_har_func_m(x, y, z, p1, p2, p3, ss, ds, ts, nu):
 
 
 def _ang_setup_fsc_m(x, y, z, b_x, b_y, b_z, pa, pb, nu):
-    """:func:`_ang_setup_fsc` with a leading slip axis; returns ``(m, 3, npts)``."""
+    """`_ang_setup_fsc` with a leading slip axis; returns `(m, 3, npts)`."""
     m = b_x.shape[0]
     side_vec = pb - pa
     e_z = np.array([0.0, 0.0, 1.0])
@@ -560,12 +556,12 @@ def _ang_setup_fsc_m(x, y, z, b_x, b_y, b_z, pa, pb, nu):
 
 
 def _element_basis(p1, p2, p3, image=False):
-    """Unit normal, strike and dip vectors of a TD, the reference's way.
+    """Unit normal, strike and dip vectors of a TD, as `TDdispHS.m` computes them.
 
     A horizontal element is the degenerate case: its normal is parallel to
-    ``eZ`` so ``cross(eZ, Vnorm)`` vanishes, and the reference falls back to
-    pointing strike north or south according to the normal's sign. A *vertical*
-    element -- the whole of a strike-slip fault mesh -- is not degenerate at all:
+    `eZ` so `cross(eZ, Vnorm)` vanishes, and `TDdispHS.m` falls back to
+    pointing strike north or south according to the normal's sign. A vertical
+    element (the whole of a vertical fault mesh) is not degenerate at all:
     its normal is horizontal, so the cross product is well conditioned.
     """
     vnorm = np.cross(p2 - p1, p3 - p1)
@@ -645,7 +641,7 @@ def _disp_fs(x, y, z, p1, p2, p3, ss, ds, ts, nu):
     fi_d = (na * nb * nc + (a * b).sum(axis=1) * nc
             + (a * c).sum(axis=1) * nb + (b * c).sum(axis=1) * na)
     # atan2 distinguishes +0.0 from -0.0, and points exactly on the TD plane
-    # land on that zero; force the negative branch as the reference does.
+    # land on that zero; force the negative branch as TDdispHS.m does.
     fi_n = np.where(fi_n == 0, -0.0, fi_n)
     fi = -2.0 * np.arctan2(fi_n, fi_d) / (4.0 * np.pi)
 
@@ -672,7 +668,7 @@ def _disp_har_func(x, y, z, p1, p2, p3, ss, ds, ts, nu):
 
 
 def _coord_trans(x1, x2, x3, a):
-    """Rotate vector components by ``a``; returns three 1-D arrays."""
+    """Rotate vector components by `a`; returns three 1-D arrays."""
     x1 = np.atleast_1d(np.asarray(x1, dtype=float)).ravel()
     x2 = np.atleast_1d(np.asarray(x2, dtype=float)).ravel()
     x3 = np.atleast_1d(np.asarray(x3, dtype=float)).ravel()
@@ -683,9 +679,9 @@ def _coord_trans(x1, x2, x3, a):
 def _trimodefinder(x, y, z, p1, p2, p3):
     """Pick the artefact-free angular-dislocation configuration per point.
 
-    ``x``/``y`` are the in-plane TDCS coordinates and ``z`` the off-plane one
-    (the caller passes them in that order, not as named). Returns ``1``, ``-1``,
-    or ``0`` for points lying on a triangle side.
+    `x`/`y` are the in-plane TDCS coordinates and `z` the off-plane one
+    (the caller passes them in that order, not as named). Returns `1`, `-1`,
+    or `0` for points lying on a triangle side.
     """
     det = ((p2[1] - p3[1]) * (p1[0] - p3[0]) + (p3[0] - p2[0]) * (p1[1] - p3[1]))
     a = ((p2[1] - p3[1]) * (x - p3[0]) + (p3[0] - p2[0]) * (y - p3[1])) / det
@@ -810,11 +806,11 @@ def _ang_dis_disp(x, y, z, alpha, bx, by, bz, nu):
 def _ang_dis_disp_fsc(y1, y2, y3, beta, b1, b2, b3, nu, a):
     """Harmonic contribution of one angular dislocation in a half-space.
 
-    A direct transcription of the reference's ``AngDisDispFSC``. Note that
-    ``cotB`` and ``cosB`` are the *same* floating-point value at ``beta = pi/2``
-    (since ``sin(pi/2) == 1`` exactly), so the ``cotB * (.../cosB)`` products --
-    which are what a horizontal TD side produces, and a vertical fault mesh is
-    full of them -- cancel to full precision rather than blowing up.
+    A direct transcription of Nikkhoo & Walter's `AngDisDispFSC`. Note that
+    `cotB` and `cosB` are the *same* floating-point value at `beta = pi/2`
+    (since `sin(pi/2) == 1` exactly), so the `cotB * (.../cosB)` products,
+    which are what a horizontal TD side produces (and a vertical fault mesh is
+    full of them), cancel to full precision rather than blowing up.
     """
     sin_b = np.sin(beta)
     cos_b = np.cos(beta)

@@ -2,35 +2,33 @@
 
 The system is the reference implementation's, stacked:
 
-.. code-block:: text
-
     [ G * w        ]        [ d * w ]
     [ lam * L / nL ] * m =  [   0   ]
     [ W_boundary   ]        [   0   ]
 
-with ``lb <= m <= ub``. ``G`` is the Green's matrix, ``w`` the per-observation
-weights, ``L`` the smoothing operator normalised by its own row count (so
-``lam`` means the same thing as the mesh is refined), and ``W_boundary`` the
+with `lb <= m <= ub`. `G` is the Green's matrix, `w` the per-observation
+weights, `L` the smoothing operator normalised by its own row count (so
+`lam` means the same thing as the mesh is refined), and `W_boundary` the
 zero-slip edge rows.
 
-It is *not* assembled as one dense array. ``G`` is dense and ``L``/``W`` are
-sparse, so the stack is wrapped in a :class:`~scipy.sparse.linalg.LinearOperator`
+It is *not* assembled as one dense array. `G` is dense and `L`/`W` are
+sparse, so the stack is wrapped in a `scipy.sparse.linalg.LinearOperator`
 that applies each in its natural form: the smoothing block then costs a sparse
-matrix-vector product rather than a dense one, and the 0.5-1 GB materialised copy
-never exists. ``scipy.optimize.lsq_linear`` accepts a ``LinearOperator`` with
-``lsq_solver="lsmr"``, which is the combination used here by default.
+matrix-vector product rather than a dense one, and a dense copy of the whole
+stack never exists. `scipy.optimize.lsq_linear` accepts a `LinearOperator` with
+`lsq_solver="lsmr"`, which is the combination used here by default.
 
-``solve(method="active_set")`` solves the same bounded problem in its normal
-equations instead, exactly, by primal-dual active set (:func:`box_qp`); see
-:data:`METHODS` for when that is faster and when it is refused. A refused answer
-falls back to ``"lsq_linear_dense"`` (the stacked system as a dense matrix, solved to
-within a micron of the minimiser) on problems up to :data:`EXACT_FALLBACK_MAX_PARAMS`
-parameters, and to ``"lsq_linear"`` above.
+`solve(method="active_set")` solves the same bounded problem in its normal
+equations instead, exactly, by primal-dual active set (`box_qp`); see
+`METHODS` for when that is faster and when it is refused. A refused answer
+falls back to `"lsq_linear_dense"` (the stacked system as a dense matrix, solved to
+within a micron of the minimiser) on problems up to `EXACT_FALLBACK_MAX_PARAMS`
+parameters, and to `"lsq_linear"` above.
 
 Solver honesty matters more than usual in this problem. Runtime depends far more
 on conditioning than on size, and an iteration-capped solve returns a
 plausible-looking model with a meaningless variance reduction -- so
-:class:`SlipModel` carries the solver's status and refuses to pretend.
+`SlipModel` carries the solver's status and refuses to pretend.
 """
 
 import warnings
@@ -64,7 +62,7 @@ def _blocked(projection):
 
 
 def _far_enough(x, y, trace_nodes, distance, block=20000):
-    """True where a point is further than ``distance`` from any trace node.
+    """True where a point is further than `distance` from any trace node.
 
     Blocked over the points, since the full pairwise matrix against a long fault's
     node row is large and only its row minimum is wanted.
@@ -81,9 +79,9 @@ def _far_enough(x, y, trace_nodes, distance, block=20000):
 class _MissingEngine:
     """Placeholder for an engine a loaded model cannot rebuild.
 
-    A layered engine is defined by its EDGRN tables, which are megabytes and are
+    A layered engine is defined by its tables, which are megabytes and are
     deliberately not saved with a model -- as the Green's matrix is not. Silently
-    substituting the homogeneous half-space would let ``forward`` return plausible
+    substituting the homogeneous half-space would let `forward` return plausible
     numbers computed with the wrong physics, so it raises instead.
     """
 
@@ -124,11 +122,11 @@ def _boundary_rows(basis, sides, ratio):
 
 
 def _projected_newton(N, g, lo, hi, x, max_iter):
-    """``(at_lo, at_hi, steps)``: the active set of the box QP, by Newton steps projected onto the box (Bertsekas 1982).
+    """`(at_lo, at_hi, steps)`: the active set of the box QP, by Newton steps projected onto the box (Bertsekas 1982).
 
     Slower per set than primal-dual active set and duller near an easy answer, but the
     objective falls at every step, so it cannot cycle, and a step can move many variables onto
-    their bounds at once. From ``x``, clipped into the box. The caller solves on the final set.
+    their bounds at once. From `x`, clipped into the box. The caller solves on the final set.
     """
     def objective(v):
         return 0.5 * v @ (N @ v) - g @ v
@@ -171,31 +169,31 @@ def _projected_newton(N, g, lo, hi, x, max_iter):
 
 
 def box_qp(N, g, lo, hi, x0=None, max_iter=100):
-    """Minimise ``x'Nx/2 - g'x`` under ``lo <= x <= hi``, exactly, by primal-dual active set.
+    """Minimise `x'Nx/2 - g'x` under `lo <= x <= hi`, exactly, by primal-dual active set.
 
-    The problem :meth:`SlipInversion.solve` hands ``lsq_linear``, written in its
+    The problem `SlipInversion.solve` hands `lsq_linear`, written in its
     normal equations. Each step holds the variables the current guess puts on a
     bound there and solves for the rest by Cholesky. It then moves onto its bound
     every free variable that crossed one, and off its bound every held variable
     whose gradient points inside. When a step changes nothing, every KKT condition
     holds, so the answer is the minimiser and not an approximation to it.
 
-    ``x0``, a nearby solution as in a sweep, picks the first guess (a variable
+    `x0`, a nearby solution as in a sweep, picks the first guess (a variable
     within 0.1 mm of a bound starts on it), and the set then settles in a few
     steps. Without it every variable starts free.
 
-    Primal-dual active set can cycle when ``N`` is not an M-matrix, and on a kernel with
+    Primal-dual active set can cycle when `N` is not an M-matrix, and on a kernel with
     most variables on a bound it does. If the set comes back to a guess already tried, or has not
-    settled in ``max_iter`` steps, the set is found by :func:`_projected_newton` instead, and
-    ``escaped`` says so. The answer depends only on the final set, so a solve that never
-    escapes takes the steps it always did.
+    settled in `max_iter` steps, the set is found by `_projected_newton` instead, and
+    `escaped` says so. The answer depends only on the final set, so the fallback
+    changes nothing for a solve that settles on its own.
 
-    Returns a namespace: ``x``; ``nit``, the steps taken; ``at_lo``/``at_hi``, the
-    final active set; ``kkt``, the largest gradient left on a free variable
-    relative to ``max|g|``; ``rcond``, LAPACK's 1-norm estimate of the
-    reciprocal condition number of the free block (1 when nothing is free); and ``escaped``.
+    Returns a namespace: `x`; `nit`, the steps taken; `at_lo`/`at_hi`, the
+    final active set; `kkt`, the largest gradient left on a free variable
+    relative to `max|g|`; `rcond`, LAPACK's 1-norm estimate of the
+    reciprocal condition number of the free block (1 when nothing is free); and `escaped`.
 
-    Raises ``RuntimeError`` if neither settles, and :class:`numpy.linalg.LinAlgError` if
+    Raises `RuntimeError` if neither settles, and `numpy.linalg.LinAlgError` if
     a free block is not positive definite.
     """
     g = np.asarray(g, dtype=float)
@@ -257,7 +255,7 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
     return SimpleNamespace(x=x, nit=step, at_lo=at_lo, at_hi=at_hi, kkt=kkt, rcond=rcond, escaped=escaped)
 
 
-#: :func:`_projected_newton`: a variable this close to a bound (as a share of its range, at most 1) and
+#: `_projected_newton`: a variable this close to a bound (as a share of its range, at most 1) and
 #: pushed onto it goes there; the sufficient decrease; and the shortest step along the projection arc.
 _SNAP_TO_BOUND = 1e-12
 _ARMIJO = 1e-4
@@ -266,97 +264,73 @@ _SMALLEST_STEP = 1e-10
 #: Crustal shear modulus used for moment when no velocity model is supplied.
 DEFAULT_SHEAR_MODULUS = 30e9
 
-#: Sub-triangles per element edge in the integrated moment, ``order**2`` per element.
+#: Sub-triangles per element edge in the integrated moment, `order**2` per element.
 #:
 #: The rigidity is averaged exactly over each piece; what the order resolves is the
 #: slip magnitude, and its covariance with the rigidity inside a piece that
-#: straddles a step. Measured against order 48-128, relative error in moment:
-#:
-#: * Venezuela r84 (2-4 km elements): 2.2e-3 at 1, 4.1e-4 at 2, 1.4e-4 at 4,
-#:   **9.7e-6 at 8** (Mw 3e-6), 3.0e-6 at 16.
-#: * the test fixture (6.7 km rows with the 2 km lid step inside the top one, dip
-#:   slip changing sign in 88 of 240 elements): 4.6e-2 at 1, 1.8e-3 at 4,
-#:   **6.3e-4 at 8** (Mw 2e-4), 8.2e-5 at 16, 2.8e-6 at 64.
-#:
-#: Sampling the rigidity at the centroids instead gave 5.4e-4 at 8 and 2.6e-3 at
-#: 13 on r84 -- first order and erratic, set by where the lattice falls against
-#: each interface.
+#: straddles a step. At 8 the relative error in moment is of order 1e-5 on
+#: kilometre-scale elements and under 1e-3 on coarse ones with a rigidity step
+#: inside a row. Do not sample the rigidity at points instead: that is first
+#: order and erratic, set by where the points fall against each interface.
 MOMENT_ORDER = 8
 
 #: Default cap on trust-region iterations.
 #:
 #: Generous on purpose. Iteration count tracks *conditioning*, not problem size,
-#: and not monotonically in the smoothing weight either: on the reference
-#: Venezuela problem, weights of 2.0, 0.3 and 0.01 each converge in about 30
-#: iterations while 0.05 needs 236. A tight cap therefore silently truncates
-#: isolated points of an L-curve sweep rather than the obvious rough end. Since a
-#: well-conditioned solve stops long before the cap, raising it costs nothing
-#: where it is not needed.
+#: and not monotonically in the smoothing weight either: one weight in the middle
+#: of a sweep can need several times the iterations of the weights either side.
+#: A tight cap therefore silently truncates isolated points of an L-curve sweep
+#: rather than the obvious rough end. Since a well-conditioned solve stops long
+#: before the cap, raising it costs nothing where it is not needed.
 DEFAULT_MAX_ITER = 400
 
-#: Inner-solver tolerance handed to ``lsq_linear``'s ``lsmr`` sub-problem.
+#: Inner-solver tolerance handed to `lsq_linear`'s `lsmr` sub-problem.
 #:
-#: ``"auto"`` lets scipy tighten the inner tolerance as the outer trust-region
-#: iteration converges, instead of solving every sub-problem to ``atol=btol=0``
-#: -- which is what scipy's ``None`` default does, and which makes ``lsmr`` run
-#: to its own iteration cap on every single outer step.
+#: `"auto"` lets scipy tighten the inner tolerance as the outer trust-region
+#: iteration converges, instead of solving every sub-problem to `atol=btol=0`
+#: -- which is what scipy's `None` default does, and which makes `lsmr` run
+#: to its own iteration cap on every outer step. Most of a solve is spent in
+#: those matrix-vector products, so on a single solve this is several times
+#: faster for the same answer.
 #:
-#: Measured on the reference problem (590 elements, 860 observations, 1186
-#: parameters): ``None`` takes 162 outer iterations and **174 809** matrix-vector
-#: products in 22.3 s; ``"auto"`` takes 28 outer iterations and **26 359** in
-#: 3.9 s -- a **5.8x** speed-up for the same variance reduction (90.06%), the two
-#: slip models agreeing to 6.6 mm. Since roughly 89% of a solve is spent inside
-#: those products, cutting their number is by far the largest available win.
+#: The win is not uniform in the smoothing weight: the adaptive tolerance loses
+#: at both ends of a sweep and wins by about 2x in the middle, a modest net gain
+#: over the whole `SlipInversion.l_curve` sweep, which is why it stays the
+#: default. Judge it over a sweep, never at one weight. Outer iteration count is
+#: the wrong meter: `"auto"` solves each sub-problem loosely, so it routinely
+#: takes *more* outer steps while doing less total work.
 #:
-#: ⚠️ **That win is not uniform in the smoothing weight.** Re-measured 2026-07-28
-#: on the test fixture (240 elements, 761 observations, 480 parameters), counting
-#: matrix-vector products, ``None`` / ``"auto"``::
-#:
-#:     lam    2.0    1.0    0.5    0.3    0.1   0.05
-#:          0.70x  2.18x  1.93x  1.91x  1.19x  0.78x
-#:
-#: so the adaptive tolerance *loses* at both ends of the sweep and wins by ~2x in
-#: the middle, netting **1.17x** over the whole sweep -- which is how
-#: :meth:`SlipInversion.l_curve` uses it, and why it stays the default. Judge it
-#: over a sweep, never at one weight. Note also that outer iteration count is the
-#: wrong meter: ``"auto"`` solves each sub-problem loosely, so it routinely takes
-#: *more* outer steps while doing less total work.
-#:
-#: Do **not** reach for ``lsmr_maxiter`` instead. A hard cap is not monotone:
-#: caps of 100 and 200 both drove the outer loop into ``DEFAULT_MAX_ITER`` and
-#: returned materially different, *worse* models (4.15 m and 2.47 m from the
-#: converged answer) while a cap of 25 was fine. The adaptive tolerance has no
-#: such cliff.
+#: Do not reach for `lsmr_maxiter` instead. A hard cap is not monotone: a
+#: moderate cap can drive the outer loop into `DEFAULT_MAX_ITER` and return a
+#: materially worse model while a smaller one is fine. The adaptive tolerance
+#: has no such cliff.
 DEFAULT_LSMR_TOL = "auto"
 
-#: The solvers :meth:`SlipInversion.solve` offers. Both minimise the same
+#: The solvers `SlipInversion.solve` offers. All minimise the same
 #: objective under the same bounds.
 #:
-#: * ``"lsq_linear"``: scipy's trust-region solve of the stacked system, through
-#:   ``lsmr`` on the operator. The default, and what every model on record used.
-#: * ``"active_set"``: the normal equations ``(A'A + S'S + B'B) m = A'b``,
-#:   solved exactly by :func:`box_qp`. ``A'A`` and ``A'b`` do not depend on the
+#: * `"lsq_linear"`: scipy's trust-region solve of the stacked system, through
+#:   `lsmr` on the operator. The default.
+#: * `"active_set"`: the normal equations `(A'A + S'S + B'B) m = A'b`,
+#:   solved exactly by `box_qp`. `A'A` and `A'b` do not depend on the
 #:   regularization, so they are formed once per inversion and kept; a sweep
 #:   over smoothing weights then pays one small factorization per weight
-#:   instead of a trust-region solve over every observation row. This is the
-#:   solve :class:`~slipsolve.sweep.DipSweep` and the production blocked CV
-#:   always used (that CV's scores matched ``lsq_linear`` re-solves' to
-#:   0.0002 mm).
-#:
-#: * ``"lsq_linear_dense"``: the stacked system as a DENSE matrix, ``lsq_linear``
-#:   with exact inner solves (``lsq_solver="exact"``) to :data:`EXACT_FALLBACK_TOL`,
+#:   instead of a trust-region solve over every observation row.
+#:   `slipsolve.sweep.DipSweep` uses the same solve.
+#: * `"lsq_linear_dense"`: the stacked system as a dense matrix, `lsq_linear`
+#:   with exact inner solves (`lsq_solver="exact"`) to `EXACT_FALLBACK_TOL`,
 #:   which ends within a micron of the minimiser (a trust region nears a bound
-#:   asymptotically) where ``lsmr``'s inexact steps stop short. Its cost grows as
+#:   asymptotically) where `lsmr`'s inexact steps stop short. Its cost grows as
 #:   rows x parameters**2 per iteration, so it is for small problems.
 #:
 #: Normal equations square the condition number, so an active-set answer is
 #: refused, with a warning, if its free block is worse conditioned than
-#: :data:`ACTIVE_SET_MAX_COND`, if its KKT residual exceeds
-#: :data:`ACTIVE_SET_MAX_KKT`, if a free block is not positive definite, or if
-#: :func:`box_qp` does not settle even by projected Newton steps, after its active set
-#: cycles or runs out. The fallback is ``"lsq_linear_dense"`` on
-#: problems up to :data:`EXACT_FALLBACK_MAX_PARAMS` parameters and
-#: ``"lsq_linear"`` above.
+#: `ACTIVE_SET_MAX_COND`, if its KKT residual exceeds
+#: `ACTIVE_SET_MAX_KKT`, if a free block is not positive definite, or if
+#: `box_qp` does not settle even by projected Newton steps, after its active set
+#: cycles or runs out. The fallback is `"lsq_linear_dense"` on
+#: problems up to `EXACT_FALLBACK_MAX_PARAMS` parameters and
+#: `"lsq_linear"` above.
 METHODS = ("lsq_linear", "active_set", "lsq_linear_dense")
 
 #: Largest 1-norm condition number an active-set solve's free block may have.
@@ -368,19 +342,17 @@ ACTIVE_SET_MAX_COND = 1e12
 ACTIVE_SET_MAX_KKT = 1e-8
 
 #: Most parameters for which a refused active-set answer falls back to
-#: ``"lsq_linear_dense"`` rather than ``"lsq_linear"``. Primal-dual active set has no
+#: `"lsq_linear_dense"` rather than `"lsq_linear"`. Primal-dual active set has no
 #: convergence guarantee when the normal matrix is not an M-matrix, and weak
-#: smoothing makes it wander: on ``tests/test_slip_points.py``'s two-fault problem
-#: (305 parameters, smoothing 0.02, normal matrix condition 1.3e13) it never settled,
-#: and ``lsq_linear`` then stopped 84 above the minimum (each fault's potency 12-20%
-#: high, against 1.5% at the minimiser), at a place that differed between machines.
-#: The dense solve reached the minimum (BVLS's to 3e-11) in 7 s there; it grows as
-#: rows x parameters**2 an iteration, so production-size problems keep ``lsq_linear``,
-#: which stops 0.01 mm short at production smoothing.
+#: smoothing makes it wander. On such a problem `lsq_linear` can stop well above
+#: the minimum, at a place that differs between machines, where the dense solve
+#: reaches it. The dense solve grows as rows x parameters**2 an iteration, so
+#: larger problems keep `lsq_linear`, which at moderate smoothing stops only
+#: negligibly short.
 EXACT_FALLBACK_MAX_PARAMS = 1000
 
-#: ``"lsq_linear_dense"``'s tolerance on the relative change in cost. At 1e-10 it
-#: stopped 2.8e-4 above the minimum on that problem, at 1e-13 on it.
+#: `"lsq_linear_dense"`'s tolerance on the relative change in cost. Looser
+#: values stop measurably above the minimum.
 EXACT_FALLBACK_TOL = 1e-13
 
 
@@ -393,52 +365,50 @@ class SlipInversion:
 
     def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
                  velocity_model=None, covariance=None, sees=None):
-        """``engine`` and ``basis`` choose the physics and the parameterization.
+        """`engine` and `basis` choose the physics and the parameterization.
 
-        ``ramp`` adds unbounded per-track nuisance columns -- ``"none"``,
-        ``"offset"``, ``"linear"``, ``"quadratic"`` or ``"cubic"``, or a
-        ``{track: kind}`` dict with ``"*"`` for the rest, e.g. a cubic for the
+        `ramp` adds unbounded per-track nuisance columns -- `"none"`,
+        `"offset"`, `"linear"`, `"quadratic"` or `"cubic"`, or a
+        `{track: kind}` dict with `"*"` for the rest, e.g. a cubic for the
         interferograms and an offset for pixel-offset tracks (see
-        :func:`~slipsolve.regularize.ramp_columns`). Solving the ramp here
-        is preferable to pre-removing it with
-        :meth:`~nisar_tools.unwrap.UnwrappedStack.deramp`: a pre-removal fits the
-        polynomial to the data alone and has to extrapolate under a masked signal
-        region, while these columns are constrained jointly with the slip. Run
-        :func:`~slipsolve.diagnostics.ramp_content` first to see what each
-        degree would absorb.
+        `slipsolve.regularize.ramp_columns`). Solving the ramp here
+        is preferable to pre-removing it from the interferogram: a pre-removal
+        fits the polynomial to the data alone and has to extrapolate under a
+        masked signal region, while these columns are constrained jointly with
+        the slip. Run `slipsolve.diagnostics.ramp_content` first to see what
+        each degree would absorb.
 
-        ``velocity_model`` is **not** used to compute Green's functions -- for a
-        layered medium that information is already inside the engine's EDGRN
-        tables, and for a homogeneous half-space the displacements do not depend
+        `velocity_model` is **not** used to compute Green's functions -- for a
+        layered medium that information is already inside the engine's tables,
+        and for a homogeneous half-space the displacements do not depend
         on rigidity at all (it cancels; only Poisson's ratio survives). What it is
-        for is **moment**: ``sum(mu * area * slip)`` needs a rigidity, and without
-        one every reported ``Mw`` silently assumes
-        :data:`DEFAULT_SHEAR_MODULUS` = 30 GPa. Pass the same
-        :class:`~slipsolve.edgrn.VelocityModel` you built the tables from
-        and every statistic -- ``moment``, ``moment_magnitude``, ``to_text``,
-        ``repr`` -- uses the rigidity at each parameter's own depth instead.
+        for is **moment**: `sum(mu * area * slip)` needs a rigidity, and without
+        one every reported `Mw` silently assumes
+        `DEFAULT_SHEAR_MODULUS` = 30 GPa. Pass the same
+        `slipsolve.edgrn.VelocityModel` you built the tables from
+        and every statistic -- `moment`, `moment_magnitude`, `to_text`,
+        `repr` -- uses the rigidity of the layered crust instead.
 
-        It matters more than it sounds. A model whose shallowest layer is 9 GPa,
-        as the Venezuela CRUST2.0 profile's is, has a third the rigidity of the
-        default over the top 2 km -- which is exactly where a vertical
+        It matters more than it sounds: a crust whose shallowest layer is 9 GPa
+        has a third of the default's rigidity there, which is exactly where a
         strike-slip fault's shallow slip sits.
 
-        ``covariance`` replaces the per-observation weights with a full spatially
+        `covariance` replaces the per-observation weights with a full spatially
         correlated noise model: one
-        :class:`~slipsolve.covariance.CovarianceModel` for every track, or
-        a ``{track: model}`` mapping. The system is then solved whitened,
-        ``L^-1 G m = L^-1 d`` with ``Cd = L L'``, which is what
-        :meth:`whiten` applies. ``None`` keeps the diagonal weights and is
-        bit-for-bit what every run before this did.
+        `slipsolve.covariance.CovarianceModel` for every track, or
+        a `{track: model}` mapping. The system is then solved whitened,
+        `L^-1 G m = L^-1 d` with `Cd = L L'`, which is what
+        `whiten` applies. `None` keeps the diagonal weights.
 
-        ``sees`` restricts which faults of a mesh built by
-        :meth:`~slipsolve.mesh.FaultMesh.join` a track measures: ``{track: [fault, ...]}``,
-        faults by their position in the join. A track not named sees every fault. Made for an earthquake sequence
-        whose radar pairs span every event while GNSS resolves each one: the GNSS for
-        event 1 sees only the faults event 1 broke, so its rows get zero Green's
-        functions on the others, and the radar rows see the sum. That is exact when no
-        fault slipped in more than one event; slip a fault took between two events
-        (afterslip in the hours between) is assigned to whichever track sees it.
+        `sees` restricts which faults of a mesh built by
+        `slipsolve.mesh.FaultMesh.join` a track measures: `{track: [fault, ...]}`,
+        faults by their position in the join. A track not named sees every fault.
+        Made for an earthquake sequence whose radar pairs span every event while
+        GNSS resolves each one: the GNSS for event 1 sees only the faults event 1
+        broke, so its rows get zero Green's functions on the others, and the radar
+        rows see the sum. That is exact when no fault slipped in more than one
+        event; slip a fault took between two events (afterslip in the hours
+        between) is assigned to whichever track sees it.
         """
         self.mesh = mesh
         self.obs = obs
@@ -484,9 +454,9 @@ class SlipInversion:
             self._build_whitening(covariance)
 
     def fault_labels(self):
-        """The joined fault each basis function belongs to, ``(n_basis,)``.
+        """The joined fault each basis function belongs to, `(n_basis,)`.
 
-        Read from the counts :meth:`~slipsolve.mesh.FaultMesh.join` records, so it
+        Read from the counts `slipsolve.mesh.FaultMesh.join` records, so it
         follows the join's order. A mesh that was not joined is one fault, label 0.
         """
         key = "joined_nodes" if self.basis.name == "node" else "joined_elements"
@@ -522,7 +492,7 @@ class SlipInversion:
         self.sees = recorded
 
     def _build_whitening(self, covariance):
-        """Cholesky factors of ``Cd``, one block per track."""
+        """Cholesky factors of `Cd`, one block per track."""
         from .covariance import cell_ratio_warning, whitening_factors
 
         normalize = self.obs.ds.attrs.get("normalize")
@@ -549,13 +519,13 @@ class SlipInversion:
                               stacklevel=3)
 
     def whiten(self, values):
-        """Left-multiply by ``Cd^-1/2`` -- or by the diagonal weights if no ``Cd``.
+        """Left-multiply by `Cd^-1/2` -- or by the diagonal weights if no `Cd`.
 
         Every place the design matrix or the data meets the solver goes through
         here, so that the resolution matrix, the data importance and the ramp
         diagnostics all describe the system that was actually solved. Missing one
-        of them is caught by ``trace(R) == trace(N)``, which holds only when both
-        halves whiten the same ``A``.
+        of them is caught by `trace(R) == trace(N)`, which holds only when both
+        halves whiten the same `A`.
 
         Takes a vector or a matrix; whitening is applied down the observation
         axis in both cases.
@@ -575,13 +545,13 @@ class SlipInversion:
         return self.n_slip + self.n_ramp
 
     def with_ramp(self, kind):
-        """The same inversion with a different nuisance ramp, **sharing** ``G``.
+        """The same inversion with a different nuisance ramp, **sharing** `G`.
 
-        Only the ramp block depends on ``kind``, and it costs milliseconds while
+        Only the ramp block depends on `kind`, and it costs milliseconds while
         the Green's matrix costs tens of seconds -- so comparing two ramp degrees
         is affordable, which is what makes
-        :func:`~slipsolve.diagnostics.ramp_sweep` a routine check rather
-        than an hour of re-assembly. The copy shares ``g`` by reference; nothing
+        `slipsolve.diagnostics.ramp_sweep` a routine check rather
+        than an hour of re-assembly. The copy shares `g` by reference; nothing
         writes to it.
         """
         import copy
@@ -600,23 +570,22 @@ class SlipInversion:
               max_iter=DEFAULT_MAX_ITER, tol=1e-10,
               lsmr_tol=DEFAULT_LSMR_TOL, smooth_weighting="uniform", verbose=0,
               method="lsq_linear"):
-        """Solve for slip at one smoothing weight; returns a :class:`SlipModel`.
+        """Solve for slip at one smoothing weight; returns a `SlipModel`.
 
-        ``method`` is ``"lsq_linear"`` (the default), ``"active_set"`` or
-        ``"lsq_linear_dense"``; see :data:`METHODS`. All solve the same bounded
-        problem. ``max_iter`` caps the trust-region iterations of the first and the
+        `method` is `"lsq_linear"` (the default), `"active_set"` or
+        `"lsq_linear_dense"`; see `METHODS`. All solve the same bounded
+        problem. `max_iter` caps the trust-region iterations of the first and the
         active-set steps of the second; the dense solve takes at least
-        ``50 x parameters``. ``tol`` and ``lsmr_tol`` are ``lsq_linear``'s alone. The
-        model's ``options["method"]`` records the solver that produced it: when an
-        active-set answer was refused, ``"lsq_linear_dense"`` up to
-        :data:`EXACT_FALLBACK_MAX_PARAMS` parameters and ``"lsq_linear"`` above.
+        `50 x parameters`. `tol` and `lsmr_tol` are `lsq_linear`'s alone. The
+        model's `options["method"]` records the solver that produced it: when an
+        active-set answer was refused, `"lsq_linear_dense"` up to
+        `EXACT_FALLBACK_MAX_PARAMS` parameters and `"lsq_linear"` above.
 
-        ``lsmr_tol`` is the inner least-squares tolerance; see
-        :data:`DEFAULT_LSMR_TOL` for why the default is ``"auto"`` and not
-        scipy's ``None``. Pass ``lsmr_tol=None`` to reproduce a pre-2026-07-27
-        run exactly.
+        `lsmr_tol` is the inner least-squares tolerance; see
+        `DEFAULT_LSMR_TOL` for why the default is `"auto"` and not
+        scipy's `None`.
 
-        ``smooth_weighting`` applies only to the *element* basis: ``"length"``
+        `smooth_weighting` applies only to the *element* basis: `"length"`
         turns the neighbour smoother from a difference into a gradient, which is
         what a mesh with widely varying element size needs. The node basis's
         Laplace-Beltrami operator is already area- and shape-weighted and
@@ -692,7 +661,7 @@ class SlipInversion:
         )
 
     def _solve_lsq(self, smooth, boundary, lo, hi, max_iter, tol, lsmr_tol, verbose):
-        """``method="lsq_linear"``: the stacked system through scipy's trust region."""
+        """`method="lsq_linear"`: the stacked system through scipy's trust region."""
         design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
         weighted = self.whiten(design)
         rhs = np.concatenate([
@@ -709,10 +678,10 @@ class SlipInversion:
         )
 
     def _solve_lsq_dense(self, smooth, boundary, lo, hi, max_iter, verbose):
-        """``method="lsq_linear_dense"``: the stacked system as a dense matrix, solved to within a micron of the minimiser.
+        """`method="lsq_linear_dense"`: the stacked system as a dense matrix, solved to within a micron of the minimiser.
 
-        ``lsq_linear``'s trust region with exact inner solves (``lsq_solver="exact"``),
-        at :data:`EXACT_FALLBACK_TOL`; it works on the stacked system, whose condition
+        `lsq_linear`'s trust region with exact inner solves (`lsq_solver="exact"`),
+        at `EXACT_FALLBACK_TOL`; it works on the stacked system, whose condition
         number is the square root of the normal equations'.
         """
         design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
@@ -727,12 +696,12 @@ class SlipInversion:
                           verbose=verbose)
 
     def _data_block(self):
-        """``(WA)'(WA)`` and ``(WA)'(Wd)``, the half of the normal equations the data set.
+        """`(WA)'(WA)` and `(WA)'(Wd)`, the half of the normal equations the data set.
 
         Neither depends on the regularization, so they are kept between solves
-        and a sweep forms them once. The cache holds while ``G``, the ramp and
-        the whitening are the same objects (nothing writes to ``G`` in place; see
-        :meth:`with_ramp`) and the data and weights the same VALUES: ``d`` can
+        and a sweep forms them once. The cache holds while `G`, the ramp and
+        the whitening are the same objects (nothing writes to `G` in place; see
+        `with_ramp`) and the data and weights the same *values*: `d` can
         be the observation dataset's own buffer, so an in-place edit must not
         find a stale block. The last answer rides along as the next warm start.
         """
@@ -753,10 +722,10 @@ class SlipInversion:
         return block
 
     def _solve_active_set(self, smooth, boundary, lo, hi, max_iter, verbose):
-        """``method="active_set"``: ``(result, None)``, or ``(None, why)`` if refused.
+        """`method="active_set"`: `(result, None)`, or `(None, why)` if refused.
 
-        Refused under the conditions :data:`METHODS` lists; the caller warns and
-        falls back (:data:`EXACT_FALLBACK_MAX_PARAMS`).
+        Refused under the conditions `METHODS` lists; the caller warns and
+        falls back (`EXACT_FALLBACK_MAX_PARAMS`).
         """
         block = self._data_block()
         total = block.normal + (smooth.T @ smooth + boundary.T @ boundary).toarray()
@@ -798,45 +767,31 @@ class SlipInversion:
 
         The corner of the resulting curve is the conventional choice of weight --
         past it the model stops improving the fit and only gets rougher. Returned
-        as an :class:`xarray.Dataset` so it can be persisted and plotted; the
-        models themselves come back in ``models``.
+        as an `xarray.Dataset` so it can be persisted and plotted; the
+        models themselves come back in `models`.
 
         Swept from **large to small** smoothing deliberately: a smoother problem
         is better conditioned and converges in fewer iterations, and the sweep's
         total cost is dominated by its roughest end.
 
-        ``method="active_set"`` (see :data:`METHODS`) forms the data half of the
+        `method="active_set"` (see `METHODS`) forms the data half of the
         normal equations once for the whole sweep, and each weight starts from
         the previous weight's active set.
 
-        **The sweep is serial, deliberately.** Every weight is an independent
-        solve over the same Green's matrix, which makes a worker pool the obvious
-        move; measured on an 8-weight sweep (240 elements, 578 observations, 10
-        cores), threads gave **1.02x** at 2 workers and got *worse* above that
-        (0.96x at 4, 0.90x at 8), and a process pool -- pickling ``G`` once per
-        worker -- managed only **1.10x**. Two independent reasons:
+        The sweep is serial on purpose; a worker pool gains almost nothing, for
+        two reasons:
 
-        * **Load imbalance dominates.** The sweep is not eight equal solves. On
-          that run the weights cost 0.78/0.75/0.54/0.84/0.61/0.91/**12.15**/1.59
-          seconds: ``lam=0.02`` ran to :data:`DEFAULT_MAX_ITER` and was **67% of
-          the entire sweep** on its own, so no scheduler beats **1.50x**. The
-          expensive weight is precisely the one whose result is meaningless
-          (``converged`` is False) -- it should be dropped, not parallelised.
-        * **Threads cannot overlap the solver.** scipy's ``lsmr`` is pure Python,
-          so its iteration loop holds the GIL between matrix-vector products.
-          Capping ``OMP_NUM_THREADS=1`` to rule out BLAS oversubscription changed
-          nothing (1.03x at 2 workers), which is what identifies the GIL rather
-          than core contention as the limit. (The dense matrix-vector product on
-          its own already runs at ~34 GFLOP/s, i.e. multi-threaded BLAS.)
+        * **Load imbalance dominates.** The weights do not cost the same, and the
+          most expensive is usually one that runs to `DEFAULT_MAX_ITER` -- whose
+          result is meaningless (`converged` is False) and should be dropped,
+          not parallelised.
+        * **Threads cannot overlap the solver.** scipy's `lsmr` is pure Python,
+          so its iteration loop holds the GIL between matrix-vector products,
+          and the dense products already use multi-threaded BLAS.
 
-        A ``workers=`` argument was written, verified to give identical results,
-        and then removed: it is API surface that can only make a sweep slower.
-        What does make one faster is :data:`DEFAULT_LSMR_TOL` (a measured
-        **5.8x** on a single solve) and dropping the weights that never converge.
-
-        Green's assembly is not parallelisable either -- see
-        :mod:`slipsolve.greens`, where threading over elements measured
-        uniformly worse for a different reason again (numpy dispatch overhead).
+        What makes a sweep faster is `DEFAULT_LSMR_TOL` and dropping the weights
+        that never converge. Green's assembly is serial too; see
+        `slipsolve.greens`.
         """
         import xarray as xr
 
@@ -874,7 +829,7 @@ class SlipInversion:
 
 
 class _StackedOperator(LinearOperator):
-    """``[dense; sparse; sparse]`` applied without materialising the stack.
+    """`[dense; sparse; sparse]` applied without materialising the stack.
 
     Keeping the smoothing and boundary blocks sparse is not a micro-optimisation:
     at realistic sizes the smoothing block has more rows than the data does, and
@@ -937,17 +892,17 @@ class SlipModel:
     # -- fit ---------------------------------------------------------------
     @property
     def inversion(self):
-        """The :class:`SlipInversion` this model came out of.
+        """The `SlipInversion` this model came out of.
 
         Worth having in public because the Green's matrix is the expensive part
         and it is already built: re-solving at another smoothing weight, or
-        sweeping :meth:`SlipInversion.l_curve`, costs nothing extra through this
+        sweeping `SlipInversion.l_curve`, costs nothing extra through this
         handle and a full re-assembly without it. That matters most after
-        :func:`~slipsolve.predict.iterate_sampling`, which returns a model
+        `slipsolve.predict.iterate_sampling`, which returns a model
         built on observations the caller never assembled a matrix for.
 
-        ⚠️ A model from :meth:`load` has no matrix -- ``G`` is deliberately not
-        saved -- so the object comes back with ``g is None`` and can be read but
+        A model from `load` has no matrix -- `G` is deliberately not
+        saved -- so the object comes back with `g is None` and can be read but
         not re-solved.
         """
         return self._inversion
@@ -975,24 +930,24 @@ class SlipModel:
 
     @property
     def chi_square(self):
-        """``r' Cd^-1 r`` -- the misfit in the metric that was actually minimised.
+        """`r' Cd^-1 r` -- the misfit in the metric that was actually minimised.
 
-        ⚠️ :attr:`variance_reduction` and :attr:`rms_misfit` are computed on the
+        `variance_reduction` and `rms_misfit` are computed on the
         **unweighted** residual, so with a covariance model they report a
         different quantity from the one the solver optimised. Both are still
-        worth having -- rms in millimetres is what a reader understands, and VR is
-        what every earlier run recorded -- but this is the one that says whether
-        the fit is consistent with the stated noise.
+        worth having -- rms in millimetres is what a reader understands -- but
+        this is the one that says whether the fit is consistent with the stated
+        noise.
 
-        ⚠️ **``None`` unless a covariance model was supplied**, and that is the
+        **`None` unless a covariance model was supplied**, and that is the
         point rather than a limitation. Without one the whitening is a
-        multiplication by ``1/sqrt(n)``, so the sum of squares comes out around
-        ``1e-4`` times the residual norm -- a number in arbitrary units that looks
+        multiplication by `1/sqrt(n)`, so the sum of squares comes out around
+        `1e-4` times the residual norm -- a number in arbitrary units that looks
         like a chi-square, reads as a spectacularly good fit, and means nothing.
         A statistic that is only interpretable against a stated noise model should
         be absent when no noise model was stated.
 
-        Also ``None`` for a model whose inversion is gone (a loaded one), since
+        Also `None` for a model whose inversion is gone (a loaded one), since
         whitening needs the covariance factors and those are not saved.
         """
         inversion = self._inversion
@@ -1005,20 +960,19 @@ class SlipModel:
 
     @property
     def reduced_chi_square(self):
-        """:attr:`chi_square` per observation. **1.0 means the fit matches the noise.**
+        """`chi_square` per observation. **1.0 means the fit matches the noise.**
 
         Above 1 the model cannot explain the data to within its stated errors --
         either the noise model is optimistic or the fault geometry is wrong. Below
         1 the data is being over-fitted, or the noise was over-estimated.
 
         Divided by the observation count rather than by a degree-of-freedom count,
-        deliberately. The nominal ``n_obs - n_param`` is meaningless here: this
+        deliberately. The nominal `n_obs - n_param` is meaningless here: this
         problem routinely has more parameters than observations and the number
-        would go negative. The honest denominator is ``n_obs - trace(R)``, and
+        would go negative. The honest denominator is `n_obs - trace(R)`, and
         since a heavily damped inversion resolves only tens of parameters against
-        thousands of observations (38.7 of 1836 on the Venezuela run), ``n_obs``
-        is within a percent of it. Take ``trace(R)`` from
-        :func:`~slipsolve.resolution.resolution_report` when the percent
+        thousands of observations, `n_obs` is usually within a few percent of it.
+        Take `trace(R)` from `slipsolve.resolution.resolution_report` when that
         matters.
         """
         chi2 = self.chi_square
@@ -1041,40 +995,38 @@ class SlipModel:
         return float(self.slip_magnitude.max())
 
     def moment(self, shear_modulus=None, rule="integrated", order=MOMENT_ORDER):
-        """Scalar seismic moment, ``integral(mu * |slip|) dA``, in newton-metres.
+        """Scalar seismic moment, `integral(mu * |slip|) dA`, in newton-metres.
 
-        ``shear_modulus`` may be a scalar, one value per parameter, or a
-        :class:`~slipsolve.edgrn.VelocityModel`; ``None`` takes the inversion's own
+        `shear_modulus` may be a scalar, one value per parameter, or a
+        `slipsolve.edgrn.VelocityModel`; `None` takes the inversion's own
         velocity model, else 30 GPa. That is the point of a layered inversion
         reaching this far: a uniform 30 GPa overstates the rigidity of the shallow
         crust, so it overstates the moment of shallow slip.
 
-        ``rule`` says how the integral is taken:
+        `rule` says how the integral is taken:
 
-        * ``"integrated"`` (default) -- over the slip field the model holds. A
+        * `"integrated"` (default) -- over the slip field the model holds. A
           velocity model's rigidity is averaged **exactly** over each piece
-          (:meth:`~slipsolve.edgrn.VelocityModel.triangle_mean`, steps included);
+          (`slipsolve.edgrn.VelocityModel.triangle_mean`, steps included);
           the slip magnitude, which a tent field makes nonlinear inside an element,
-          is taken at the centroids of ``order**2`` sub-triangles per element. For
-          element-constant slip that is exact and ``order`` is ignored. One value per
+          is taken at the centroids of `order**2` sub-triangles per element. For
+          element-constant slip that is exact and `order` is ignored. One value per
           parameter is interpolated with the basis.
-        * ``"lumped"`` -- ``sum(mu_i * A_i * |s_i|)``, rigidity at each parameter's
-          own depth over its lumped area (a third of a node's 1-ring). What this
-          method returned before 2026-09-25, kept because the export node tables
-          partition it exactly (:meth:`to_vertex_text`).
+        * `"lumped"` -- `sum(mu_i * A_i * |s_i|)`, rigidity at each parameter's
+          own depth over its lumped area (a third of a node's 1-ring). Kept
+          because the export node tables partition it exactly (`to_vertex_text`).
 
-        ⚠️ **The lumped rule reads HIGH on a layered crust, by an amount that is not
-        a constant.** A node's third of its 1-ring reaches an element height above
-        and below it, all at the rigidity of the node's own depth -- across the
-        9 -> 34 GPa step at 2 km, for one. Measured on the Venezuela r84 model:
-        +1.9% in moment, Mw +0.0054; across rank-84 arms +0.0048...+0.0064, and
-        +0.0085 / +0.0111 at rank 240 / 340, where a rougher field makes the node
-        values less representative of the ground they stand for.
+        The lumped rule is biased on a layered crust, by an amount that is not a
+        constant: a node's third of its 1-ring reaches an element height above and
+        below it, all at the rigidity of the node's own depth, so it misplaces any
+        rigidity step it straddles. The bias can have either sign, depending on
+        where the nodes sit against the interfaces, and grows as a rougher field
+        makes the node values less representative of the ground around them.
 
         A fault between blocks of different rigidity (a
-        :class:`~slipsolve.bimaterial.Bimaterial` engine) takes the harmonic mean
-        of the two blocks' rigidities, :attr:`rigidity_factor` times the reference
-        block's; ``shear_modulus``, if given, is the reference block's.
+        `slipsolve.bimaterial.Bimaterial` engine) takes the harmonic mean
+        of the two blocks' rigidities, `rigidity_factor` times the reference
+        block's; `shear_modulus`, if given, is the reference block's.
         """
         factor = getattr(self, "rigidity_factor", None)
         if rule == "lumped":
@@ -1123,11 +1075,11 @@ class SlipModel:
 
     @property
     def rigidity_factor(self):
-        """Per element, the moment's rigidity over the rigidity model's; ``None`` for one block.
+        """Per element, the moment's rigidity over the rigidity model's; `None` for one block.
 
-        Set by a :class:`~slipsolve.bimaterial.Bimaterial` engine: the harmonic
+        Set by a `slipsolve.bimaterial.Bimaterial` engine: the harmonic
         mean of the two blocks' rigidities over the reference block's. A loaded
-        model reads it from its options, so it survives :meth:`save`.
+        model reads it from its options, so it survives `save`.
         """
         engine = getattr(getattr(self, "_inversion", None), "engine", None)
         if hasattr(engine, "rigidity_factor"):
@@ -1140,7 +1092,7 @@ class SlipModel:
         return None
 
     def _rigidity(self):
-        """The inversion's own velocity model, else ``DEFAULT_SHEAR_MODULUS``."""
+        """The inversion's own velocity model, else `DEFAULT_SHEAR_MODULUS`."""
         model = getattr(self._inversion, "velocity_model", None) or \
             self.options.get("velocity_model")
         if model is None:
@@ -1162,7 +1114,7 @@ class SlipModel:
     def shear_modulus(self):
         """The rigidity at each parameter's own depth.
 
-        What ``moment(rule="lumped")`` weights each parameter with, and what the
+        What `moment(rule="lumped")` weights each parameter with, and what the
         export tables print. The default integrated moment averages the rigidity
         over each element's depth range instead, which differs wherever an element
         straddles a layer interface. With a rigidity contrast it is the harmonic
@@ -1190,18 +1142,18 @@ class SlipModel:
 
     @property
     def ramp_design(self):
-        """The nuisance ramp's design columns, ``(n_obs, n_ramp)``.
+        """The nuisance ramp's design columns, `(n_obs, n_ramp)`.
 
-        Rebuilt from the observations when the model came from :meth:`load` --
-        ``ramp_columns`` is a pure function of ``obs`` and the ramp kind, the
-        same reasoning that lets ``roughness`` recover its smoothing operator
+        Rebuilt from the observations when the model came from `load` --
+        `ramp_columns` is a pure function of `obs` and the ramp kind, the
+        same reasoning that lets `roughness` recover its smoothing operator
         without storing a sparse matrix.
         """
         if self._ramp_design is None:
             kind = self.options.get("ramp")
             if kind is None:
-                # Written before the options carried the kind; the column count
-                # per track identifies it exactly.
+                # Saved without the kind in its options; the column count per
+                # track identifies it exactly.
                 kind = ramp_kind_for(self.ramp.size, len(self.obs.tracks))
             self._ramp_design = ramp_columns(self.obs, kind)[0]
         return self._ramp_design
@@ -1215,7 +1167,7 @@ class SlipModel:
         trend sits on top. It is *not* part of the fault's prediction, and
         looking at the two together is how a ramp that has drifted into eating
         the earthquake gets caught -- variance reduction cannot see it (see
-        :func:`~slipsolve.regularize.ramp_columns`).
+        `slipsolve.regularize.ramp_columns`).
         """
         if self.ramp.size == 0:
             return np.zeros_like(self.data)
@@ -1225,8 +1177,8 @@ class SlipModel:
     def fault_prediction(self):
         """The model with its ramp removed: displacement the *slip* explains.
 
-        This is the panel to compare against ``data - ramp_prediction``; the
-        full :attr:`prediction` flatters the fit by however much the nuisance
+        This is the panel to compare against `data - ramp_prediction`; the
+        full `prediction` flatters the fit by however much the nuisance
         columns are carrying.
         """
         return self.prediction - self.ramp_prediction
@@ -1234,7 +1186,7 @@ class SlipModel:
     # -- forward -----------------------------------------------------------
     @property
     def element_slip(self):
-        """``(n_elements, 2)`` slip per element, whatever the basis.
+        """`(n_elements, 2)` slip per element, whatever the basis.
 
         The engines are defined on elements, so this is the form anything that
         evaluates the model needs. For element-constant slip it is the parameters
@@ -1256,25 +1208,27 @@ class SlipModel:
                              exclude_within=None, block=4096):
         """The full three-component surface displacement field this model predicts.
 
-        Returns an :class:`xarray.Dataset` on the mesh's own local frame with
-        ``ux``, ``uy`` and ``uz`` -- east, north and up in metres, positive in
+        Returns an `xarray.Dataset` on the mesh's own local frame with
+        `ux`, `uy` and `uz` -- east, north and up in metres, positive in
         those directions. This is the model's *prediction of the ground*, not of
         any satellite: line of sight collapses three components into one, and what
         an inversion recovers is the full vector, so it is worth being able to
         look at it. Ascending and descending line-of-sight fields can be checked
         against it, and the horizontal field is what a GPS network would measure.
 
-        ``bounds`` is ``(x_min, x_max, y_min, y_max)`` in local-frame metres;
-        without it the mesh's footprint plus ``pad`` is used.
+        `bounds` is `(x_min, x_max, y_min, y_max)` in local-frame metres;
+        without it the mesh's footprint plus `pad` is used.
 
-        Evaluated in blocks of ``block`` points, because the engines build a
-        ``(points, 3, 2 * n_elements)`` array and a 1 km grid over a real
-        footprint would ask for gigabytes of it -- 60 000 points against 1148
-        elements is 3.3 GB. The block never materialises more than a few tens of
-        megabytes.
+        Evaluated in blocks of `block` points, because the engines build a
+        `(points, 3, 2 * n_elements)` array and a 1 km grid over a real
+        footprint would ask for gigabytes of it. The block never materialises
+        more than a few tens of megabytes.
+
+        It forwards `element_slip`, each element's mean slip, even where
+        `forward` would use the nodal tents.
 
         Grid points on the fault trace are a genuine singularity, so points within
-        ``exclude_within`` of the surface trace come back NaN rather than
+        `exclude_within` of the surface trace come back NaN rather than
         non-finite or, worse, enormous. It defaults to the mesh's own element
         size, which is the scale below which a discretised fault does not mean
         anything anyway.
@@ -1325,17 +1279,17 @@ class SlipModel:
                         smoothing=self.smoothing, spacing=float(spacing),
                         exclude_within=float(exclude_within))
         # `local_crs`, not `crs`: this grid's x/y are local metres, and the frame's
-        # bare projection would place them 500 km east and 1167 km south of where
-        # they are -- which `to_grd` would then bake into a lon/lat file.
+        # bare projection is offset from them by the origin's projected position
+        # (its false easting, and its distance from the equator) -- an error
+        # `to_grd` would then bake into a lon/lat file.
         return ds.rio.write_crs(self.mesh.frame.local_crs)
 
     def to_grd(self, outdir, fields=("ux", "uy", "uz"), **kwargs):
-        """Write the surface displacement field as GMT ``.grd`` files.
+        """Write the surface displacement field as GMT `.grd` files.
 
-        One single-variable grid per component, reprojected to lon/lat by the
-        same :func:`slipsolve._geo.write_grd`, vendored from the raster package,
-        so the files drop straight into an existing GMT workflow. Extra keyword
-        arguments go to :meth:`surface_displacement`.
+        One single-variable grid per component, reprojected to lon/lat by
+        `slipsolve._geo.write_grd`, so the files drop straight into an existing
+        GMT workflow. Extra keyword arguments go to `surface_displacement`.
         """
         from pathlib import Path
 
@@ -1349,21 +1303,19 @@ class SlipModel:
         if unknown:
             raise KeyError(
                 f"Unknown field(s) {sorted(unknown)}; available: {sorted(grid.data_vars)}")
-        # `local_crs`, matching what `surface_displacement` already tagged the grid
-        # with. Re-tagging with the frame's bare projection here is the exact
-        # crs/local_crs mix-up that method's comment warns about: the grid is in
-        # local metres, so the bare projection writes the file 500 km east and
-        # 1167 km south of the fault -- plausible-looking, and wrong.
+        # `local_crs`, as `surface_displacement` tagged the grid. Re-tagging with
+        # the frame's bare projection would write a plausible-looking file far
+        # from the fault.
         return [write_grd(grid[name].rio.write_crs(self.mesh.frame.local_crs),
                           outdir / f"{name}.grd") for name in fields]
 
     # -- output ------------------------------------------------------------
     def to_dataset(self):
-        """The model as an :class:`xarray.Dataset` on ``element`` and ``obs``.
+        """The model as an `xarray.Dataset` on `element` and `obs`.
 
         Slip is reported **per element** in either basis, so the file format does
         not change with the parameterization; the parameters themselves are kept
-        alongside under ``coefficient``.
+        alongside under `coefficient`.
         """
         import xarray as xr
 
@@ -1422,7 +1374,7 @@ class SlipModel:
             )
 
     def _lonlat(self, points):
-        """Geographic coordinates of local-frame ``(n, 2+)`` points."""
+        """Geographic coordinates of local-frame `(n, 2+)` points."""
         if self.mesh.frame is None:
             raise ValueError(
                 "Writing a geographic table needs the mesh's LocalFrame; this mesh "
@@ -1452,22 +1404,21 @@ class SlipModel:
         return np.broadcast_to(np.asarray(shear_modulus, dtype=float), np.shape(depths))
 
     def nodal_slip(self):
-        """``(n_nodes, 2)`` slip at the mesh's nodes, whatever the basis.
+        """`(n_nodes, 2)` slip at the mesh's nodes, whatever the basis.
 
-        For a nodal model these *are* the parameters -- ``strike_slip`` and
-        ``dip_slip`` are already indexed like ``mesh.nodes``, so nothing is
+        For a nodal model these *are* the parameters -- `strike_slip` and
+        `dip_slip` are already indexed like `mesh.nodes`, so nothing is
         transformed. For an element model the element values are scattered back
         onto the nodes area-weighted.
 
         That scatter conserves the slip integral **componentwise and exactly**:
-        ``P``'s rows sum to one and ``lumped_areas == P.T @ areas``, so
-        ``sum(lumped_areas * nodal) == sum(areas * element)`` for strike and dip
-        slip separately (measured: agreement to 3e-16). It does **not** conserve
-        the sum of slip *magnitudes*, because a magnitude is not linear -- an
-        element's value is the mean of three nodes, and the mean of three vectors
-        is shorter than the mean of their lengths whenever they disagree. Measured
-        on the recovery fixture the two magnitude sums differ by 0.9%, so do not
-        use one as a check on the other.
+        `P`'s rows sum to one and `lumped_areas == P.T @ areas`, so
+        `sum(lumped_areas * nodal) == sum(areas * element)` for strike and dip
+        slip separately. It does **not** conserve the sum of slip *magnitudes*,
+        because a magnitude is not linear -- an element's value is the mean of
+        three nodes, and the mean of three vectors is shorter than the mean of
+        their lengths whenever they disagree. The two magnitude sums can differ
+        by about a percent, so do not use one as a check on the other.
         """
         if self.basis.name == "node":
             return np.column_stack([self.strike_slip, self.dip_slip])
@@ -1484,15 +1435,15 @@ class SlipModel:
     def to_text(self, path, shear_modulus=None):
         """Write the reference implementation's ten-column element table.
 
-        ``element_id lon lat depth_m strike_deg dip_deg strike_slip_m dip_slip_m
-        area_m2 shear_modulus_pa`` -- the format of SlipSolve's
-        ``simple_triangular_model.txt``, so downstream GMT scripts work unchanged.
+        `element_id lon lat depth_m strike_deg dip_deg strike_slip_m dip_slip_m
+        area_m2 shear_modulus_pa` -- the format of SlipSolve's
+        `simple_triangular_model.txt`, so downstream GMT scripts work unchanged.
 
         Column 10 is the rigidity the inversion's own velocity model gives at each
         element's centroid depth, or 30 GPa if it had none -- the rigidity actually
-        used rather than a constant that may not be. ⚠️ It is the value
-        ``moment(rule="lumped")`` weights an element with; the default integrated
-        :meth:`moment` averages the rigidity over the element's depth range, which
+        used rather than a constant that may not be. It is the value
+        `moment(rule="lumped")` weights an element with; the default integrated
+        `moment` averages the rigidity over the element's depth range, which
         differs wherever an element straddles a layer interface. With a rigidity
         contrast it is the two blocks' harmonic mean, as the moment uses.
         """
@@ -1516,35 +1467,36 @@ class SlipModel:
     def to_vertex_text(self, outdir, shear_modulus=None):
         """Write the mesh's vertices and its connectivity as two tables.
 
-        ``to_text`` describes elements by their *centroids*, which is enough to map
+        `to_text` describes elements by their *centroids*, which is enough to map
         slip but not to rebuild the fault: it says nothing about where a triangle's
         corners are or which triangles share one. This pair does, and it reports
-        slip **at the nodes** -- which for ``basis="node"`` is what was actually
-        solved for, rather than the per-element mean ``to_text`` prints.
+        slip **at the nodes** -- which for `basis="node"` is what was actually
+        solved for, rather than the per-element mean `to_text` prints.
 
-        ``vert_nodes.txt``, one row per node::
+        `vert_nodes.txt`, one row per node:
 
             node_id longitude_deg latitude_deg depth_m along_strike_m
             strike_slip_m dip_slip_m area_m2 shear_modulus_pa
 
-        ``vert_elements.txt``, one row per element::
+        `vert_elements.txt`, one row per element:
 
             element_id node_1 node_2 node_3
 
-        Conventions follow :meth:`to_text` throughout: tab-delimited, one header
+        Conventions follow `to_text` throughout: tab-delimited, one header
         line, depth in metres negative-down, slip in metres with positive
-        strike-slip left-lateral, and **1-based** ids. ``element_id`` is the same
-        numbering ``to_text`` uses, so row *i* of ``vert_elements.txt`` is row *i* of
-        ``slip_model.txt`` -- the two join without a key.
+        strike-slip left-lateral, and **1-based** ids. `element_id` is the same
+        numbering `to_text` uses, so row *i* of `vert_elements.txt` is row *i* of
+        the `to_text` table -- the two join without a key.
 
-        ``area_m2`` is the node's **lumped** area -- a third of its 1-ring -- not an
+        `area_m2` is the node's **lumped** area -- a third of its 1-ring -- not an
         element area, so the rows are a partition of the fault and
-        ``sum(shear_modulus * area * hypot(strike_slip, dip_slip))`` over this file
-        reproduces ``moment(rule="lumped")`` exactly for a nodal model. ⚠️ Not the
-        default :meth:`moment`, which integrates over the tent field and reads
-        0.5-2% lower on a layered crust (see its docstring). Nor does it agree with
-        the same sum over ``slip_model.txt`` to better than about a percent; see
-        :meth:`nodal_slip` for why that is expected rather than an inconsistency.
+        `sum(shear_modulus * area * hypot(strike_slip, dip_slip))` over this file
+        reproduces `moment(rule="lumped")` exactly for a nodal model. Not the
+        default `moment`, which integrates over the tent field and can differ
+        from it by a percent or more on a layered crust (see its docstring). Nor
+        does it agree with the same sum over the `to_text` table to better than
+        about a percent; see `nodal_slip` for why that is expected rather than an
+        inconsistency.
 
         Returns both paths.
         """
@@ -1605,30 +1557,28 @@ class SlipModel:
 
     # -- save / load -------------------------------------------------------
     def save(self, path):
-        """Write the whole model to one self-contained netCDF file.
+        """Write the whole model to one self-contained file, a zipped Zarr store.
 
         Everything needed to work with the result later travels with it -- the
-        slip vector, the fit, the mesh, and the observations -- in three netCDF
-        groups (``model``, ``mesh``, ``observations``). :meth:`load` gives back a
-        :class:`SlipModel` that reports every statistic, re-exports with
-        :meth:`to_text`, plots, and can :meth:`forward`-model new points.
+        slip vector, the fit, the mesh, and the observations -- in three groups
+        (`model`, `mesh`, `observations`). `load` gives back a
+        `SlipModel` that reports every statistic, re-exports with
+        `to_text`, plots, and can `forward`-model new points.
 
-        This is the counterpart to a long run: solve under ``nohup``, save, and
-        come back to it in a notebook. Unlike :meth:`persist` it needs no
-        :class:`~nisar_tools.workspace.Workspace` and produces a single file that
-        can just be copied off the machine that ran it.
+        This is the counterpart to a long run: solve under `nohup`, save, and
+        come back to it in a notebook. Unlike `persist` it needs no workspace
+        and produces a single file that can just be copied off the machine that
+        ran it.
 
-        The container is a **zipped Zarr store** rather than netCDF: netCDF
-        groups need a backend the environment does not have (only scipy's
-        group-less one is installed), while ``zarr`` is already a hard dependency
-        -- and its attributes are JSON, so the provenance dicts (``options``,
-        ``frame``, ``quadtree``) round-trip natively instead of needing an
-        encoding layer.
+        Zarr rather than netCDF: netCDF groups need a backend beyond scipy's
+        group-less one, while `zarr` is already a dependency -- and its
+        attributes are JSON, so the provenance dicts (`options`, `frame`,
+        `quadtree`) round-trip natively instead of needing an encoding layer.
 
         The **Green's matrix is deliberately not saved** -- it is the largest
         object in the problem (hundreds of megabytes) and nothing downstream of a
         solved model needs it. A loaded model therefore cannot be re-solved at a
-        new smoothing weight; rebuild the :class:`SlipInversion` for that.
+        new smoothing weight; rebuild the `SlipInversion` for that.
         """
         import zarr
 
@@ -1656,7 +1606,7 @@ class SlipModel:
 
     @classmethod
     def load(cls, path):
-        """Read back a model written by :meth:`save`."""
+        """Read back a model written by `save`."""
         import xarray as xr
         import zarr
 
@@ -1699,10 +1649,9 @@ class SlipModel:
         self.ramp = self.x[2 * n:]
         self.data = np.asarray(model["data"].values, dtype=float)
         self.prediction = np.asarray(model["prediction"].values, dtype=float)
-        # Recomputed rather than read back. It is a pure function of the two
-        # fields above, so deriving it costs nothing and means a file written
-        # before the residual convention changed to observed-minus-modelled loads
-        # with the current sign instead of a silently mirrored one.
+        # Recomputed rather than read back: it is a pure function of the two
+        # fields above, and recomputing gives every file the observed-minus-
+        # modelled sign, whatever convention it was written with.
         self.residual = self.data - self.prediction
 
         # The smoothing operator is a pure function of the mesh and the options,

@@ -1,8 +1,8 @@
 """Strain kernels for the 3-D heterogeneity engine: the half-space TDE and the layered remainder.
 
-The heterogeneous engine (``slipsolve.heterogeneity``) needs the strain of every
+The heterogeneous engine (`slipsolve.heterogeneity`) needs the strain of every
 fault element at every voxel centre, at depth, and the strain of point moment sources in
-the layered reference. These pin the strain against independent references: ``cutde``'s
+the layered reference. These pin the strain against independent references: `cutde`'s
 analytic triangular-dislocation strain, the free surface's traction-free condition, and
 finite differences of the displacement kernels already validated elsewhere.
 """
@@ -43,11 +43,11 @@ def _receivers(tri, n=120, near=0.03, far=60.0, seed=0):
 
 @pytest.mark.parametrize("name", list(TRIANGLES))
 def test_the_strain_matches_cutde(name):
-    """Central differences against ``cutde``'s analytic strain, receivers at depth and at the surface.
+    """Central differences against `cutde`'s analytic strain, receivers at depth and at the surface.
 
-    ``cutde`` orders strain ``(xx, yy, zz, xy, xz, yz)`` with tensor shears and slip
-    ``(strike, dip, tensile)``, as :data:`STRAIN_COMPONENTS` and the TDE do. Measured
-    worst 1.4e-7 of each point's peak within 10 sizes (2026-11-04); the bar is 1e-6.
+    `cutde` orders strain `(xx, yy, zz, xy, xz, yz)` with tensor shears and slip
+    `(strike, dip, tensile)`, as `STRAIN_COMPONENTS` and the TDE do. The worst is
+    1.4e-7 of each point's peak within 10 sizes; the bar is 1e-6.
     """
     hs = pytest.importorskip("cutde.halfspace")
     tri = TRIANGLES[name]
@@ -182,11 +182,11 @@ def test_the_remainders_depth_derivatives_are_continuous_at_the_source():
 def test_the_radial_derivative_of_a_hankel_transform(order):
     """``int k^n e^{-ak} J_n(kr) k dk = 2a (2r)^n Gamma(n + 3/2) / (sqrt(pi) (a^2 + r^2)^(n + 3/2))``.
 
-    Gradshteyn & Ryzhik 6.623.2. Its ``r``-derivative tests the ``J_{n-1}``, ``J_{n+1}``
-    recipe, ``J_{-1} = -J_1`` included, on the solver's own wavenumber grid. At FFTLog's
-    own nodes the transform is exact to 5e-14; what is left (4e-6 to 4e-5 of the peak,
-    measured 2026-11-04) is the linear interpolation in ``log r`` between them, which every
-    table shares and which the tables' own 25-50 nodes a decade dwarf.
+    Gradshteyn & Ryzhik 6.623.2. Its `r`-derivative tests the `J_{n-1}`, `J_{n+1}`
+    recipe, `J_{-1} = -J_1` included, on the solver's own wavenumber grid. At FFTLog's
+    own nodes the transform is exact to 5e-14; what is left (4e-6 to 4e-5 of the peak)
+    is the linear interpolation in `log r` between them, which every table shares and
+    which the tables' own 25-50 nodes a decade dwarf.
     """
     k, dln = wn.wavenumbers()
     a = 1000.0
@@ -277,10 +277,10 @@ def test_a_uniform_crust_is_the_analytic_point_source_strain(name, z_r):
     """The cylindrical-to-Cartesian assembly against a tiny triangle's analytic strain.
 
     Source at 5 km, receivers above it, below it and near the surface, 300 m - 30 km,
-    six azimuths. Measured (2026-11-04) at most 2.7e-5 of the peak, the displacement
-    path's own level; insensitive to the triangle's size (1 or 5 m), so the point-source
-    approximation is not what is measured. Finite differences of the 1 m triangle are no
-    reference here (5e-3: it is 30,000 sizes away).
+    six azimuths. At most 2.7e-5 of the peak, the displacement path's own level, and
+    insensitive to the triangle's size (1 or 5 m), so the point-source approximation is
+    not what is measured. Finite differences of the 1 m triangle are no reference here
+    (5e-3: it is 30,000 sizes away).
     """
     z_s = 5000.0
     r = np.geomspace(300.0, 30e3, 13)
@@ -298,11 +298,11 @@ def test_a_uniform_crust_is_the_analytic_point_source_strain(name, z_r):
 def test_on_the_axis_the_strain_has_its_limit():
     """Directly above and below the source, and centimetres to metres off it.
 
-    Here an explicit ``1/r`` multiplied FFTLog's absolute error floor: a strike-slip
-    source read 1000x its strain on the axis, O(1) at 10 cm, 4.5e-3 at 1 m (2026-11-04).
-    The ``1/r`` columns (Bessel recurrence) have no division: measured 5e-6 to 3.3e-5 of
-    the peak at ``r = 0`` (which takes the transform's first node, a few cm out) and about
-    1e-7 from 1 cm to 10 m.
+    Here an explicit `1/r` would multiply FFTLog's absolute error floor: a strike-slip
+    source would read 1000x its strain on the axis, O(1) at 10 cm and 4.5e-3 at 1 m.
+    The `1/r` columns (Bessel recurrence) have no division: 5e-6 to 3.3e-5 of the peak
+    at `r = 0` (which takes the transform's first node, a few cm out) and about 1e-7
+    from 1 cm to 10 m.
     The bar is relative to the field's peak over a sphere at the same distance, since
     on the axis a double couple's own strain can nearly vanish.
     """
@@ -339,10 +339,10 @@ def test_a_moment_tensor_packs_like_its_dislocation():
 # -- the stored strain tables (RemainderTables(strain=True)) ---------------------------------
 @pytest.fixture(scope="module")
 def strain_tables():
-    """The two-layer crust on ``test_slip_layered_tde.py``'s grids with strain, but 1 km apart at depth.
+    """The two-layer crust on `test_slip_layered_tde.py`'s grids with strain, but 1 km apart at depth.
 
     The strain needs the finer deep spacing: at that file's 3 km the remainder's strain
-    was 8e-2 of itself off at the median (2026-11-04), second order in the spacing.
+    is 8e-2 of itself off at the median, second order in the spacing.
     """
     tops, _, _ = wn.layer_stack(TWO_LAYERS)
     z = wn.depth_grid(tops, z_max=40e3, first=10.0, growth=1.6, spacing=400.0, deep_spacing=1000.0)
@@ -450,11 +450,11 @@ def test_a_one_layer_crust_is_the_half_space_strain():
 
 @pytest.mark.parametrize("vertices", [BELOW, CROSSING], ids=["below", "crossing"])
 def test_the_three_tents_add_up_to_the_element_strain(strain_tables, vertices):
-    """``sum_j tent_j = 1`` on the triangle, so the tents' strains add up to the element's.
+    """`sum_j tent_j = 1` on the triangle, so the tents' strains add up to the element's.
 
-    This is the level-set rule's accuracy (:data:`~slipsolve.layered_tde.STRAIN_TENT_GAIN`):
-    measured at most 9e-5 of each point's peak from 0.6 to 30 sizes (2026-11-04), where
-    displacement's rule (two points far away) left 5e-3 at 3 sizes.
+    This is the level-set rule's accuracy (`slipsolve.layered_tde.STRAIN_TENT_GAIN`):
+    at most 9e-5 of each point's peak from 0.6 to 30 sizes, where displacement's rule
+    (two points far away) leaves 5e-3 at 3 sizes.
     """
     engine = LayeredTDE(strain_tables)
     pts = _around(vertices, 40, 0.6, 30.0, seed=2)
@@ -468,17 +468,16 @@ def test_the_three_tents_add_up_to_the_element_strain(strain_tables, vertices):
 def test_far_away_the_strain_is_the_point_source_sum(strain_tables, vertices):
     """Half-space TDE strain plus the tabulated remainder against the whole layered kernel's point sources.
 
-    ⚠️ Receivers are kept 1.5 km or more in depth from every point of the triangle: the
+    Receivers are kept 1.5 km or more in depth from every point of the triangle: the
     whole kernel at nearly the source's depth barely decays in wavenumber, and the
-    strain's extra power of ``k`` spoils FFTLog's cancellation at 25 km (a receiver 1 km
-    deep beside the crossing triangle read 100x its neighbours, 2026-11-04). The engine
-    never meets this: its remainder decays by the images. The near path's construction, so
+    strain's extra power of `k` spoils FFTLog's cancellation at 25 km (a receiver 1 km
+    deep beside the crossing triangle reads 100x its neighbours). The engine never
+    meets this: its remainder decays by the images. The near path's construction, so
     the far path is off here (it has its own test).
 
     The bar is the coarse test tables': against references converged in their order (4, 8
-    and 12 agree to 7e-4), both the centroid-rule remainder (``ef53e31``) and the
-    quadratic rule measure 1e-3 to 5.0e-3 on the crossing triangle (2026-11-04); the old
-    5e-3 bar sat on that floor, and the order-4 reference reads 5.1e-3 for the new rule.
+    and 12 agree to 7e-4), the error is 1e-3 to 5e-3 on the crossing triangle with either
+    remainder rule, and 5.1e-3 against the order-4 reference used here.
     """
     engine = LayeredTDE(strain_tables, far=None)
     top, bottom = -vertices[:, 2].min(), -vertices[:, 2].max()
@@ -497,7 +496,7 @@ def test_far_away_the_point_source_path_is_the_dislocation_path(strain_tables, v
     """Beyond ``far`` sizes: Okada point sources plus the remainder, against the level-set path.
 
     Both paths converge to the same field: with tolerance 1e-7 they agree to 3e-5 / 1e-4
-    (below / crossing the interface) of each receiver's peak at 4-40 sizes (2026-11-04).
+    (below / crossing the interface) of each receiver's peak at 4-40 sizes.
     At the defaults the far path is the closer of the two to that limit (tents 3e-5 /
     1.2e-4 against the near path's 3e-4 / 5e-4), so this bar is the near path's.
     """
@@ -530,9 +529,9 @@ def test_the_collapsed_gauss_rule_is_exact_below_degree_2n():
 
 @pytest.mark.parametrize("vertices", [BELOW, CROSSING], ids=["below", "crossing"])
 def test_the_far_rules_agree(strain_tables, vertices):
-    """The far path's collapsed Gauss rule against the composite rule it replaced (2026-11-05).
+    """The far path's collapsed Gauss rule (the default) against the composite rule.
 
-    On the Venezuela v3 tables both sit within the tables' ~1e-3 floor of a converged rule
+    On realistic layered tables both sit within the tables' ~1e-3 floor of a converged rule
     (Gauss 1e-4 to 1.3e-3, composite 5e-5 to 8e-4) at 4-45 sizes, the Gauss rule 1-9x faster.
     """
     pts = _around(vertices, 12, 4.5, 30.0, seed=9)
@@ -588,10 +587,10 @@ def test_the_tabulated_remainder_strain_is_the_remainders(strain_tables, vertice
     """The remainder alone -- the element's strain less its pieces' half-space strain -- against exact kernels.
 
     This is all the tables touch, and their grids bound it, at second order in the
-    spacing. Measured at 1-12 sizes (2026-11-04), median / max of the remainder's own
-    peak: 31 depths and 20 distances a decade 8e-2 / 0.27; 66 and 30, 1.6e-2 / 0.1; 133
-    and 40, 2.6e-3 / 1.7e-2. The quadrature tolerance (3e-3 or 3e-4) changed nothing.
-    On this fixture 0.05-0.10.
+    spacing. At 1-12 sizes, median / max of the remainder's own peak: 31 depths and 20
+    distances a decade 8e-2 / 0.27; 66 and 30, 1.6e-2 / 0.1; 133 and 40, 2.6e-3 /
+    1.7e-2. The quadrature tolerance (3e-3 or 3e-4) changes nothing. On this fixture
+    0.05-0.10.
     """
     engine = LayeredTDE(strain_tables, far=None)
     pts = _around(vertices, 4, 1.5, 6.0, seed=3)
@@ -608,9 +607,9 @@ def test_the_tabulated_remainder_strain_is_the_remainders(strain_tables, vertice
 
 
 def test_many_triangles_strain_matches_cutde():
-    """The batched strain (one difference stencil a point for all triangles) against ``cutde``.
+    """The batched strain (one difference stencil a point for all triangles) against `cutde`.
 
-    Measured 3e-8 to 7e-8 of each point's peak (2026-11-04), as good as the scalar kernel.
+    It agrees to 3e-8 to 7e-8 of each point's peak, as good as the scalar kernel.
     """
     hs = pytest.importorskip("cutde.halfspace")
     from slipsolve._tde import tde_strain_hs_unit_many

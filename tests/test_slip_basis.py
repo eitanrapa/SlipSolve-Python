@@ -67,7 +67,7 @@ def test_lumped_areas_partition_the_fault(mesh):
 
 
 def test_projection_preserves_each_basis_function_moment(mesh):
-    """``P.T @ element_areas`` must be the lumped areas, exactly.
+    """`P.T @ element_areas` must be the lumped areas, exactly.
 
     This is what makes the mean-slip projection legitimate: it replaces a tent
     with its average over each triangle, and an average has the same integral.
@@ -139,7 +139,7 @@ def test_laplace_beltrami_weights_are_never_negative(mesh):
     A cotangent weight goes negative across an obtuse pair of triangles, which
     turns the smoother into an anti-smoother on part of the mesh: it would
     *reward* a jump between those two nodes. The fallback exists to prevent that,
-    so the off-diagonal entries must all be non-positive in ``D - W`` form.
+    so the off-diagonal entries must all be non-positive in `D - W` form.
     """
     operator = laplace_beltrami(mesh, form="dirichlet").toarray()
     off_diagonal = operator - np.diag(np.diag(operator))
@@ -243,8 +243,8 @@ def test_moment_accepts_a_velocity_model(scene):
 def _crust():
     from slipsolve import VelocityModel
 
-    # The Venezuela CRUST2.0 mean profile: a 9 GPa sedimentary lid over a
-    # 34-46 GPa crust. Doubled rows are EDGRN's way of writing a discontinuity.
+    # A CRUST2.0 mean profile: a 9 GPa sedimentary lid over a 34-46 GPa crust.
+    # Doubled rows are EDGRN's way of writing a discontinuity.
     return VelocityModel(
         depth=[0, 2e3, 2e3, 10.58e3, 10.58e3, 19.25e3, 19.25e3, 27.92e3],
         vp=[3.75e3] * 2 + [6.10e3] * 2 + [6.50e3] * 2 + [7.00e3] * 2,
@@ -254,13 +254,11 @@ def _crust():
 
 
 def test_velocity_model_reaches_every_reported_statistic(scene):
-    """``SlipInversion(velocity_model=...)`` must change what ``repr`` says.
+    """`SlipInversion(velocity_model=...)` must reach every statistic the model reports.
 
-    Before this was wired, ``SlipModel`` had the code to read a velocity model out
-    of its options but nothing ever put one there -- so ``moment()``,
-    ``moment_magnitude``, ``to_dataset`` and ``repr`` all silently assumed 30 GPa
-    even for a layered inversion. On this fixture that is a 30% error in moment
-    and 0.08 in Mw, reported without a hint that anything was assumed.
+    If the velocity model is not carried into the model's options, `moment()`,
+    `moment_magnitude`, `to_dataset` and `repr` silently assume 30 GPa even for a
+    layered inversion. On this fixture that is a 30% error in moment and 0.08 in Mw.
     """
     mesh, _, obs = scene
     crust = _crust()
@@ -320,14 +318,14 @@ def test_to_text_records_the_rigidity_it_used(scene, tmp_path):
 
 
 def test_a_thin_shallow_layer_needs_thin_elements_to_be_seen(mesh):
-    """Rigidity SAMPLED at element centroids needs the mesh to resolve the lid.
+    """Rigidity sampled at element centroids needs the mesh to resolve the lid.
 
-    The Venezuela profile's 9 GPa sedimentary layer is only 2 km thick. A mesh with
-    6 km levels puts its shallowest centroid *below* it and never sees 9 GPa at all
+    The profile's 9 GPa sedimentary layer is only 2 km thick. A mesh with 6 km
+    levels puts its shallowest centroid *below* it and never sees 9 GPa at all
     -- the softest rigidity it samples is the 33.7 GPa upper crust. That is what
-    ``to_text``'s rigidity column and ``moment(rule="lumped")`` see. ⚠️ Since
-    2026-09-25 the default moment averages the rigidity over each element exactly,
-    so the lid enters it on any mesh (next test); grading for it is no longer needed.
+    `to_text`'s rigidity column and `moment(rule="lumped")` see. The default
+    moment averages the rigidity over each element exactly, so the lid enters it
+    on any mesh (tested below).
     """
     trace = FaultTrace(_LON, _LAT, name="test_fault")
     frame = trace.local_frame()
@@ -354,8 +352,8 @@ def _uniform_slip(model, strike=-1.5, dip=0.5):
 def test_integrated_moment_is_exact_for_uniform_slip(scene, basis):
     """Constant slip leaves only the rigidity to integrate, which is done exactly.
 
-    So the answer is ``|s| * sum(area * element-mean rigidity)`` at ANY order, and
-    with a flat rigidity it is ``mu * |s| * total area`` -- which the lumped rule
+    So the answer is `|s| * sum(area * element-mean rigidity)` at any order, and
+    with a flat rigidity it is `mu * |s| * total area` -- which the lumped rule
     gets right too, because there is nothing for the lumping to misplace.
     """
     mesh, _, obs = scene
@@ -373,7 +371,7 @@ def test_integrated_moment_sees_a_lid_the_mesh_does_not_resolve(mesh, scene):
     """The 2 km, 9 GPa lid enters the moment of a 6 km mesh, where sampling misses it.
 
     The fixture's top row is ~6 km tall. Its lumped moment weights every top-row
-    node with the rigidity AT the node -- 9 GPa at the surface, applied to a third
+    node with the rigidity at the node -- 9 GPa at the surface, applied to a third
     of a 1-ring that is mostly 33.7 GPa crust -- while the integrated moment takes
     the exact area share of each layer.
     """
@@ -395,9 +393,9 @@ def test_integrated_moment_converges_and_matches_brute_force(scene):
 
     This fixture is the hard case -- 6.7 km rows with the 2 km lid step inside the
     top one, and dip slip changing sign in a third of the elements -- so the
-    default order is 6.3e-4 off here against ~1e-5 on production meshes
-    (``MOMENT_ORDER``). Brute force samples BOTH the slip and the rigidity at
-    200**2 centroids per element: first order in the rigidity steps, so it is the
+    default order (`MOMENT_ORDER`) is 6.3e-4 off here, where a finer mesh gets
+    ~1e-5. Brute force samples both the slip and the rigidity at 200**2
+    centroids per element: first order in the rigidity steps, so it is the
     loose, independent reference.
     """
     from slipsolve.layered import _triangle_quadrature
@@ -450,22 +448,15 @@ def test_layered_engine_ignores_nu(scene):
 #
 # `_edge_weight` uses the cotangent weight where it is safe and Floater's
 # mean-value weight where it is not (obtuse opposite angle, or a boundary edge
-# with only one adjacent triangle). The cotangent weight is **dimensionless**;
-# Floater's is `.../|ij|`, one over a length. Mixed unscaled on a metre-unit mesh
-# with kilometre edges, the fallback lands ~2400x weaker -- and the confirmation
-# was exact on the real mesh: `cot / mean_value` measured **2397** against a
-# median edge length of **2397 m**. The ratio *was* the edge length.
-#
-# The consequence was not subtle. A node whose edges *all* fall back keeps almost
-# no regularisation, and on the real unstructured Venezuela mesh exactly one node
-# did -- on the free surface, the one boundary with no zero-slip row to save it.
-# Its smoothing row came out 1342x weaker than the median, its model resolution
-# 0.998 (best of 368 parameters, purely because nothing damped it), and it took
-# 4.59 m of slip against a 2.37 m second place -- *growing* with the smoothing
-# weight, to 6.47 m at lambda 300 and onto the 8 m bound at lambda 1000.
+# with only one adjacent triangle). The cotangent weight is dimensionless;
+# Floater's is `.../|ij|`, one over a length, so it is scaled by `|ij| / 2`.
+# Mixed unscaled on a metre-unit mesh, the fallback is weaker by about the edge
+# length, and a node whose edges all fall back keeps almost no regularisation.
+# On the free surface, the one boundary with no zero-slip row, such a node runs
+# free: its slip grows with the smoothing weight instead of shrinking.
 
 def test_the_smoothing_operator_does_not_depend_on_the_units_of_the_mesh(mesh):
-    """The bug, stated directly: relative weights must not care about metres.
+    """Relative weights must not depend on the mesh's length unit.
 
     A mesh scaled by 1000 is the same mesh. If the two weight families are on
     different scales, the *proportion* of edges taking each one changes nothing
@@ -490,8 +481,7 @@ def test_the_smoothing_operator_does_not_depend_on_the_units_of_the_mesh(mesh):
 def test_no_node_is_left_effectively_unregularised(mesh):
     """No smoothing row may be orders of magnitude weaker than typical.
 
-    That is what "unregularised free parameter" looks like in this operator, and
-    it is how the 4.59 m spike happened.
+    That is what an unregularised free parameter looks like in this operator.
     """
     from slipsolve.regularize import laplace_beltrami as lb
 

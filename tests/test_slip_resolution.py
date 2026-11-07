@@ -7,10 +7,9 @@ make it usable: that it behaves like a resolution (falls with the damping, and
 falls with depth), and that the mesh built from it converges instead of running
 away.
 
-The runaway is the reason ``budget=`` exists, and it is pinned here rather than
-described, because it was a real failure of the first working version: the loop
-ran end to end, reported convergence, and returned a mesh of 44 elements with
-0.74% variance reduction.
+The runaway is the reason `budget=` exists, and it is pinned here rather than
+described: without a budget the loop can run end to end, report convergence, and
+return a mesh of a few dozen elements that fits almost nothing.
 """
 
 import warnings
@@ -107,12 +106,12 @@ def test_the_budget_sets_the_element_count_and_resolution_sets_the_places(setup)
 
 
 def test_an_unbudgeted_step_drifts_and_a_budgeted_one_does_not(setup):
-    """The failure ``budget=`` exists for, as a regression test.
+    """The failure `budget=` exists for, as a regression test.
 
     Targeting the median looks self-normalising and is not: most elements sit
     near zero resolution and hit the growth cap while few can shrink. Left to
-    itself the loop coarsened 330 elements to 44 over three rounds while variance
-    reduction fell to 0.74% -- converging, and returning nothing.
+    itself the loop can lose most of its elements in a few rounds while the
+    variance reduction collapses -- converging, and returning nothing.
     """
     _, _, mesh, inversion = setup
     per_element = R.element_resolution(inversion, R.resolution_diagonal(inversion, 0.3))
@@ -184,8 +183,8 @@ def test_the_adapted_mesh_spans_exactly_the_same_fault(setup):
 
 def test_the_levels_never_jump_by_more_than_the_balance_factor(setup):
     _, _, mesh, _ = setup
-    # A size field that saturates at depth is what produced a 17 km level under
-    # a 2.5 km one before `_balance_levels` existed.
+    # A size field that saturates at depth would put a 17 km level under a
+    # 2.5 km one without `_balance_levels`.
     depth = -mesh.centroids[:, 2]
     size = 1e3 + 40.0 * depth
     layout = R.adapt_layout(mesh, size, balance=2.0)
@@ -197,7 +196,7 @@ def test_the_levels_never_jump_by_more_than_the_balance_factor(setup):
 
 # -- the cheap initialiser and the sampling field --------------------------
 def test_the_column_norm_is_not_a_resolution_proxy(setup):
-    """Why there is no cheap stand-in for ``R``, pinned so nobody adds one back.
+    """Why there is no cheap stand-in for `R`, pinned so nobody adds one.
 
     ``||G[:, k]||`` is the obvious way to avoid a factorisation and it is blind to
     the thing that matters: a deeper element radiates a broader but weaker pattern
@@ -253,7 +252,7 @@ def test_a_wrongly_shaped_resolution_vector_is_refused_by_name(setup):
 
 # -- unstructured adaptation, where the depth levels stop being straight ------
 #
-# A row-structured layout reads its depth levels off ONE vertical, at the fault's
+# A row-structured layout reads its depth levels off one vertical, at the fault's
 # midpoint, because a level is a single depth for the whole fault. When the size
 # field varies along strike -- which is what uneven coverage along the fault
 # produces -- that constraint is what limits how well the mesh can follow it.
@@ -330,8 +329,8 @@ def test_an_unrelaxed_cloud_is_flagged_as_slivered(setup):
 
 
 def test_the_rows_structure_is_unchanged(setup):
-    """The default must still produce exactly what it did before the mode split,
-    or every existing run's mesh moves."""
+    """The default must be exactly the rows builder, or every existing run's
+    mesh moves."""
     _, _, mesh, _ = setup
     sizes = _along_strike_size_field(mesh)
     default = R.adapt_layout(mesh, sizes, budget="conserve")
@@ -349,7 +348,7 @@ def test_an_unknown_structure_is_refused(setup):
 
 def test_the_size_field_keeps_the_shape_it_was_asked_on(setup):
     """The row builder asks along a line and the unstructured one on a 2-D probe
-    grid; a lookup that only handled 1-D broke the second with a broadcast error."""
+    grid; a lookup that only handled 1-D would break the second with a broadcast error."""
     _, _, mesh, _ = setup
     at = R.size_field(mesh, _along_strike_size_field(mesh))
     line = at(np.linspace(0.0, 40e3, 7), np.full(7, 5e3))
@@ -445,11 +444,11 @@ def test_kernels_refuse_a_matrix_from_a_different_basis(setup):
 def test_the_diagonal_size_field_saturates_where_the_kernel_one_does_not(setup):
     """The reason the kernel criterion exists, and it is *not* lambda drift.
 
-    ``target_element_size`` forms ``(target / r) ** gain`` on a diagonal that has
+    `target_element_size` forms `(target / r) ** gain` on a diagonal that has
     underflowed over most of the fault, so it is a ratio of two nearly-zero
-    numbers and runs to its clamp: measured here, a large fraction of elements
-    are pinned at ``max_ratio`` and carry no information at all. The kernel width
-    is a real length everywhere.
+    numbers and runs to its clamp: here a large fraction of elements are pinned
+    at `max_ratio` and carry no information at all. The kernel width is a real
+    length everywhere.
     """
     _, _, mesh, inv = setup
     per_el = R.element_resolution(inv, R.resolution_diagonal(inv, 1.0))
@@ -520,12 +519,12 @@ def test_a_planted_gaussian_is_recovered_exactly(sigma):
 
 
 def test_the_gaussian_width_is_not_biased_by_a_heavy_tail():
-    """⚠️ The whole reason this is fitted rather than linearised.
+    """The whole reason this is fitted rather than linearised.
 
-    A log-space fit is dominated by the tail entries -- which is precisely the
-    behaviour that makes the *second moment* disagree with the published metric
-    by 3x on real data. Against a 15 km Gaussian carrying a 2% flat floor, the
-    weighted log fits return 28 km and 35 km; least squares returns 15.4 km.
+    A log-space fit is dominated by the tail entries -- the same behaviour that
+    makes the *second moment* disagree with the published metric. Against a
+    15 km Gaussian carrying a 2% flat floor, the weighted log fits return 28 km
+    and 35 km; least squares returns 15.4 km.
     """
     distance = _distances()
     sigma = 15e3
@@ -545,10 +544,10 @@ def test_the_gaussian_width_is_not_biased_by_a_heavy_tail():
 
 
 def test_a_row_that_does_not_decay_has_no_width():
-    """⚠️ Least squares *succeeds* on a flat row -- the best Gaussian is one so
-    wide it is locally constant -- and returned 2.4e13 m before this guard.
-    Nothing past the largest distance in the row is evidence, so a fit out there
-    is reported as no answer rather than as a number that swamps a size field."""
+    """Least squares *succeeds* on a flat row -- the best Gaussian is one so wide
+    it is locally constant, of order 1e13 m. Nothing past the largest distance in
+    the row is evidence, so a fit out there is reported as no answer rather than
+    as a number that swamps a size field."""
     distance = _distances()
     assert np.isnan(R.gaussian_kernel_width(np.ones_like(distance), distance)[0])
     # Too few entries above the floor to fit a curvature at all.
@@ -606,10 +605,10 @@ def test_parameter_positions_are_three_dimensional(setup):
 # -- generalized cross-validation ---------------------------------------------
 
 def test_gcv_whitens_the_data_exactly_once(setup):
-    """⚠️ ``whiten`` already applies the diagonal weights when there is no
+    """`whiten` already applies the diagonal weights when there is no
     covariance model, so whitening a pre-weighted vector squares them and leaves
-    the data in a different space from ``weighted_design``. The residual must be
-    the one ``solve`` would form."""
+    the data in a different space from `weighted_design`. The residual must be
+    the one `solve` would form."""
     from scipy.linalg import cho_solve
 
     _, _, _, inversion = setup
@@ -627,11 +626,11 @@ def test_gcv_whitens_the_data_exactly_once(setup):
 
 
 def test_gcv_charges_for_the_ramp_but_reports_the_slip_rank(setup):
-    """⚠️ Two traces, and confusing them shifts every rank comparison here.
+    """Two traces, and confusing them shifts every rank comparison here.
 
     An unregularised nuisance column costs very nearly a whole degree of freedom,
-    so GCV's denominator must count it. But ``effective_rank`` everywhere else in
-    this package -- ``resolution_diagonal``, the L-curve, the calibration ladder
+    so GCV's denominator must count it. But `effective_rank` everywhere else in
+    this package -- `resolution_diagonal`, the L-curve, the calibration ladder
     -- is the slip-only trace, and a GCV pick has to be comparable with those.
     """
     _, _, _, inversion = setup
@@ -670,7 +669,7 @@ def test_the_gcv_curve_turns_over_between_its_ends(setup):
     # readable in rank rather than in lambda.
     ranks = curve["effective_rank"].values
     assert (np.diff(ranks) < 0).all()
-    # `best_rank` must be the rank AT `best_smoothing`, not a nearby one.
+    # `best_rank` must be the rank at `best_smoothing`, not a nearby one.
     best = int(np.argmin(curve["gcv"].values))
     assert curve.attrs["best_smoothing"] == curve["smoothing"].values[best]
     assert curve.attrs["best_rank"] == ranks[best]
@@ -771,12 +770,12 @@ def test_a_scalar_prior_does_not_equalise_the_posterior(epic_setup):
 
 
 def test_the_epic_jacobian_identity_is_exact():
-    """⚠️ Load-bearing for the cost, so pinned where it can be pinned sharply.
+    """Load-bearing for the cost, so pinned where it can be pinned sharply.
 
-    ``d[M^-1]_ii/da_j = -([M^-1 H']_ij)^2`` gives the WHOLE Jacobian from the
+    `d[M^-1]_ii/da_j = -([M^-1 H']_ij)^2` gives the whole Jacobian from the
     inverse the residual already formed. With finite differences instead it is
-    one factorization per unknown, and EPIC would not be affordable at
-    production size. On a well-conditioned problem the identity holds to
+    one factorization per unknown, and EPIC would not be affordable at a
+    realistic size. On a well-conditioned problem the identity holds to
     floating point; the fixture test below can only confirm the wiring, because
     a real normal matrix has a condition number around 3e8 and differencing
     variances there has no digits left.
@@ -808,10 +807,10 @@ def test_the_epic_jacobian_identity_is_exact():
 def test_the_epic_jacobian_is_wired_to_the_right_matrices(epic_setup):
     """The identity above, against the blocks ``epic_prior`` actually builds.
 
-    ⚠️ **A COARSE step, and do not "improve" it by shrinking.** A real normal
-    matrix here has a condition number around 3e8, so ``inv`` loses about eight
+    A coarse step, and do not "improve" it by shrinking. A real normal
+    matrix here has a condition number around 3e8, so `inv` loses about eight
     digits and differencing two nearly-equal variances loses the rest: the
-    measured disagreement *grows* as the step shrinks -- 6e-4 at a 1e-2 relative
+    disagreement *grows* as the step shrinks -- 6e-4 at a 1e-2 relative
     step, 7e-3 at 1e-3, 3e-1 at 1e-5, 6e0 at 1e-6. That is rounding, not the
     Jacobian, which the test above pins to 1e-5.
     """
@@ -841,7 +840,7 @@ def test_the_epic_jacobian_is_wired_to_the_right_matrices(epic_setup):
 
 
 def test_sigma_target_is_bounded_from_both_sides(epic_setup):
-    """⚠️ Both bounds are structural, not solver failures.
+    """Both bounds are structural, not solver failures.
 
     Above: ``H' diag(a) H`` is positive semidefinite, so a prior can only tighten
     a posterior variance. Below: a curvature operator has a null space -- a slip
@@ -963,11 +962,11 @@ def test_blocked_folds_partition_the_data_into_equal_width_blocks(setup):
 
 
 def test_blocked_folds_pick_the_long_axis_of_the_sample_cloud(setup):
-    """``direction="auto"`` must find along-strike, not across.
+    """`direction="auto"` must find along-strike, not across.
 
     An across-strike block holds out one side of the fault, which makes it a
-    coverage experiment rather than a noise one -- and on the real data, where
-    only ~19% of samples lie north of the trace, one with a foregone conclusion.
+    coverage experiment rather than a noise one -- and on a coastal fault seen
+    mostly from one side, one with a foregone conclusion.
     """
     _, _, mesh, inversion = setup
     folds = R.blocked_folds(inversion.obs, n_folds=4)
@@ -979,9 +978,9 @@ def test_blocked_folds_pick_the_long_axis_of_the_sample_cloud(setup):
 
 
 def test_held_in_slices_the_ramp_columns_instead_of_rebuilding_them(setup):
-    """⚠️ The trap that would make the whole criterion meaningless.
+    """The trap that would make the whole criterion meaningless.
 
-    ``ramp_columns`` builds monomials in *centred, span-scaled* coordinates, so
+    `ramp_columns` builds monomials in *centred, span-scaled* coordinates, so
     rebuilding it on a training subset recentres against that subset's extent --
     giving the fit a different set of nuisance columns from the ones the held-out
     rows are predicted with. The column space has to be identical on both sides.
@@ -1087,7 +1086,7 @@ def test_the_curve_turns_up_at_both_ends(setup):
 
 
 def test_a_fold_that_starves_a_tracks_ramp_is_refused(setup):
-    """⚠️ Unconstrained nuisance columns make a held-out block unpredictable.
+    """Unconstrained nuisance columns make a held-out block unpredictable.
 
     Hold out a whole track and its own ramp columns have nothing to fit against,
     so the training solve puts an arbitrary constant there and the score is
@@ -1102,7 +1101,7 @@ def test_a_fold_that_starves_a_tracks_ramp_is_refused(setup):
 
 
 def test_narrow_blocks_warn_against_the_fitted_range(setup):
-    """The block width IS the validity condition, so it is checked."""
+    """The block width is the validity condition, so it is checked."""
     from slipsolve.covariance import CovarianceModel
     from slipsolve.sampling import Observations
 
@@ -1130,11 +1129,11 @@ def test_blocked_folds_refuse_a_cut_they_cannot_make(setup):
 
 
 def test_profiled_score_is_the_projection_onto_the_ramps_complement(setup):
-    """⚠️ The identity that makes ``cv_rms_profiled`` a criterion and not a fudge.
+    """The identity that makes `cv_rms_profiled` a criterion and not a fudge.
 
     Re-fitting the held-out block's ramp columns by least squares and keeping the
-    residual IS the projection onto the orthogonal complement of the ramp
-    subspace. Because that projector does not depend on ``smoothing``, it biases
+    residual is the projection onto the orthogonal complement of the ramp
+    subspace. Because that projector does not depend on `smoothing`, it biases
     every rung of a sweep identically and leaves the ranking intact.
     """
     _, _, _, inversion = setup
@@ -1172,10 +1171,10 @@ def test_profiled_score_is_below_the_raw_one_and_absent_without_a_ramp(setup):
 
 
 def test_the_curve_scores_the_profiled_minimum_separately(setup):
-    """⚠️ A different criterion on the same sweep gets its own minimum.
+    """A different criterion on the same sweep gets its own minimum.
 
-    The two disagreed on the real data -- rank 49.8 against 26-37 -- so reading
-    the profiled score off ``best_smoothing`` would quote the wrong weight.
+    The two can pick ranks far apart, so reading the profiled score off
+    `best_smoothing` would quote the wrong weight.
     """
     _, _, _, inversion = setup
     curve = R.blocked_cv_curve(inversion, np.logspace(-1, 2, 5), n_folds=4)

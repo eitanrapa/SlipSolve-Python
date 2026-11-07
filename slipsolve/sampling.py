@@ -1,23 +1,23 @@
 """Adaptive downsampling of a gridded LOS product to point observations.
 
-An unwrapped NISAR scene has millions of pixels and a fault model has thousands
-of parameters, so the inversion is fed a decimated set of samples -- dense where
+An unwrapped interferogram has millions of pixels and a fault model has thousands
+of parameters, so the inversion is fed a decimated set of samples: dense where
 the displacement field varies, sparse where it is smooth. That is a quadtree: a
 cell splits while the displacement inside it is rougher than a threshold, and
 what survives is one representative sample per cell.
 
-The reference implementation recurses over unstructured ``(x, y, value)`` lists.
-Here the input is a *regular raster*, which allows something both faster and
-exactly reproducible: cumulative sums of the valid mask and of the values let any
+SlipSolve-Curve recurses over unstructured `(x, y, value)` lists. Here the
+input is a regular raster, which allows something both faster and exactly
+reproducible: cumulative sums of the valid mask and of the values let any
 candidate cell's count, mean and variance be read in constant time, and the
 recursion walks integer index rectangles instead of copying coordinate arrays.
-Because a cell *is* an index rectangle, re-reading the look vectors over exactly
-the same pixels is trivially consistent -- in the reference that consistency has
-to be arranged by passing the cell index lists back in.
+Because a cell is an index rectangle, re-reading the look vectors over exactly
+the same pixels is trivially consistent; in SlipSolve-Curve that consistency
+has to be arranged by passing the cell index lists back in.
 
 Samples too close to the fault trace are dropped rather than kept: a dislocation
 solution is singular on the fault surface, so a Green's function evaluated on the
-trace is not finite (see :func:`slipsolve.greens._require_finite`), and
+trace is not finite (see `slipsolve.greens._require_finite`), and
 unwrapped InSAR is decorrelated there anyway.
 """
 
@@ -30,11 +30,11 @@ from ._geo import open_stage
 class Observations:
     """Downsampled line-of-sight samples with their look vectors and weights.
 
-    Wraps an :class:`xarray.Dataset` on a single ``obs`` dimension carrying
-    ``x``, ``y`` (local frame metres), ``los`` (metres, positive toward the
-    sensor), ``look_e``/``look_n``/``look_u`` (target->sensor unit vector),
-    ``std`` (the within-cell scatter), ``weight`` and ``track``; and ``region``
-    when the track was sampled with ``regions=`` (see :meth:`from_los`).
+    Wraps an `xarray.Dataset` on a single `obs` dimension carrying
+    `x`, `y` (local frame metres), `los` (metres, positive toward the
+    sensor), `look_e`/`look_n`/`look_u` (target->sensor unit vector),
+    `std` (the within-cell scatter), `weight` and `track`; and `region`
+    when the track was sampled with `regions=` (see `from_los`).
     """
 
     STAGE = "slip_observations"
@@ -50,56 +50,55 @@ class Observations:
                  field=None, refine_within=0.0, regions=None):
         """Quadtree-downsample one pair of a gridded LOS product.
 
-        ``rms_min`` is the within-cell standard deviation (metres) below which a
-        cell stops splitting; ``width_min`` and ``width_max`` bound the cell size
-        in metres. ``min_valid_fraction`` drops cells that are mostly outside the
-        swath. ``exclude_within`` drops samples closer than that many metres to
-        ``trace`` -- required, since the Green's functions are singular on the
-        fault. ``frame`` defaults to one centred on the trace, or on the scene.
+        `rms_min` is the within-cell standard deviation (metres) below which a
+        cell stops splitting; `width_min` and `width_max` bound the cell size
+        in metres. `min_valid_fraction` drops cells that are mostly outside the
+        swath. `exclude_within` drops samples closer than that many metres to
+        `trace`; it is required, since the Green's functions are singular on the
+        fault. `frame` defaults to one centred on the trace, or on the scene.
 
-        The stack's ``los`` is taken as-is: it is already positive toward the
-        sensor, because :func:`~slipsolve._geo.phase_to_los` applied
-        ``sign`` when the stack was built. The attribute is validated and carried
-        as provenance, **not** re-applied -- doing so squared it, which silently
-        undid the very correction ``sign=-1`` exists to make.
+        The stack's `los` is taken as-is: it is already positive toward the
+        sensor, because `slipsolve._geo.phase_to_los` applied `sign` when the
+        stack was built. The attribute is validated and carried as provenance,
+        not re-applied: applying it again would undo the correction `sign=-1`
+        exists to make.
 
-        **Model-based sampling.** ``field`` is an optional ``(ny, nx)`` array that
+        **Model-based sampling.** `field` is an optional `(ny, nx)` array that
         decides *where* to split, in place of the observed displacement. Passing a
-        model's predicted LOS (see :func:`slipsolve.predict.predicted_los`)
+        model's predicted LOS (see `slipsolve.predict.predicted_los`)
         is the Wang & Fialko (2015) scheme: the observed field's within-cell
-        scatter does not shrink as a cell shrinks, so once ``rms_min`` is below the
+        scatter does not shrink as a cell shrinks, so once `rms_min` is below the
         noise the recursion cannot stop on information and simply runs down to
-        ``width_min`` -- on real scenes that produced tens of thousands of samples
-        of mostly atmosphere. A predicted field is noise-free by construction, so
-        cells split on signal. What is *reduced* is always the observed data:
-        ``field`` chooses the cells, and the cells are then filled from
-        ``los``, exactly as the paper uses "the bounding coordinates of each
+        `width_min`, sampling mostly noise. A predicted field is noise-free by
+        construction, so cells split on signal. What is *reduced* is always the
+        observed data: `field` chooses the cells, and the cells are then filled
+        from `los`, exactly as the paper uses "the bounding coordinates of each
         resolution cell" to average the real interferogram.
 
-        ``refine_within`` forces cells within that many metres of ``trace`` to keep
-        splitting to ``width_min`` whatever ``field`` says there. It exists only for
+        `refine_within` forces cells within that many metres of `trace` to keep
+        splitting to `width_min` whatever `field` says there. It exists only for
         the model-based path and matters more than it looks: an initial model with
         little shallow slip predicts a smooth near-field, so the quadtree would
         coarsen precisely where shallow slip needs constraining, and the next
         iteration is then free to invent it. The paper keeps "a relatively dense
         sampling around the fault trace ... through all iterations" for this reason.
 
-        ⚠️ ``rms_min`` means something different under ``field``: a threshold on
-        model curvature, not a noise level, so
-        :func:`~slipsolve.diagnostics.scene_report`'s recommendation does
-        not apply -- use :func:`~slipsolve.diagnostics.model_rms_min`.
+        `rms_min` means something different under `field`: a threshold on
+        model curvature, not a noise level, so the recommendation of
+        `slipsolve.diagnostics.scene_report` does not apply; use
+        `slipsolve.predict.model_rms_min`.
 
         **Regions unwrapped apart.** Each connected region of an unwrapped
         interferogram carries its own arbitrary constant: an island, or a block
         cut off along the fault on purpose so the unwrapper cannot cross it.
-        ``regions`` says where they are, and each region then gets its own offset
-        column (:func:`~slipsolve.regularize.ramp_columns`), so no tie between
-        regions is taken on trust. ``"connected"`` labels the 4-connected regions
+        `regions` says where they are, and each region then gets its own offset
+        column (`slipsolve.regularize.ramp_columns`), so no tie between
+        regions is taken on trust. `"connected"` labels the 4-connected regions
         of the valid pixels, which is how SNAPHU's grid joins them; or pass an
-        integer ``(ny, nx)`` label map (``<= 0`` = unused). No cell mixes two
-        regions: a mixed cell keeps splitting, and one that reaches ``width_min``
+        integer `(ny, nx)` label map (`<= 0` = unused). No cell mixes two
+        regions: a mixed cell keeps splitting, and one that reaches `width_min`
         is reduced over its majority region's pixels only. Each sample records its
-        label in ``region``. ``None`` (the default) is the old sampler exactly.
+        label in `region`. `None` (the default) treats the scene as one region.
         """
         if stat not in ("mean", "median"):
             raise ValueError("stat must be 'mean' or 'median'")
@@ -220,12 +219,12 @@ class Observations:
             "stat": stat,
         }
         if field is not None:
-            # Folded in only when used, so a data-driven run keeps the params
-            # hash it had before model-based sampling existed.
+            # Folded in only when used, so a data-driven run's params hash does
+            # not depend on these options.
             quadtree["field"] = "model"
             quadtree["refine_within"] = float(refine_within)
         if region_map is not None:
-            # Folded in only when used, like ``field``.
+            # Folded in only when used, like `field`.
             quadtree["regions"] = regions if isinstance(regions, str) else "labels"
 
         out.attrs.update(
@@ -246,20 +245,20 @@ class Observations:
     def from_points(cls, x, y, values, look, std, name="gnss", frame=None, epsg=4326):
         """Observations that are already points: GNSS components, or any point measurement.
 
-        ``x``, ``y`` are station coordinates in ``epsg`` (lon/lat by default), or local
-        metres with ``epsg=None``; ``frame`` is required either way, since a handful of
-        stations is no basis for choosing one -- pass the frame the mesh was built in.
-        ``values`` (metres) and ``std`` (metres, > 0) are one per row, and ``look`` is
-        ``(n, 3)`` or one 3-vector for every row: a row measures ``u . look`` with ``u``
+        `x`, `y` are station coordinates in `epsg` (lon/lat by default), or local
+        metres with `epsg=None`; `frame` is required either way, since a handful of
+        stations is no basis for choosing one: pass the frame the mesh was built in.
+        `values` (metres) and `std` (metres, > 0) are one per row, and `look` is
+        `(n, 3)` or one 3-vector for every row: a row measures `u . look` with `u`
         the (east, north, up) displacement. A three-component GNSS station is therefore
-        three rows, with looks ``(1, 0, 0)``, ``(0, 1, 0)`` and ``(0, 0, 1)``. A look need
-        not point upward -- the up-ward check :meth:`from_los` inherits from radar
-        geometry does not apply to a horizontal component -- but it must be a unit vector.
+        three rows, with looks `(1, 0, 0)`, `(0, 1, 0)` and `(0, 0, 1)`. A look need
+        not point upward (the upward check `from_los` inherits from radar
+        geometry does not apply to a horizontal component), but it must be a unit vector.
 
-        ``weight`` is ``1 / std``: the diagonal noise weighting, which is what
-        :meth:`concat` keeps with ``normalize="none"``. Under ``"sqrt_count"`` the track's
+        `weight` is `1 / std`: the diagonal noise weighting, which is what
+        `concat` keeps with `normalize="none"`. Under `"sqrt_count"` the track's
         total influence is rescaled as for any other track and the relative station
-        weights survive. ``cell_size`` is 0 and ``count`` 1, since nothing was averaged.
+        weights survive. `cell_size` is 0 and `count` 1, since nothing was averaged.
         """
         if frame is None:
             raise ValueError("from_points needs the frame the mesh was built in")
@@ -302,21 +301,18 @@ class Observations:
     def concat(cls, items, normalize="sqrt_count", weights=None):
         """Combine several tracks into one observation set.
 
-        ``normalize`` sets how a track's sample count feeds its influence:
+        `normalize` sets how a track's sample count feeds its influence:
 
-        ``"sqrt_count"``
-            each row scaled by ``1/sqrt(n)``, so a track's *total* contribution to
-            the normal equations is independent of how densely it was sampled.
-            The default, and almost always what is wanted.
-        ``"count"``
-            each row scaled by ``1/n``, which is what the reference
-            implementation does -- and which means a track with twice as many
-            samples gets *half* the influence, since a row's weight enters the
-            normal equations squared.
-        ``"none"``
-            no count normalisation.
+        - `"sqrt_count"`: each row scaled by `1/sqrt(n)`, so a track's total
+          contribution to the normal equations is independent of how densely it
+          was sampled. The default, and almost always what is wanted.
+        - `"count"`: each row scaled by `1/n`, which is what SlipSolve-Curve
+          does, and which means a track with twice as many samples gets half
+          the influence, since a row's weight enters the normal equations
+          squared.
+        - `"none"`: no count normalisation.
 
-        ``weights`` optionally scales each named track on top of that.
+        `weights` optionally scales each named track on top of that.
         """
         if normalize not in ("sqrt_count", "count", "none"):
             raise ValueError("normalize must be 'sqrt_count', 'count' or 'none'")
@@ -336,10 +332,9 @@ class Observations:
             n = ds.sizes["obs"]
             scale = {"sqrt_count": 1.0 / np.sqrt(n), "count": 1.0 / n, "none": 1.0}[normalize]
 
-            # Build the scaled weights as a new array rather than editing in place.
-            # ``Dataset.copy()`` is shallow, so an in-place edit would reach back
-            # into the caller's Observations -- and passing the same object twice
-            # would then apply the scaling to it twice.
+            # Build the scaled weights as a new array rather than editing in place,
+            # so the caller's Observations are never modified and passing the same
+            # object twice does not scale it twice.
             track = ds["track"].values
             factor = np.full(n, scale)
             if weights:
@@ -347,8 +342,8 @@ class Observations:
                     factor[track == track_name] *= float(weights.get(str(track_name), 1.0))
             ds["weight"] = ("obs", ds["weight"].values * factor)
             parts.append(ds)
-        # A track sampled without ``regions`` is one region (label 0) beside those
-        # that were; ``xr.concat`` would refuse the missing variable.
+        # A track sampled without `regions` is one region (label 0) beside those
+        # that were; `xr.concat` would refuse the missing variable.
         if any("region" in p for p in parts):
             for p in parts:
                 if "region" not in p:
@@ -359,23 +354,18 @@ class Observations:
         out.attrs["tracks"] = [t for item in items for t in item.ds.attrs.get("tracks", [])]
         out.attrs["normalize"] = normalize
 
-        # ``drop_conflicts`` compares the per-track ``quadtree`` dicts *whole*, and
-        # ``rms_min``/``width_min``/``exclude_within`` are measured per scene -- so
-        # with more than one track they always conflict and the key vanishes,
-        # taking ``field`` with it. ``field`` describes the *method* (data- or
-        # model-driven), which every track in a round shares, so merge one level
-        # deeper and keep what they agree on. Losing it is silent and downstream:
-        # a model-driven multi-track set is otherwise indistinguishable from a
-        # coarse data-driven one once it has been persisted.
+        # `drop_conflicts` compares the per-track `quadtree` dicts whole, and the
+        # per-scene thresholds differ between tracks, so the key would vanish and
+        # take `field` (data- or model-driven, shared by every track in a round)
+        # with it. Merge one level deeper and keep what the tracks agree on, or a
+        # persisted model-driven set is indistinguishable from a data-driven one.
         quadtrees = [item.ds.attrs.get("quadtree") for item in items]
         if quadtrees and all(isinstance(q, dict) for q in quadtrees):
             shared = {k: v for k, v in quadtrees[0].items()
                       if all(k in q and q[k] == v for q in quadtrees[1:])}
             if shared:
                 out.attrs["quadtree"] = shared
-            # The per-scene numbers are the ones that legitimately differ, and
-            # they are the record of how each track was sampled. Keep them beside
-            # the shared part rather than dropping them on the floor.
+            # Keep the per-scene numbers too: they record how each track was sampled.
             out.attrs["quadtree_per_track"] = {
                 str(name): dict(q)
                 for item, q in zip(items, quadtrees)
@@ -407,9 +397,9 @@ class Observations:
     def persist(self, workspace, name=None, overwrite=False, **params):
         """Write to a Zarr stage and return the reopened set.
 
-        Worth caching: this is the one step that reads a multi-gigabyte
-        ``LOSStack``, and every later experiment with smoothing or bounds reuses
-        its output unchanged.
+        Worth caching: this is the one step that reads the full raster, and
+        every later experiment with smoothing or bounds reuses its output
+        unchanged.
         """
         name = name or self.STAGE
         full = {
@@ -435,13 +425,13 @@ class Observations:
 
 
 def stack_epsg(ds):
-    """The EPSG code to transform a stack's grid from, or ``None``.
+    """The EPSG code to transform a stack's grid from, or `None`.
 
-    ``None`` means the stack was resampled onto a lattice in the local frame
-    (:mod:`slipsolve.resample`) and its ``x``/``y`` are already local
+    `None` means the stack was resampled onto a lattice in the local frame
+    (`slipsolve.resample`) and its `x`/`y` are already local
     metres. Every helper that projects a stack's coordinates goes through this
-    and :func:`_to_frame`, so a frame-gridded stack works everywhere a UTM one
-    does rather than raising ``KeyError: 'epsg'`` somewhere downstream.
+    and `_to_frame`, so a frame-gridded stack works everywhere a UTM one
+    does rather than raising `KeyError: 'epsg'` somewhere downstream.
     """
     if ds.attrs.get("frame") is not None:
         return None
@@ -449,13 +439,13 @@ def stack_epsg(ds):
 
 
 def _to_frame(x, y, frame, epsg):
-    """Bring native grid coordinates into ``frame``.
+    """Bring native grid coordinates into `frame`.
 
-    ``epsg is None`` means the stack was already resampled onto a lattice in this
-    frame (see :mod:`slipsolve.resample`), which grids in
-    :attr:`~slipsolve.frame.LocalFrame.local_crs` -- so its ``x``/``y``
-    *are* local metres and there is nothing to do. That is also the only available
-    answer: the frame's transverse Mercator has no EPSG code to transform from.
+    `epsg is None` means the stack was already resampled onto a lattice in this
+    frame (see `slipsolve.resample`), which grids in
+    `slipsolve.frame.LocalFrame.local_crs`, so its `x`/`y` are local metres
+    and there is nothing to do. That is also the only available answer: the
+    frame's transverse Mercator has no EPSG code to transform from.
     """
     if epsg is None:
         return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
@@ -479,7 +469,7 @@ def _frame_for(ds):
 
 
 def _region_map(regions, valid):
-    """``regions`` as an integer label map on the stack's grid, or ``None``."""
+    """`regions` as an integer label map on the stack's grid, or `None`."""
     if regions is None:
         return None
     if isinstance(regions, str):
@@ -501,26 +491,25 @@ def _region_map(regions, valid):
 
 def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
                     max_rows, max_cols, min_valid_fraction, refine=None, regions=None):
-    """Index rectangles ``(r0, r1, c0, c1)`` surviving the variance split.
+    """Index rectangles `(r0, r1, c0, c1)` surviving the variance split.
 
     Constant-time per candidate: the count, sum and sum of squares over any
     rectangle come from three cumulative-sum tables, so the recursion never
     touches the pixels themselves.
 
-    The split statistic is the within-cell **standard deviation**. The reference
-    implementations describe a *curvature*-based rule (Simons et al. 2002; Fialko
-    2004; Wang & Fialko 2015); on a smooth field the two behave alike, and the
-    summed-area formulation is what makes this cost 0.05 s on 0.32 M pixels, so
-    the difference is recorded rather than removed.
+    The split statistic is the within-cell standard deviation. The published
+    schemes use a curvature-based rule (Simons et al. 2002; Fialko 2004; Wang &
+    Fialko 2015); on a smooth field the two behave alike, and the standard
+    deviation is what the summed-area tables give in constant time.
 
-    ``refine`` is an optional boolean mask of pixels that must be resolved to
-    ``min_rows``/``min_cols`` regardless of how flat ``values`` is over them. It
+    `refine` is an optional boolean mask of pixels that must be resolved to
+    `min_rows`/`min_cols` regardless of how flat `values` is over them. It
     rides on a fourth table, so the test stays O(1) per candidate.
 
-    ``regions`` (an integer label map) makes a cell holding valid pixels of two
-    regions split as if it were rough. The test is exact: with ``n``, ``S1`` and
-    ``S2`` the count, sum and sum of squares of the labels in the cell, all equal
-    iff ``n S2 == S1**2``, read from integer tables and multiplied as Python
+    `regions` (an integer label map) makes a cell holding valid pixels of two
+    regions split as if it were rough. The test is exact: with `n`, `S1` and
+    `S2` the count, sum and sum of squares of the labels in the cell, all equal
+    iff `n S2 == S1**2`, read from integer tables and multiplied as Python
     integers, so no rounding can call a mixed cell pure.
     """
     v = np.where(valid, values, 0.0)
@@ -591,13 +580,13 @@ def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=Non
                   min_valid_fraction=0.0):
     """Collapse each surviving cell to one sample.
 
-    Every quantity is averaged over the *same* valid pixels -- the cell is an
+    Every quantity is averaged over the same valid pixels: the cell is an
     index rectangle, so the data, the look vector and the coordinates cannot
     disagree about which pixels they came from.
 
-    With ``regions``, a cell still holding two regions (one that reached the
+    With `regions`, a cell still holding two regions (one that reached the
     minimum width) is reduced over its majority region's pixels only, and dropped
-    (``keep`` False) if those fall under ``min_valid_fraction`` of the cell.
+    (`keep` False) if those fall under `min_valid_fraction` of the cell.
     """
     n = len(cells)
     out = {k: np.empty(n) for k in
@@ -653,7 +642,7 @@ def _sat(a):
 
 
 def _sat_int(a):
-    """:func:`_sat` in exact integers."""
+    """`_sat` in exact integers."""
     out = np.zeros((a.shape[0] + 1, a.shape[1] + 1), dtype=np.int64)
     np.cumsum(np.cumsum(a, axis=0, dtype=np.int64), axis=1, out=out[1:, 1:])
     return out

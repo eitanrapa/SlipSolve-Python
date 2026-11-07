@@ -1,4 +1,4 @@
-"""``slipsolve._okada92``: Okada's (1992) half-space point source, the strain far path's half-space part."""
+"""`slipsolve._okada92`: Okada's (1992) half-space point source, the strain far path's half-space part."""
 import numpy as np
 import pytest
 
@@ -43,8 +43,8 @@ def _integrated(tri, x, y, z, order=40):
 def test_point_sources_integrate_to_the_dislocation(strike, dip):
     """Over a 600 m triangle, 6.7-25 sizes away, surface to 7 km: the TDE's field, every slip.
 
-    Measured (2026-11-04, 4 strikes, 7 dips): displacement 8e-6, strain 1.4e-4 of the peak
-    away from vertical (the rule's 1600 points and the TDE's differences); the sign
+    Over 4 strikes and 7 dips they agree to 8e-6 of the peak in displacement and 1.4e-4 in
+    strain away from vertical (the rule's 1600 points and the TDE's differences); the sign
     conventions (Okada's hanging wall against the TDE's normal) need no fudge.
     """
     tri = _triangle(strike, dip)

@@ -1,11 +1,11 @@
-"""Pins the measured-parameter helpers in :mod:`slipsolve.diagnostics`.
+"""Pins the measured-parameter helpers in `slipsolve.diagnostics`.
 
-These exist because every sampling parameter used to be inherited from the
-notebook example rather than derived from the scene, and each wrong value showed
-up downstream as a symptom that looked like something else. The tests here are
-mostly about *agreement with reality*: a predicted cell size that drifts from
-what the quadtree actually does, or a noise floor that does not recover a planted
-noise level, would be worse than having no helper at all.
+These exist because a sampling parameter copied from an example rather than
+derived from the scene shows up downstream as a symptom that looks like
+something else. The tests here are mostly about *agreement with reality*: a
+predicted cell size that drifts from what the quadtree actually does, or a noise
+floor that does not recover a planted noise level, would be worse than having no
+helper at all.
 """
 
 import numpy as np
@@ -42,9 +42,9 @@ def test_ladder_predicts_the_quadtree_terminal_cell(trace, frame, spacing, width
     """The predicted terminal cell must equal what the sampler really produces.
 
     This is the test that matters. The dyadic ladder is not guessable -- cells
-    are index rectangles halved at their midpoint, per axis, so ``width_min``
+    are index rectangles halved at their midpoint, per axis, so `width_min`
     only bites when it crosses a rung and identical-looking values can differ by
-    2x in sample count. A prediction that drifts from ``_quadtree_cells`` would
+    2x in sample count. A prediction that drifts from `_quadtree_cells` would
     be actively misleading, so it is pinned against the real thing rather than
     against a formula.
     """
@@ -63,8 +63,8 @@ def test_ladder_is_the_closure_of_midpoint_halving(trace, frame):
 
     Not a single chain: an odd extent splits into two *different* sizes and both
     branches continue, so the reachable set is a tree's worth of values rather
-    than repeated floor-halving. Following one branch is what made the first
-    version overestimate the terminal cell by 25%.
+    than repeated floor-halving. Following only one branch overestimates the
+    terminal cell.
     """
     stack = analytic_los_stack(trace, frame, spacing=1000.0)
     ladder = D.cell_size_ladder(stack)
@@ -78,7 +78,7 @@ def test_ladder_is_the_closure_of_midpoint_halving(trace, frame):
 
 
 def test_nearby_width_min_values_can_share_a_rung(trace, frame):
-    """Two different ``width_min`` values landing on one rung is the whole point."""
+    """Two different `width_min` values landing on one rung is the whole point."""
     stack = analytic_los_stack(trace, frame, spacing=1000.0)
     cells = {w: D.cell_size_ladder(stack, width_min=w)["terminal_cell"]
              for w in (1000.0, 1200.0, 1400.0, 1600.0, 2000.0, 3000.0, 5000.0)}
@@ -95,11 +95,11 @@ def test_noise_floor_recovers_a_planted_level(trace, frame, sigma):
 
 
 def test_noise_floor_is_biased_up_by_the_near_field(trace, frame):
-    """Why ``min_distance`` exists: near the fault the scatter is signal.
+    """Why `min_distance` exists: near the fault the scatter is signal.
 
     The analytic scene is an arctangent step across the trace, so blocks close to
     it contain a real gradient. Including them measures deformation and calls it
-    noise, which would then set ``rms_min`` too high and throw away the very
+    noise, which would then set `rms_min` too high and throw away the very
     samples that resolve slip.
     """
     stack = analytic_los_stack(trace, frame, spacing=500.0, noise=0.006,
@@ -163,7 +163,7 @@ def test_scene_report_detects_one_sided_coverage(trace, frame, mesh):
 
 
 def test_scene_report_checks_the_look_geometry(trace, frame, mesh):
-    """The invariant that would have caught the inverted LOS sign."""
+    """The invariant that catches an inverted LOS sign: east is positive on a left-looking ascending pass."""
     stack = analytic_los_stack(trace, frame, spacing=1000.0, noise=0.008)
     stack.ds.attrs["direction"] = "Ascending"
     stack.ds.attrs["look_direction"] = "Left"
@@ -196,7 +196,7 @@ def test_blocks_are_clamped_to_at_least_two_pixels(trace, frame):
 # -- ramp content ------------------------------------------------------------
 
 def test_ramp_content_separates_an_offset_from_a_gradient(trace, frame):
-    """An offset must show up in ``offset``; a gradient only in ``linear``."""
+    """An offset must show up in `offset`; a gradient only in `linear`."""
     stack = analytic_los_stack(trace, frame, spacing=1000.0, noise=0.002)
     obs = Observations.concat([
         Observations.from_los(stack, name="t", frame=frame, trace=trace,

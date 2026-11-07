@@ -1,32 +1,25 @@
 """Green's functions: the linear operator from slip on the fault to what we see.
 
-Column ``k`` of the design matrix is the displacement every observation would
-record for one metre of slip on element ``k`` and none anywhere else. Because
+Column `k` of the design matrix is the displacement every observation would
+record for one metre of slip on element `k` and none anywhere else. Because
 elastic displacement is linear in the Burgers vector, a slip model is just a
 weighted sum of those columns -- which is the whole reason the inversion is a
 least-squares problem and not an optimisation over forward models.
 
-Parameters are ordered ``[strike-slip on every element, dip-slip on every
-element]``, so a design matrix has ``2 * n_elements`` columns; that block layout
+Parameters are ordered `[strike-slip on every element, dip-slip on every
+element]`, so a design matrix has `2 * n_elements` columns; that block layout
 is what the smoothing operator and the bound vectors in
-:mod:`slipsolve.regularize` assume.
+`slipsolve.regularize` assume.
 
-The engine is deliberately split from the projection. ``displacement`` returns
-east/north/up, and only :func:`project_los` knows about a satellite -- so the
+The engine is deliberately split from the projection. `displacement` returns
+east/north/up, and only `project_los` knows about a satellite -- so the
 same engine serves a layered-rigidity replacement, or GPS, without the inversion
 learning anything new.
 
-**Assembly is serial, deliberately.** The obvious move is a thread pool over
-elements, on the usual reasoning that numpy releases the GIL. Measured on the
-real problem (238 km fault, 1106 elements, 8000 observations, 10 cores), it makes
-things uniformly *worse* -- 1 worker 24.6 s, 2 workers 28.5 s, 4 workers 42.5 s,
-10 workers 62-79 s -- and no block size rescues it. Each element's evaluation is
-~50 numpy calls on 8000-element arrays, i.e. 64 KB a piece: too small for the
-GIL-free stretch to outweigh the dispatch and hand-off overhead, so extra threads
-only add contention. Twenty-five seconds for a full design matrix is acceptable;
-if it ever needs to be faster, the fix is to vectorize
-:mod:`slipsolve._tde` over elements so each numpy call is large, not to
-add threads back.
+Assembly is serial on purpose. A thread pool over elements is slower at every
+worker count: each element is about fifty numpy calls on arrays of tens of
+kilobytes, too small for the GIL-free stretch to outweigh the dispatch overhead.
+To make it faster, evaluate many elements per numpy call; do not add threads.
 """
 
 import numpy as np
@@ -37,9 +30,9 @@ from ._tde import tde_disp_hs
 class HalfSpaceTDE:
     """Triangular dislocations in a homogeneous elastic half-space.
 
-    ``nu`` is Poisson's ratio; 0.25 is the usual crustal value and the reference
+    `nu` is Poisson's ratio; 0.25 is the usual crustal value and the reference
     implementation's default. A homogeneous half-space has no rigidity structure,
-    so ``nu`` is the only material parameter the displacements depend on -- the
+    so `nu` is the only material parameter the displacements depend on -- the
     shear modulus cancels, and enters only when slip is converted to moment.
     """
 
@@ -49,10 +42,10 @@ class HalfSpaceTDE:
         self.nu = float(nu)
 
     def displacement(self, mesh, x, y, z=None):
-        """ENU displacement per unit slip, shape ``(npts, 3, 2 * n_elements)``.
+        """ENU displacement per unit slip, shape `(npts, 3, 2 * n_elements)`.
 
         Memory-hungry by construction -- three components times every parameter.
-        Use :meth:`los_matrix` for an inversion, which never materialises the
+        Use `los_matrix` for an inversion, which never materialises the
         third axis.
         """
         x, y, z = _as_points(x, y, z)
@@ -70,10 +63,10 @@ class HalfSpaceTDE:
         return out
 
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None):
-        """Line-of-sight design matrix, shape ``(npts, 2 * n_elements)``.
+        """Line-of-sight design matrix, shape `(npts, 2 * n_elements)`.
 
         Each element's ENU response is projected onto that observation's own look
-        vector as it is computed, so the ``(npts, 3)`` intermediate is transient
+        vector as it is computed, so the `(npts, 3)` intermediate is transient
         and peak memory is the matrix itself.
         """
         x, y, z = _as_points(x, y, z)
@@ -98,10 +91,10 @@ class HalfSpaceTDE:
     def forward(self, mesh, slip, x, y, look=None, z=None):
         """Displacement produced by a given slip model.
 
-        ``slip`` is either the ``2 * n_elements`` parameter vector or an
-        ``(n_elements, 2)`` array of ``(strike_slip, dip_slip)``. With ``look``
+        `slip` is either the `2 * n_elements` parameter vector or an
+        `(n_elements, 2)` array of `(strike_slip, dip_slip)`. With `look`
         as a 3-tuple of arrays the result is scalar line-of-sight; without it,
-        ENU of shape ``(npts, 3)``.
+        ENU of shape `(npts, 3)`.
         """
         slip = np.asarray(slip, dtype=float)
         if slip.ndim == 2:
@@ -119,9 +112,8 @@ def project_los(disp_enu, look_e, look_n, look_u):
     """Project ENU displacement onto the line of sight.
 
     The look vector points **from the target to the sensor** and the result is
-    positive **toward the sensor** -- both conventions inherited unchanged from
-    :mod:`nisar_tools.geometry`, which is why this is a plain dot product with no
-    sign to remember. ``disp_enu`` is ``(npts, 3)`` or ``(npts, 3, nparam)``.
+    positive **toward the sensor**, so this is a plain dot product with no sign
+    to remember. `disp_enu` is `(npts, 3)` or `(npts, 3, nparam)`.
     """
     look = np.stack([np.asarray(look_e, dtype=float).ravel(),
                      np.asarray(look_n, dtype=float).ravel(),
@@ -133,9 +125,9 @@ def project_los(disp_enu, look_e, look_n, look_u):
 
 
 def tde_greens(mesh, obs, nu=0.25):
-    """The line-of-sight design matrix for an :class:`~slipsolve.sampling.Observations`.
+    """The line-of-sight design matrix for a set of `Observations`.
 
-    A thin convenience over :meth:`HalfSpaceTDE.los_matrix` that also checks the
+    A thin convenience over `HalfSpaceTDE.los_matrix` that also checks the
     observations were built in the mesh's own frame -- mixing frames is a
     kilometre-scale error that produces a perfectly smooth, entirely wrong matrix.
     """
@@ -165,11 +157,9 @@ def _require_finite(g, mesh, x, y, z=None):
     would leave a row of the inversion quietly meaningless; the caller wants to
     know to widen the exclusion buffer around the trace.
 
-    The distance quoted is a true three-dimensional one. Measuring it in map
-    view, as this used to, is the same number on a vertical fault and an
-    understatement on a dipping one -- the deep nodes of a 45-degree fault sit
-    kilometres to one side, so the nearest node in plan view can be one the
-    observation is nowhere near.
+    The distance quoted is three-dimensional: in map view the deep nodes of a
+    dipping fault sit kilometres to one side, so the nearest node in plan view
+    can be one the observation is nowhere near.
     """
     bad = ~np.isfinite(g)
     if not bad.any():

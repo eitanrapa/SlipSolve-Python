@@ -13,8 +13,8 @@ import pytest
 from slipsolve import FaultTrace, LocalFrame
 from slipsolve.mesh import FaultMesh
 
-# A trace striking ~84 degrees, like the San Sebastian fault: nearly east-west,
-# which is exactly the orientation that defeats a fixed-axis winding test.
+# A trace striking ~84 degrees: nearly east-west, which is exactly the
+# orientation that defeats a fixed-axis winding test.
 _LON = np.array([-68.681, -68.400, -68.000, -67.600, -67.200, -66.800, -66.523])
 _LAT = np.array([10.410, 10.487, 10.541, 10.563, 10.593, 10.621, 10.630])
 
@@ -197,13 +197,14 @@ def test_boundary_elements_are_the_along_strike_ends(trace, frame):
     """Resolved in (s, z), so a northward bend cannot masquerade as a fault tip.
 
     The trace here bends so that an interior vertex reaches further north than the
-    eastern endpoint -- which is what would defeat picking edges by ``argmax`` of a
+    eastern endpoint -- which is what would defeat picking edges by `argmax` of a
     map coordinate.
 
-    ⚠️ Not a comparison against the reference, though this docstring used to imply
-    one. SlipSolve picks boundary patches by index arithmetic on its structured
-    numbering, never from a coordinate; the hazard here belongs to any
-    coordinate-based rule, and the test pins that our parameter-space one avoids it.
+    Not a comparison against the reference, whose nodal inversion picks boundary
+    patches by index arithmetic on its structured numbering (its element-basis
+    stages take the minimum and maximum northing of each depth level). The hazard
+    belongs to any coordinate-based rule, and the test pins that the
+    parameter-space one avoids it.
     """
     bent = FaultTrace(
         np.array([-68.6, -68.2, -67.8, -67.4, -67.0]),
@@ -267,7 +268,7 @@ def test_join_makes_one_mesh_per_fault_with_its_own_boundaries(trace, frame):
 
     This is the case a *global* boundary test gets silently wrong -- under one, the
     shallower fault has no bottom edge at all and the pair own one along-strike end
-    each instead of two -- which is why the labelling was fixed before the feature.
+    each instead of two -- which is why the components are labelled.
     """
     shallow = FaultMesh.vertical(trace, frame, max_depth=8e3, edge_length=4e3)
     deep = FaultMesh.vertical(
@@ -283,7 +284,7 @@ def test_join_makes_one_mesh_per_fault_with_its_own_boundaries(trace, frame):
     assert labels.max() == 1, "two disjoint faults must be two components"
     assert np.bincount(labels).tolist() == [shallow.n_nodes, deep.n_nodes]
 
-    # ⚠️ The parameters OVERLAP -- both faults start at s ~ 0 -- so a global
+    # The parameters overlap -- both faults start at s ~ 0 -- so a global
     # extremum test would be wrong here. That is the point of the fixture.
     s = joined.params[:, 0]
     assert s[labels == 0].min() == pytest.approx(s[labels == 1].min(), abs=1.0)

@@ -1,37 +1,29 @@
 """The small amount of raster plumbing the slip module needs.
 
-⚠️ **Vendored from ``nisar_tools``, deliberately.** This module is otherwise
-free of the raster pipeline -- it works on points and meshes, is eager
-throughout, and uses no dask at all -- so these two functions were the entire
-reason it could not be installed on its own. They are copied rather than
-imported so that a slip inversion runs against ALOS ``.grd`` files, a plain
-xarray Dataset, or anything else with the right variables, without pulling in
-h5py, snaphu, or a NISAR-specific stack class.
+Copied from `nisar_tools` rather than imported, so that the package installs on
+its own: the rest of it works on points and meshes, is eager throughout and uses
+no dask, and a slip inversion should run on ALOS `.grd` files, a plain xarray
+Dataset, or anything else with the right variables, without pulling in h5py,
+snaphu or a NISAR-specific stack class.
 
-Upstream at the time of copying:
+Upstream, to diff against rather than re-derive (a fix there may belong here):
 
-    ``open_stage``          nisar_tools/_base.py
-    ``write_grd``           nisar_tools/geo.py
-    ``read_grd``            nisar_tools/geo.py
-    ``project_to_latlon``   nisar_tools/geo.py
-    ``as_crs``              nisar_tools/geo.py
-    ``utm_epsg``            nisar_tools/geo.py
-    ``LosGrid``             nisar_tools/los.py (``LOSStack``, the parts used here)
-
-Keep them here, together, and diff against upstream rather than re-deriving:
-they are small and stable, but ``geo.py`` has been actively worked (the
-``.grd`` reader, the h5py/pygmt interaction) and a fix there may belong here.
+    open_stage          nisar_tools/_base.py
+    write_grd           nisar_tools/geo.py
+    read_grd            nisar_tools/geo.py
+    project_to_latlon   nisar_tools/geo.py
+    as_crs              nisar_tools/geo.py
+    utm_epsg            nisar_tools/geo.py
+    LosGrid             nisar_tools/los.py (the parts of LOSStack used here)
 """
 
 import numpy as np
 import xarray as xr
 
 # Registers the `.rio` accessor every CRS-aware call below goes through. Imported
-# for the side effect, so it must not be pruned as unused: until the extraction
-# this module inherited the registration from `nisar_tools` importing rioxarray,
-# and without it `read_grd`, `write_grd` and `project_to_latlon` all raise
-# `AttributeError: 'DataArray' object has no attribute 'rio'` in a pure
-# slipsolve process.
+# for the side effect: do not prune it as unused, or `read_grd`, `write_grd` and
+# `project_to_latlon` raise `AttributeError: 'DataArray' object has no attribute
+# 'rio'`.
 import rioxarray  # noqa: F401
 
 
@@ -39,10 +31,9 @@ def as_crs(value):
     """Normalise a CRS argument to something rasterio and pyproj both accept.
 
     An integer (or a string of digits) means an EPSG code; anything else is
-    passed through. The pass-through matters here:
-    :class:`~slipsolve.frame.LocalFrame` is a transverse Mercator centred
-    on the study area and has **no EPSG code at all**, so a grid may be
-    identified by a :class:`pyproj.CRS` object instead.
+    passed through. The pass-through matters here: `slipsolve.frame.LocalFrame`
+    is a transverse Mercator centred on the study area and has no EPSG code, so
+    a grid may be identified by a `pyproj.CRS` object instead.
     """
     if isinstance(value, (int, np.integer)):
         return f"EPSG:{int(value)}"
@@ -54,10 +45,10 @@ def as_crs(value):
 def open_stage(path):
     """Open a Zarr store, restoring the CRS coordinate.
 
-    ⚠️ Zarr does not distinguish coordinates from data variables, so the
-    ``spatial_ref`` that ``rio.write_crs`` wrote as a *coordinate* comes back as
-    a *variable*. rioxarray then stops recognising the CRS and every field
-    reports ``rio.crs is None``, which surfaces far downstream as "Provide a
+    Zarr does not distinguish coordinates from data variables, so the
+    `spatial_ref` that `rio.write_crs` wrote as a coordinate comes back as
+    a variable. rioxarray then stops recognising the CRS and every field
+    reports `rio.crs is None`, which surfaces far downstream as "Provide a
     CRS-aware DataArray" from anything that reprojects.
     """
     ds = xr.open_zarr(path)
@@ -69,8 +60,8 @@ def open_stage(path):
 def project_to_latlon(data, x_coords=None, y_coords=None, epsg_code=None):
     """Reproject a 2-D grid from its native CRS to WGS84 lon/lat.
 
-    Accepts a georeferenced :class:`xarray.DataArray`, or a raw 2-D array plus
-    ``x_coords``/``y_coords``/``epsg_code``. Eager: computes its input.
+    Accepts a georeferenced `xarray.DataArray`, or a raw 2-D array plus
+    `x_coords`/`y_coords`/`epsg_code`. Eager: computes its input.
     """
     if isinstance(data, xr.DataArray) and data.rio.crs is not None:
         da = data
@@ -87,15 +78,15 @@ def project_to_latlon(data, x_coords=None, y_coords=None, epsg_code=None):
 
 
 def write_grd(field, path):
-    """Reproject a 2-D native-grid field to lon/lat and write a GMT ``.grd``.
+    """Reproject a 2-D native-grid field to lon/lat and write a GMT `.grd`.
 
     A GMT grid is single-variable NetCDF, so the field is reprojected to WGS84,
-    its axes renamed ``lat``/``lon`` and the variable to ``z``. Two rioxarray
-    artefacts must be stripped or the file is unusable: the length-1 ``band``
-    axis a reproject leaves behind, and the ``spatial_ref`` coordinate, which
+    its axes renamed `lat`/`lon` and the variable to `z`. Two rioxarray
+    artefacts must be stripped or the file is unusable: the length-1 `band`
+    axis a reproject leaves behind, and the `spatial_ref` coordinate, which
     NetCDF would write as a second variable and GMT would then refuse.
 
-    Integer label layers are cast to ``float32`` with NaN outside coverage: a
+    Integer label layers are cast to `float32` with NaN outside coverage: a
     GMT grid is float anyway, uint32 overflows classic NetCDF's int32, and a NaN
     edge beats an integer sentinel warped in by the reprojection.
     """
@@ -110,49 +101,44 @@ def write_grd(field, path):
 
 
 # ---------------------------------------------------------------------------
-# Reading a GMT `.grd`, the inverse of `write_grd`.
-#
-# This is how ALOS and GMTSAR products reach the inversion, and it was the one
-# half of the `.grd` round trip the extraction left behind: `write_grd` came
-# across, its reader did not, so a standalone slipsolve could not open the files
-# its own docstring promised. Upstream: `nisar_tools/geo.py` (`read_grd`,
+# Reading a GMT `.grd`, the inverse of `write_grd`: how ALOS and GMTSAR
+# products reach the inversion. Upstream: `nisar_tools/geo.py` (`read_grd`,
 # `_read_grd_hdf5`, `utm_epsg`).
 # ---------------------------------------------------------------------------
 
-#: xarray engines tried in turn by :func:`read_grd`, best first.
+#: xarray engines tried in turn by `read_grd`, best first.
 #:
-#: A ``.grd`` is single-variable NetCDF, but *which* NetCDF matters: GMT 6 writes
+#: A `.grd` is single-variable NetCDF, but which NetCDF matters: GMT 6 writes
 #: HDF5-backed NetCDF-4 by default, which scipy's classic-only backend cannot
-#: read, while ``netcdf4``/``h5netcdf`` are optional dependencies. NetCDF-4 is
-#: handled instead by :func:`_read_grd_hdf5` through ``h5py``.
+#: read, while `netcdf4`/`h5netcdf` are optional dependencies. NetCDF-4 is
+#: handled instead by `_read_grd_hdf5` through `h5py`.
 #:
-#: ``pygmt`` registers a ``gmt`` engine that reads both, and it is deliberately
-#: **not** in this list: with ``h5py`` also imported it drops a NetCDF-4 grid's
-#: coordinate variables and returns *pixel indices* instead, with no error. Two
-#: HDF5 libraries end up loaded in one process and GMT's netCDF layer loses. The
-#: data comes back right and only the georeferencing is wrong, so nothing
-#: downstream would notice.
+#: `pygmt` registers a `gmt` engine that reads both, and it is deliberately
+#: left out: with `h5py` also imported (two HDF5 libraries in one process) it
+#: drops a NetCDF-4 grid's coordinate variables and silently returns pixel
+#: indices instead. The data comes back right and only the georeferencing is
+#: wrong, so nothing downstream would notice.
 _GRD_ENGINES = ("netcdf4", "h5netcdf", "scipy", "rasterio")
 
-#: Leading bytes of an HDF5 file, i.e. of a NetCDF-4 ``.grd``.
+#: Leading bytes of an HDF5 file, i.e. of a NetCDF-4 `.grd`.
 _HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
 
 
 def utm_epsg(lon, lat):
-    """EPSG code of the WGS84 UTM zone containing ``(lon, lat)``."""
+    """EPSG code of the WGS84 UTM zone containing `(lon, lat)`."""
     zone = int((float(lon) + 180.0) // 6.0) % 60 + 1
     return (32600 if lat >= 0 else 32700) + zone
 
 
 def _read_grd_hdf5(path):
-    """Read a NetCDF-4 (HDF5-backed) ``.grd`` with ``h5py``.
+    """Read a NetCDF-4 (HDF5-backed) `.grd` with `h5py`.
 
     A GMT grid is one 2-D variable plus its two coordinate variables at the file
     root, so the layout can be recovered without a NetCDF library: the data is
     the only 2-D dataset, and its axes are named by the HDF5 dimension scales it
-    points at (``DIMENSION_LIST``), falling back to matching 1-D datasets by
-    length. The CRS, when present, rides on a ``grid_mapping`` dataset's
-    ``spatial_ref``/``crs_wkt`` attribute.
+    points at (`DIMENSION_LIST`), falling back to matching 1-D datasets by
+    length. The CRS, when present, rides on a `grid_mapping` dataset's
+    `spatial_ref`/`crs_wkt` attribute.
     """
     import h5py
 
@@ -195,15 +181,15 @@ def _read_grd_hdf5(path):
 
 
 def read_grd(path, engine=None):
-    """Read a GMT ``.grd`` as a CRS-aware 2-D DataArray -- inverse of :func:`write_grd`.
+    """Read a GMT `.grd` as a CRS-aware 2-D DataArray, the inverse of `write_grd`.
 
-    Axes are renamed to ``x``/``y``. The CRS comes from the file when it carries
+    Axes are renamed to `x`/`y`. The CRS comes from the file when it carries
     one; otherwise the grid is taken as geographic if its axes were named
-    ``lon``/``lat`` (GMT's own convention for a geographic grid) or if they span
-    a plausible lon/lat range. ``engine`` forces one backend instead of trying
-    :data:`_GRD_ENGINES` in turn; ``engine="hdf5"`` forces the ``h5py`` reader.
+    `lon`/`lat` (GMT's own convention for a geographic grid) or if they span
+    a plausible lon/lat range. `engine` forces one backend instead of trying
+    `_GRD_ENGINES` in turn; `engine="hdf5"` forces the `h5py` reader.
 
-    Eager -- a ``.grd`` is a whole raster in one variable, with no chunking to
+    Eager: a `.grd` is a whole raster in one variable, with no chunking to
     preserve.
     """
     with open(path, "rb") as fh:
@@ -239,31 +225,25 @@ def read_grd(path, engine=None):
 
 #: Sign relating interferometric phase to range change.
 #:
-#: ⚠️ Interferograms are formed as ``ref * conj(sec)``, and with ISCE3's
-#: ``exp(-j 4 pi r / lambda)`` SLC phase that gives
-#: ``phi = (4 pi / lambda) (r_sec - r_ref)`` -- so phase *decreases* as the
+#: Interferograms are formed as `ref * conj(sec)`, and with ISCE3's
+#: `exp(-j 4 pi r / lambda)` SLC phase that gives
+#: `phi = (4 pi / lambda) (r_sec - r_ref)`, so phase decreases as the
 #: ground approaches the sensor, and the conversion carries a minus sign.
 #:
-#: This was wrong in every LOS product this package produced before 2026-07-28,
-#: and no test caught it: the synthetic fixtures built data as ``G m`` and
-#: inverted the same convention, so they were self-consistent under a global
-#: flip. It was found because inverting a known **dextral** fault recovered
-#: **sinistral** slip with 86% of elements pinned on the polarity bound. Forcing
-#: this to ``+1`` drops the recovery test's variance reduction from >95% to 4.9%.
+#: A wrong sign here is invisible to synthetics built as `G m` and inverted
+#: with the same convention, which are self-consistent under a global flip; it
+#: shows only against a fault of known slip sense.
 PHASE_RANGE_SIGN = -1
 
 
 def phase_to_los(unwrapped, wavelength, sign=1):
     """Unwrapped phase (radians) to line-of-sight displacement (metres).
 
-    ``d = -sign * (wavelength / 4pi) * phase``; see :data:`PHASE_RANGE_SIGN`.
-    The default makes displacement positive **toward** the sensor. Pass
-    ``sign=-1`` for data whose fringe sense is inverted, which brings the
-    returned values back into that same convention -- nothing downstream
+    `d = -sign * (wavelength / 4pi) * phase`; see `PHASE_RANGE_SIGN`.
+    The default makes displacement positive toward the sensor. Pass
+    `sign=-1` for data whose fringe sense is inverted, which brings the
+    returned values back into that same convention; nothing downstream
     re-applies it.
-
-    Vendored alongside the rest of this module so a standalone slip inversion
-    owns the convention its correctness rests on, rather than inheriting it.
     """
     return sign * PHASE_RANGE_SIGN * (wavelength / (4.0 * np.pi)) * unwrapped
 
@@ -271,18 +251,16 @@ def phase_to_los(unwrapped, wavelength, sign=1):
 # ---------------------------------------------------------------------------
 # Putting several scenes on one lattice.
 #
-# ⚠️ The raster package's `warp_onto_lattice` is a dask `map_blocks` kernel,
-# written so a hundred-gigabyte stack can be warped lazily. This module is eager
-# throughout and a slip inversion sees a handful of scenes, so the loop below is
-# the same operation without the dependency -- and without the laziness, which
-# was never doing anything here anyway. Upstream: `nisar_tools/stack.py`
-# (`warp_onto_lattice`, `_warp_block`) and `nisar_tools/geo.py` (`warp_to_grid`,
-# `grid_transform`, `resampling_from_name`, `transform_native_bbox`).
+# The same operation as `nisar_tools`' lazy dask `warp_onto_lattice`, as an eager
+# loop: a slip inversion sees only a handful of scenes. Upstream:
+# `nisar_tools/stack.py` (`warp_onto_lattice`, `_warp_block`) and
+# `nisar_tools/geo.py` (`warp_to_grid`, `grid_transform`, `resampling_from_name`,
+# `transform_native_bbox`).
 # ---------------------------------------------------------------------------
 
 
 def resampling_from_name(name):
-    """Resolve a rasterio ``Resampling`` mode by name (e.g. ``"bilinear"``)."""
+    """Resolve a rasterio `Resampling` mode by name (e.g. `"bilinear"`)."""
     from rasterio.enums import Resampling
 
     try:
@@ -308,7 +286,7 @@ def transform_native_bbox(x_min, x_max, y_min, y_max, src_epsg, dst_epsg):
 
     Edge-densified, so the result covers the whole warped footprint even though
     a projected rectangle's edges curve in the target CRS. Returns
-    ``(x_min, x_max, y_min, y_max)``.
+    `(x_min, x_max, y_min, y_max)`.
     """
     from rasterio.warp import transform_bounds
 
@@ -335,16 +313,16 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
 
 
 def warp_onto_lattice(field, tx, ty, src_epsg, dst_epsg, resampling="bilinear"):
-    """Warp a ``(stack, y, x)`` DataArray onto the ``(ty, tx)`` lattice.
+    """Warp a `(stack, y, x)` DataArray onto the `(ty, tx)` lattice.
 
-    The stack dimension is taken from ``field.dims[0]``, so this serves a
-    ``time`` axis and a ``pair`` axis alike.
+    The stack dimension is taken from `field.dims[0]`, so this serves a
+    `time` axis and a `pair` axis alike.
 
-    ⚠️ **Integer layers are warped as float32 with nearest resampling and
-    refilled with 0.** A connected-component or subswath label must never be
-    blended -- an interpolated label is not a label -- and the reprojection's
+    Integer layers are warped as float32 with nearest resampling and
+    refilled with 0. A connected-component or subswath label must never be
+    blended (an interpolated label is not a label), and the reprojection's
     out-of-coverage fill is NaN, which no integer dtype can hold. float32 is
-    exact to 2**24, far above any label these products carry.
+    exact to `2**24`, far above any label these products carry.
     """
     resampling_from_name(resampling)          # fail now, not deep in the loop
 
@@ -372,21 +350,18 @@ def warp_onto_lattice(field, tx, ty, src_epsg, dst_epsg, resampling="bilinear"):
 
 
 # ---------------------------------------------------------------------------
-# The stack object the rest of the package expects.
-#
-# `nisar_tools`' `LOSStack` is a lazy, dask-backed, h5py-aware class with a
-# NISAR-specific ingest; slipsolve uses exactly five things from it -- `.ds`,
-# `.crs`, `.x`, `.y`, and a `type(stack)(ds)` constructor (see `resample.py` and
-# `calibrate.py`). `LosGrid` is those five plus the `.grd` ingest and `.crop`,
-# which is the whole of what a slip inversion ever asked for.
+# The stack object the rest of the package expects: `.ds`, `.crs`, `.x`, `.y`
+# and a `type(stack)(ds)` constructor (used by `resample.py` and `calibrate.py`).
+# `LosGrid` is those five plus a `.grd` ingest and `.crop`; any object with the
+# same five, such as `nisar_tools`' `LOSStack`, works as well.
 # ---------------------------------------------------------------------------
 
-#: Metres per unit, for the ``units`` a ``.grd`` cannot record.
+#: Metres per unit, for the `units` a `.grd` cannot record.
 _LOS_UNITS = {"m": 1.0, "cm": 0.01, "mm": 0.001}
 
 
 def _match_grid(da, ref, resampling):
-    """Put ``da`` on ``ref``'s lattice, resampling only if it is not already."""
+    """Put `da` on `ref`'s lattice, resampling only if it is not already."""
     same = (da.dims == ref.dims
             and all(np.array_equal(da[d].values, ref[d].values) for d in ("y", "x"))
             and da.rio.crs == ref.rio.crs)
@@ -399,7 +374,7 @@ def _finalise_look(ds):
     """Validate, renormalise and complete the look geometry.
 
     Reprojecting three components independently shortens the vector slightly, and
-    ``los_up == cos(incidence)`` only holds for a unit vector -- so it is
+    `los_up == cos(incidence)` only holds for a unit vector, so it is
     renormalised, and the incidence angle derived from it. A norm far from 1 to
     begin with means the grids are not a unit vector at all, which is raised on
     rather than quietly rescaled.
@@ -435,12 +410,12 @@ def _finalise_look(ds):
 
 
 class LosGrid:
-    """A gridded LOS product: ``los`` over ``(pair, y, x)`` plus its look vectors.
+    """A gridded LOS product: `los` over `(pair, y, x)` plus its look vectors.
 
-    Wraps an :class:`xarray.Dataset` and exposes the small surface the inversion
-    uses. Constructing one from a Dataset is deliberate and load-bearing --
-    :func:`~slipsolve.resample.resample_to_frame` and the synthetic world builders
-    in :mod:`~slipsolve.calibrate` rebuild a stack as ``type(stack)(ds)``.
+    Wraps an `xarray.Dataset` and exposes the small surface the inversion
+    uses. The constructor must keep taking a bare Dataset:
+    `slipsolve.resample.resample_to_frame` and the synthetic builders in
+    `slipsolve.calibrate` rebuild a stack as `type(stack)(ds)`.
     """
 
     def __init__(self, ds):
@@ -453,9 +428,9 @@ class LosGrid:
     def crs(self):
         """The grid's CRS, whether or not it has an EPSG code.
 
-        A stack resampled into a :class:`~slipsolve.frame.LocalFrame` carries a
-        proj4 transverse Mercator with no EPSG code at all, so ``f"EPSG:{...}"``
-        cannot describe it and this must be preferred to ``attrs["epsg"]``.
+        A stack resampled into a `slipsolve.frame.LocalFrame` carries a
+        proj4 transverse Mercator with no EPSG code, so `f"EPSG:{...}"`
+        cannot describe it and this must be preferred to `attrs["epsg"]`.
         """
         crs = self.ds.rio.crs
         return crs if crs is not None else as_crs(self.ds.attrs["epsg"])
@@ -488,52 +463,50 @@ class LosGrid:
                  look_convention="target_to_sensor", epsg=None, resolution=None,
                  resampling="bilinear", direction=None, look_direction=None,
                  wavelength=None):
-        """Build a stack from GMT ``.grd`` grids of displacement and look vector.
+        """Build a stack from GMT `.grd` grids of displacement and look vector.
 
-        ``los`` is one displacement grid or a sequence of them (one per pair);
+        `los` is one displacement grid or a sequence of them (one per pair);
         the three look components are shared by every pair and are resampled onto
-        ``los``'s lattice if they are not already on it.
+        `los`'s lattice if they are not already on it.
 
-        Three things have to be declared because no ``.grd`` records them, and
-        each is silently wrong-looking rather than loud if mis-set:
+        Three things have to be declared because no `.grd` records them, and
+        each gives plausible-looking but wrong results if mis-set:
 
-        ``units``
-            ``"m"`` (default), ``"cm"`` or ``"mm"`` -- a file called
-            ``los_cm.grd`` needs ``units="cm"``. Everything downstream works in
+        -   `units`: `"m"` (default), `"cm"` or `"mm"`; a file called
+            `los_cm.grd` needs `units="cm"`. Everything downstream works in
             metres, so a factor of 100 here becomes a factor of 100 in the slip.
-        ``sign``
-            ``+1`` if the grid is already **positive toward the sensor** (this
-            package's convention, and the sense of a *decreasing* range); ``-1``
-            if it is positive away. Applied on load, exactly as
-            :func:`phase_to_los` applies it, so what is stored is canonical and
-            nothing downstream re-applies it.
+        -   `sign`: `+1` if the grid is already positive toward the sensor (this
+            package's convention, and the sense of a decreasing range); `-1` if
+            it is positive away. Applied on load, exactly as `phase_to_los`
+            applies it, so what is stored is canonical and nothing downstream
+            re-applies it.
 
-            ⚠️ A grid built by the usual GMT recipe
-            ``grdmath phase 4 DIV PI DIV <wavelength> MUL`` carries **no minus
-            sign**, so it is positive *away* and needs ``sign=-1`` -- the
-            opposite of what :data:`PHASE_RANGE_SIGN` gives. Never inherit a sign
-            from a previous product of the same track; measure it. Two cheap
-            independent checks: the sense of the near-field block motion against
-            the fault's known slip sense, and the correlation against another
-            track of the same pass and look direction.
-        ``look_convention``
-            ``"target_to_sensor"`` (default, this package's) or
-            ``"sensor_to_target"``, which is negated on load. Checked against the
+            A grid built by the usual GMT recipe
+            `grdmath phase 4 DIV PI DIV <wavelength> MUL` carries no minus sign,
+            so it is positive away and needs `sign=-1`, the opposite of what
+            `PHASE_RANGE_SIGN` gives. Never inherit a sign from a previous
+            product of the same track; measure it. Two cheap independent checks:
+            the sense of the near-field block motion against the fault's known
+            slip sense, and the correlation against another track of the same
+            pass and look direction.
+
+        -   `look_convention`: `"target_to_sensor"` (default, this package's) or
+            `"sensor_to_target"`, which is negated on load. Checked against the
             data: the vertical component of a target->sensor vector is
-            ``cos(incidence)`` and must be **positive**.
+            `cos(incidence)` and must be positive.
 
-        ``direction`` (``"ascending"``/``"descending"``) and ``look_direction``
-        (``"left"``/``"right"``; ALOS is right-looking, NISAR is left) are carried
-        as provenance and are what lets
-        :func:`~slipsolve.diagnostics.scene_report` check ``los_east``'s sign
-        against the pass geometry. Both matter: a descending **right**-looking
-        track has ``los_east > 0`` where a descending **left**-looking one has
-        ``los_east < 0``, so the check is meaningless without them.
+        `direction` (`"ascending"`/`"descending"`) and `look_direction`
+        (`"left"`/`"right"`; ALOS is right-looking, NISAR is left) are carried
+        as provenance and are what lets `slipsolve.diagnostics.scene_report`
+        check `los_east`'s sign against the pass geometry. Both matter: a
+        descending right-looking track has `los_east > 0` where a descending
+        left-looking one has `los_east < 0`, so the check is meaningless
+        without them.
 
-        The grid is reprojected to a metric CRS if it is geographic -- the
-        quadtree in :meth:`~slipsolve.sampling.Observations.from_los` measures
-        cell widths against ``width_min`` in metres, so a lon/lat lattice would
-        put ``width_min=1000`` at a million columns.
+        The grid is reprojected to a metric CRS if it is geographic: the
+        quadtree in `slipsolve.sampling.Observations.from_los` measures
+        cell widths against `width_min` in metres, so a lon/lat lattice would
+        put `width_min=1000` at a million columns.
         """
         import os
 

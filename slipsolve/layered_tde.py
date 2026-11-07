@@ -1,29 +1,30 @@
 """Triangular dislocations in a layered half-space, exact near the element.
 
-:class:`~slipsolve.layered.LayeredPointSource` cuts an element into point sources
+`slipsolve.layered.LayeredPointSource` cuts an element into point sources
 and looks each up in EDGRN's tables. That is accurate a few element sizes away and
-fails close in, where the point sources' ``1/r**2`` field has to be resolved by the
-tables and the quadrature both: the fine tables read 11% low 300 m from the trace
-and 75% at 60 m. It also has no field at depth and no opening source, which the
-exact bimaterial solve (:mod:`slipsolve.bimaterial`) needs for every element.
+fails close in, where the point sources' `1/r**2` field has to be resolved by the
+tables and the quadrature both: within a few hundred metres of a shallow fault the
+tabulated field can be tens of percent low. It also has no field at depth and no
+opening source, which the exact bimaterial solve (`slipsolve.bimaterial`) needs for
+every element.
 
-This engine splits the layered field instead::
+This engine splits the layered field instead:
 
     u = TDE(each piece of the triangle, with its own layer's Poisson ratio)
         + the integral of the remainder R over the triangle,
 
-where ``R`` (:class:`~slipsolve.wavenumber.RemainderTables`) is the layered point
+where `R` (`slipsolve.wavenumber.RemainderTables`) is the layered point
 source minus the half-space one with the source layer's constants. The first term
-is the closed form of :mod:`slipsolve._tde`, singularity and all, at any point,
+is the closed form of `slipsolve._tde`, singularity and all, at any point,
 at the surface or at depth. The second is smooth wherever the source and receiver
 are in the same layer, so a low-order rule integrates it, and it carries the whole
 effect of the layering. A triangle cut by an interface is split into pieces, each in
 one layer, because the half-space each piece subtracts is its own layer's.
 
-⚠️ **Next to an interface the remainder is not smooth.** A source near an interface
+Next to an interface the remainder is not smooth. A source near an interface
 has an image across it, and a receiver on the far side sees the transmitted field,
 which is singular where they meet. The quadrature order follows the distance to
-those images (:meth:`LayeredTDE._orders`), and the depth grid of the tables is
+those images (`LayeredTDE._orders`), and the depth grid of the tables is
 graded toward every interface, but an element edge lying along an interface is the
 least accurate place in the model.
 """
@@ -47,61 +48,54 @@ REMAINDER_TOLERANCE = 3e-3
 #: Surface receivers farther than this many triangle sizes from a triangle take point
 #: sources of the whole tabulated surface field instead of a dislocation plus the
 #: remainder: the point-source rule is accurate there and costs table lookups, where a
-#: tent costs at least six dislocations at every receiver. :meth:`LayeredTDE.strain`
+#: tent costs at least six dislocations at every receiver. `LayeredTDE.strain`
 #: uses the same distance for receivers at any depth, with the half-space part of each
-#: point source analytic (Okada 1992, :mod:`slipsolve._okada92`) since no table holds
+#: point source analytic (Okada 1992, `slipsolve._okada92`) since no table holds
 #: the whole field's strain.
 FAR = 4.0
 
-#: Most points per side of a piece in the remainder's quadrature (``order**2``
+#: Most points per side of a piece in the remainder's quadrature (`order**2`
 #: points).
 MAX_ORDER = 30
 
-#: The point-source rule's tolerance on :meth:`LayeredTDE.strain`'s far path, where each
+#: The point-source rule's tolerance on `LayeredTDE.strain`'s far path, where each
 #: point is an analytic half-space point source and a table lookup, far cheaper than the
-#: dislocations it replaces. Measured on the two-layer test crust against the converged
-#: path (2026-11-04), a tent's strain at 4-40 sizes: 3e-3 up to 6.4e-4 of its peak, 1e-3
-#: up to 4.5e-4, 3e-4 up to 1.1e-4 at three times 1e-3's points. The near path inside 4
-#: sizes holds 5e-4, so 1e-3.
+#: dislocations it replaces. At 1e-3 a tent's strain at 4-40 sizes stays within about 5e-4
+#: of its peak, as the near path holds inside 4 sizes; 3e-4 takes three times the points.
 STRAIN_FAR_TOLERANCE = 1e-3
 
-#: The strain far path's Gauss rule (``far_rule="gauss"``, :func:`_rule_gauss`): ``n`` points a
-#: side, ``n`` the least with ``C (a / 2R)**(2 n)`` within :data:`STRAIN_FAR_TOLERANCE`, ``R`` from the
-#: centroid of a triangle of longest edge ``a`` (the 1-D rule's error for a kernel singular ``R``
-#: away), and never fewer than :data:`TRIANGLE_FAR_MIN_ORDER`. ``C`` is empirical: on the v3 tables
-#: (2026-11-05) a tent's strain at 4-12 sizes of a triangle with an edge in the surface needed
-#: ``n = 3`` to reach the tables' own ~1e-3 floor (``n = 2`` left 4-5e-3), so ``n = 3`` inside
-#: ~11 sizes and 2 beyond.
+#: The strain far path's Gauss rule (`far_rule="gauss"`, `_rule_gauss`): `n` points a
+#: side, `n` the least with `C (a / 2R)**(2 n)` within `STRAIN_FAR_TOLERANCE`, `R` from the
+#: centroid of a triangle of longest edge `a` (the 1-D rule's error for a kernel singular `R`
+#: away), and never fewer than `TRIANGLE_FAR_MIN_ORDER`. `C` is empirical, set so that a tent's
+#: strain reaches the tables' own ~1e-3 floor: `n = 3` inside about 11 sizes and 2 beyond
+#: (two points leave 4-5e-3 at 4-12 sizes).
 TRIANGLE_FAR_CONSTANT = 300.0
 
 #: Most (receiver, point) pairs the strain remainder handles at once, one rule at a time: the far path is memory bound
-#: when many workers run it (:meth:`LayeredTDE._strain_remainder`).
+#: when many workers run it (`LayeredTDE._strain_remainder`).
 STRAIN_BATCH = 8_000
 
 #: One point (the centroid) gives each tent a third of the element with its first moment
-#: wrong: 8e-2 to 3e-1 of a tent's strain at 4-45 sizes (2026-11-05). So at least ``2 x 2``.
+#: wrong, 10-30% of a tent's strain at any distance. So at least `2 x 2`.
 TRIANGLE_FAR_MIN_ORDER = 2
 
-#: Most Gauss-Legendre points in a tent's level-set integral (see :meth:`LayeredTDE.tent_field`).
+#: Most Gauss-Legendre points in a tent's level-set integral (see `LayeredTDE.tent_field`).
 TENT_MAX_POINTS = 24
 
-#: Points in that integral: ``ceil(TENT_GAIN * L / d) + 1`` for a triangle of size ``L`` and a receiver
-#: ``d`` from its nearest point (not its centroid), and never fewer than two, which make the tent's first moment exact far away.
-#: Measured on a vertical surface element against 96x96 oriented constant-slip sub-triangles
-#: (2026-10-12), worst over its three tents and two slips: 2 points 4e-4 at d/L 10.7 and 3e-3 at
-#: 3.6; 3 points 3e-4 at 1.8; 6 points 1e-4 at 0.36; 12 points 6e-5 at 0.11; 24 points 1.4e-4 at
-#: 0.04. Projecting the element's mean instead puts a single tent 9-60% off at those distances.
+#: Points in that integral: `ceil(TENT_GAIN * L / d) + 1` for a triangle of size `L` and a receiver
+#: `d` from its nearest point (not its centroid), and never fewer than two, which make the tent's first moment exact far away.
+#: This keeps a tent within a few 1e-4 of a converged integral at most distances (about 3e-3 at 3-4
+#: sizes, where two points are the floor); projecting the element's mean instead puts a single tent
+#: 10-60% off.
 TENT_GAIN = 2.0
 
-#: :data:`TENT_GAIN` and the fewest Gauss-Legendre points for a tent's STRAIN
-#: (:meth:`LayeredTDE.tent_strain`). Set when strain at depth had no far path (it has one
-#: beyond :attr:`LayeredTDE.strain_far` since), so the tent rule holds at any distance,
-#: which two points do not: far away the level integrand is
-#: ``(1-t)^2`` times a polynomial in ``(1-t)``, whose ``(1-t)^4`` term two points miss,
-#: leaving ``~0.05 (L/d)^2`` (5e-3 at 3 sizes; the displacement's far path hides it
-#: beyond 4). Measured (2026-11-04, the three tents' sum against the element, two
-#: triangles, 0.6-30 sizes, worst over components): gain 2 / min 2 up to 5e-3;
-#: gain 4 / min 3 at most 4e-5 within 2 sizes and 9e-5 beyond.
+#: The gain (as `TENT_GAIN`) and the fewest Gauss-Legendre points for a tent's strain
+#: (`LayeredTDE.tent_strain`). They make the tent rule hold at any distance, which two
+#: points do not: far away the level integrand is `(1-t)^2` times a polynomial in `(1-t)`,
+#: whose `(1-t)^4` term two points miss, leaving `~0.05 (L/d)^2` (5e-3 at 3 sizes; the
+#: displacement's far path hides it beyond 4). With gain 4 and three points the error is
+#: below 1e-4 at any distance.
 STRAIN_TENT_GAIN = 4.0
 STRAIN_TENT_MIN_POINTS = 3
 
@@ -112,12 +106,12 @@ SLIVER = 1e-9
 
 
 def split_by_layers(vertices, interfaces):
-    """Cut a triangle at the interface depths: ``[(piece (3, 3), mid-depth), ...]``.
+    """Cut a triangle at the interface depths: `[(piece (3, 3), mid-depth), ...]`.
 
-    ``vertices`` is ``(3, 3)`` east/north/up. The pieces are fan triangles of the
+    `vertices` is `(3, 3)` east/north/up. The pieces are fan triangles of the
     polygon between consecutive interfaces, in the parent's winding, so each has the
     parent's normal and frame. Vertical edges stay exactly vertical: a cut point on
-    an edge whose ends share ``x, y`` inherits them exactly.
+    an edge whose ends share `x, y` inherits them exactly.
     """
     v = np.asarray(vertices, dtype=float)
     depth = -v[:, 2]
@@ -140,7 +134,7 @@ def split_by_layers(vertices, interfaces):
 
 
 def _clip(poly, depth, above):
-    """Keep the part of a convex polygon above (``above=True``: shallower than) or below ``depth``."""
+    """Keep the part of a convex polygon above (`above=True`: shallower than) or below `depth`."""
     def inside(p):
         return -p[2] <= depth if above else -p[2] >= depth
 
@@ -165,13 +159,13 @@ def _clip(poly, depth, above):
 
 
 def moment_packing(normal, direction):
-    """``(m1, m2, m3, m4, m5, e)`` of a unit dislocation with this normal and slip direction.
+    """`(m1, m2, m3, m4, m5, e)` of a unit dislocation with this normal and slip direction.
 
-    The deviatoric part of ``n (x) d + d (x) n``, in north/east/down, packed as
-    EDCMP's five (``m1 = M_ne``, ``m2 = M_nd``, ``m3 = M_dd``, ``m4 = (M_nn - M_ee)/2``,
-    ``m5 = M_ed``), and ``e = n . d``, the isotropic part's weight on the ``ep`` table.
-    The tables carry ``mu`` and ``K``, so the moment is ``mu`` times the five plus
-    ``K e`` times the identity -- the ``lam (n . d) I + mu (n d + d n)`` of an
+    The deviatoric part of `n (x) d + d (x) n`, in north/east/down, packed as
+    EDCMP's five (`m1 = M_ne`, `m2 = M_nd`, `m3 = M_dd`, `m4 = (M_nn - M_ee)/2`,
+    `m5 = M_ed`), and `e = n . d`, the isotropic part's weight on the `ep` table.
+    The tables carry `mu` and `K`, so the moment is `mu` times the five plus
+    `K e` times the identity -- the `lam (n . d) I + mu (n d + d n)` of an
     opening, split into its deviatoric and isotropic parts.
     """
     n = np.asarray(normal, dtype=float)
@@ -187,16 +181,17 @@ def moment_packing(normal, direction):
 class LayeredTDE:
     """Triangular dislocations in the layered half-space of a set of remainder tables.
 
-    Satisfies the engine protocol of :class:`~slipsolve.greens.HalfSpaceTDE`, so
-    :class:`~slipsolve.inversion.SlipInversion` takes it with ``engine=``. It
-    returns element columns, which :class:`SlipInversion` projects onto a nodal
-    basis. ``element_field`` gives one triangle's field of unit strike-, dip- and
-    tensile-slip at any points, for :class:`~slipsolve.bimaterial.InterfaceSolve`.
+    Satisfies the engine protocol of `slipsolve.greens.HalfSpaceTDE`, so
+    `slipsolve.inversion.SlipInversion` takes it with `engine=`. Without a basis it
+    returns element columns; with the nodal basis each node's column is its tent
+    integrated over the incident triangles (`tent_field`). `element_field` gives one
+    triangle's field of unit strike-, dip- and tensile-slip at any points, for
+    `slipsolve.bimaterial.InterfaceSolve`.
     """
 
     name = "layered_tde"
-    #: Nodal columns are integrated over each tent itself (:meth:`tent_field`), as
-    #: :class:`~slipsolve.layered.LayeredPointSource` integrates them, rather than
+    #: Nodal columns are integrated over each tent itself (`tent_field`), as
+    #: `slipsolve.layered.LayeredPointSource` integrates them, rather than
     #: projected from element means.
     supports_basis = True
 
@@ -206,28 +201,24 @@ class LayeredTDE:
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
         #: Surface receivers farther than this many triangle sizes take point sources of
-        #: the whole tabulated surface field (``tables.surface``) instead of a dislocation;
-        #: ``None``, or tables without a surface field, keeps dislocations everywhere.
+        #: the whole tabulated surface field (`tables.surface`) instead of a dislocation;
+        #: `None`, or tables without a surface field, keeps dislocations everywhere.
         self.far = None if far is None or not tables.has_surface else float(far)
-        #: :meth:`strain`'s far path, at any depth; it needs no surface field.
+        #: `strain`'s far path, at any depth; it needs no surface field.
         self.strain_far = None if far is None else float(far)
         #: Integrate the displacement's remainder (and its far path) with the rule exact for
-        #: quadratics (:func:`_rule_quadratic`) instead of sub-triangle centroids; strain
-        #: always does. The default since 2026-11-04; ``quadratic=False`` gives the Green's
-        #: functions of every model made before then, bit for bit. The centroids split an
-        #: element's remainder among its tents with an error first order in size / distance:
-        #: on model 4e's mesh and samples (v2 tables) a nodal LOS column was 5e-4 to 1.6e-3
-        #: (rms) off its converged value, a single tent up to 8.8e-3 (deeper nodes worse);
-        #: with this rule 8e-6 to 3e-5, at the same cost. 4e re-solved with it moved Mw by
-        #: -0.0001 and its slip by 1 mm at most
-        #: (``venezuela_seven_scene_run_production/check_quadratic_rule.py``).
+        #: quadratics (`_rule_quadratic`) instead of sub-triangle centroids; strain always
+        #: does. The centroids split an element's remainder among its tents with an error
+        #: first order in size / distance (about 1e-3 of a nodal column, up to 1e-2 for a
+        #: single tent); this rule's error is second order (about 1e-5), at the same cost.
+        #: `quadratic=False` keeps the centroid rule.
         self.quadratic = bool(quadratic)
         if far_rule not in ("gauss", "composite"):
             raise ValueError(f"far_rule must be 'gauss' or 'composite', got {far_rule!r}")
-        #: The rule :meth:`strain`'s far path integrates its point sources with: a collapsed
-        #: Gauss-Jacobi rule of ``n x n`` points (:func:`_rule_gauss`, its order from a geometric
-        #: error model, the default since 2026-11-05), or ``"composite"``, the sub-triangle rule
-        #: exact for quadratics at the point-source rule's orders (every earlier ``E``).
+        #: The rule `strain`'s far path integrates its point sources with: a collapsed
+        #: Gauss-Jacobi rule of `n x n` points (`_rule_gauss`, the default, its order from a
+        #: geometric error model), or `"composite"`, the sub-triangle rule exact for
+        #: quadratics at the point-source rule's orders.
         self.far_rule = far_rule
         #: The surface layer's, for the engine protocol; each piece uses its own.
         self.nu = float(tables.poisson(0.0))
@@ -238,7 +229,7 @@ class LayeredTDE:
 
     # -- the engine protocol ----------------------------------------------------
     def displacement(self, mesh, x, y, z=None, basis=None):
-        """ENU displacement per unit slip, ``(npts, 3, 2 * n_parameters)``.
+        """ENU displacement per unit slip, `(npts, 3, 2 * n_parameters)`.
 
         Element columns without a basis (or with the element basis); with a nodal
         basis, each node's column is its tent integrated over every incident triangle.
@@ -254,7 +245,7 @@ class LayeredTDE:
         return out
 
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
-        """Line-of-sight design matrix, ``(npts, 2 * n_parameters)``; columns as :meth:`displacement`."""
+        """Line-of-sight design matrix, `(npts, 2 * n_parameters)`; columns as `displacement`."""
         x, y, z = _as_points(x, y, z)
         look = np.stack([np.asarray(v, dtype=float).ravel()
                          for v in (look_e, look_n, look_u)], axis=1)
@@ -271,7 +262,7 @@ class LayeredTDE:
         return g
 
     def _columns(self, mesh, x, y, z, basis):
-        """Yield ``(column index, n_columns, (npts, 2, 3) ENU of strike and dip)`` contributions."""
+        """Yield `(column index, n_columns, (npts, 2, 3) ENU of strike and dip)` contributions."""
         nodal = basis is not None and getattr(basis, "name", "element") != "element"
         if not nodal:
             n = mesh.n_elements
@@ -301,14 +292,14 @@ class LayeredTDE:
 
     # -- one element ---------------------------------------------------------------
     def element_field(self, vertices, x, y, z=None, offset=None, components=(0, 1, 2)):
-        """ENU field of unit slip on one triangle: ``(npts, len(components), 3)``.
+        """ENU field of unit slip on one triangle: `(npts, len(components), 3)`.
 
-        ``components`` index the triangle's own strike, dip and normal (tensile)
-        directions, as :func:`slipsolve._tde.tde_disp_hs` defines them. With
-        ``offset`` (``(npts, 3)``), the half-space part is averaged between
-        ``point + offset`` and ``point - offset``: the mean of the two sides at a
+        `components` index the triangle's own strike, dip and normal (tensile)
+        directions, as `slipsolve._tde.tde_disp_hs` defines them. With
+        `offset` (`(npts, 3)`), the half-space part is averaged between
+        `point + offset` and `point - offset`: the mean of the two sides at a
         point on the element itself. The remainder is continuous there and is
-        taken at the point. Surface receivers beyond :attr:`far` take point sources.
+        taken at the point. Surface receivers beyond `far` take point sources.
         """
         x, y, z = _as_points(x, y, z)
         vertices = np.asarray(vertices, dtype=float)
@@ -336,7 +327,7 @@ class LayeredTDE:
         return out
 
     def slip_field(self, vertices, slip, x, y, z=None):
-        """ENU field of one slip vector ``(ss, ds, ts)`` on one triangle, ``(npts, 3)``."""
+        """ENU field of one slip vector `(ss, ds, ts)` on one triangle, `(npts, 3)`."""
         x, y, z = _as_points(x, y, z)
         vertices = np.asarray(vertices, dtype=float)
         slip = np.asarray(slip, dtype=float)
@@ -356,17 +347,17 @@ class LayeredTDE:
         return out
 
     def tent_field(self, vertices, x, y, z=None, components=(0, 1)):
-        """ENU field of unit slip shaped by each of the triangle's three tents: ``(npts, 3, ncomp, 3)``.
+        """ENU field of unit slip shaped by each of the triangle's three tents: `(npts, 3, ncomp, 3)`.
 
         Axis 1 is the tent of vertex 0, 1, 2 (1 there, 0 at the other two). The
         half-space part uses the tent's level sets: a linear tent is
-        ``int_0^1 [tent >= t] dt``, and its set ``tent >= t`` is the triangle shrunk
-        toward that vertex by ``1 - t``. So the tent's field is a 1-D integral of
-        constant-slip dislocations, each exact, taken by Gauss-Legendre in ``t``
-        with more points for closer receivers (:data:`TENT_GAIN`); the shrunk
+        `int_0^1 [tent >= t] dt`, and its set `tent >= t` is the triangle shrunk
+        toward that vertex by `1 - t`. So the tent's field is a 1-D integral of
+        constant-slip dislocations, each exact, taken by Gauss-Legendre in `t`
+        with more points for closer receivers (`TENT_GAIN`); the shrunk
         triangles are cut at the interfaces like any other. The remainder is
         integrated with each quadrature point weighted by the tent. Surface
-        receivers beyond :attr:`far` take tent-weighted point sources.
+        receivers beyond `far` take tent-weighted point sources.
         """
         x, y, z = _as_points(x, y, z)
         vertices = np.asarray(vertices, dtype=float)
@@ -386,12 +377,12 @@ class LayeredTDE:
 
     def _tent_halfspace(self, vertices, x, y, z, near, out, components, kernel,
                         gain=None, min_points=2):
-        """Add each tent's half-space field at the points ``near`` into ``out[near]``.
+        """Add each tent's half-space field at the points `near` into `out[near]`.
 
-        :func:`tent_levelset` with this engine's interfaces and each piece's own layer's
-        Poisson ratio. ``kernel`` is :func:`~slipsolve._tde.tde_disp_hs_unit` (displacement)
-        or :func:`~slipsolve._tde.tde_strain_hs_unit` (strain); ``out`` is
-        ``(npts, 3, ncomp, 3 or 6)``.
+        `tent_levelset` with this engine's interfaces and each piece's own layer's
+        Poisson ratio. `kernel` is `slipsolve._tde.tde_disp_hs_unit` (displacement)
+        or `slipsolve._tde.tde_strain_hs_unit` (strain); `out` is
+        `(npts, 3, ncomp, 3 or 6)`.
         """
         tent_levelset(vertices, x, y, z, near, out, components, kernel,
                       TENT_GAIN if gain is None else gain, min_points, self._interfaces,
@@ -399,16 +390,16 @@ class LayeredTDE:
 
     # -- strain at depth: the heterogeneous engine's E ------------------------------
     def strain(self, mesh, x, y, z, basis=None, workers=None):
-        """Strain per unit slip at points, ``(npts, 6, 2 * n_parameters)``.
+        """Strain per unit slip at points, `(npts, 6, 2 * n_parameters)`.
 
-        Components as :data:`~slipsolve._tde.STRAIN_COMPONENTS` (east, north, up; tensor
-        shears); columns as :meth:`displacement`: element columns without a basis, each
+        Components as `slipsolve._tde.STRAIN_COMPONENTS` (east, north, up; tensor
+        shears); columns as `displacement`: element columns without a basis, each
         node's tent with a nodal one. For points at depth (the voxel centres of
-        :mod:`slipsolve.heterogeneity`). Receivers farther than :attr:`strain_far` sizes from a
+        `slipsolve.heterogeneity`). Receivers farther than `strain_far` sizes from a
         triangle take point sources of the whole field: Okada's (1992) half-space point
         source plus the tabulated remainder, ordered by the point-source rule. Needs
-        tables computed with ``strain=True``. ``workers`` > 1 shares the elements among that
-        many processes (:func:`engine_pool`); the sums come out the same to rounding.
+        tables computed with `strain=True`. `workers` > 1 shares the elements among that
+        many processes (`engine_pool`); the sums come out the same to rounding.
         """
         x, y, z = _as_points(x, y, z)
         nodal = basis is not None and getattr(basis, "name", "element") != "element"
@@ -453,13 +444,13 @@ class LayeredTDE:
         return out
 
     def element_strain(self, vertices, x, y, z=None, components=(0, 1, 2)):
-        """Strain of unit slip on one triangle: ``(npts, len(components), 6)``.
+        """Strain of unit slip on one triangle: `(npts, len(components), 6)`.
 
-        The half-space strain of each piece (:func:`~slipsolve._tde.tde_strain_hs_unit`,
+        The half-space strain of each piece (`slipsolve._tde.tde_strain_hs_unit`,
         with its layer's Poisson ratio) plus the remainder's, integrated over the pieces
-        (:meth:`~slipsolve.wavenumber.RemainderTables.gather_strain`,
-        :func:`combine_strain`). Receivers anywhere at or below the surface; those
-        farther than :attr:`strain_far` sizes take the far path (:meth:`strain`).
+        (`slipsolve.wavenumber.RemainderTables.gather_strain`,
+        `combine_strain`). Receivers anywhere at or below the surface; those
+        farther than `strain_far` sizes take the far path (`strain`).
         """
         x, y, z = _as_points(x, y, z)
         vertices = np.asarray(vertices, dtype=float)
@@ -479,10 +470,11 @@ class LayeredTDE:
         return out
 
     def tent_strain(self, vertices, x, y, z=None, components=(0, 1)):
-        """Strain of unit slip shaped by each of the triangle's tents: ``(npts, 3, ncomp, 6)``.
+        """Strain of unit slip shaped by each of the triangle's tents: `(npts, 3, ncomp, 6)`.
 
-        :meth:`tent_field`'s construction with the half-space strain in the level-set
-        integral and the remainder's strain weighted by the tents; no far path.
+        `tent_field`'s construction with the half-space strain in the level-set
+        integral and the remainder's strain weighted by the tents. Receivers beyond
+        `strain_far` take the far path, as in `element_strain`.
         """
         x, y, z = _as_points(x, y, z)
         vertices = np.asarray(vertices, dtype=float)
@@ -501,7 +493,7 @@ class LayeredTDE:
         return out
 
     def _far_strain(self, vertices, x, y, z):
-        """Receivers at any depth more than :attr:`strain_far` triangle sizes from the triangle."""
+        """Receivers at any depth more than `strain_far` triangle sizes from the triangle."""
         if self.strain_far is None:
             return np.zeros(x.size, bool)
         v = np.asarray(vertices, dtype=float)
@@ -510,14 +502,14 @@ class LayeredTDE:
 
     @staticmethod
     def _halfspace_far(vertices, far, components):
-        """What :meth:`_remainder` needs to add the half-space point sources at ``far`` receivers."""
+        """What `_remainder` needs to add the half-space point sources at `far` receivers."""
         if not far.any():
             return None
         vnorm, vstrike, vdip = _element_basis(*np.asarray(vertices, dtype=float))
         return far, vnorm, np.stack([vstrike, vdip, vnorm])[list(components)]
 
     def _far(self, vertices, x, y, z):
-        """Surface receivers more than :attr:`far` triangle sizes from the triangle."""
+        """Surface receivers more than `far` triangle sizes from the triangle."""
         if self.far is None:
             return np.zeros(x.size, bool)
         surface = z == 0.0
@@ -532,27 +524,27 @@ class LayeredTDE:
 
     @staticmethod
     def _packing(vertices):
-        """The moment packing of unit strike-, dip- and tensile-slip, ``(3, 6)``."""
+        """The moment packing of unit strike-, dip- and tensile-slip, `(3, 6)`."""
         vnorm, vstrike, vdip = _element_basis(*vertices)
         return np.array([moment_packing(vnorm, d) for d in (vstrike, vdip, vnorm)])
 
     def _remainder(self, pieces, packing, x, y, z, parent=None, whole=False, strain=False,
                    halfspace=None):
-        """The remainder's integral over the pieces, ``(npts, n_components, 3)``.
+        """The remainder's integral over the pieces, `(npts, n_components, 3)`.
 
         Every (receiver, quadrature point) pair of a piece goes through one table
         lookup, whatever order each receiver was given, and the receivers' depth
-        stencils are worked out once for all the pieces. With ``parent`` (the whole
+        stencils are worked out once for all the pieces. With `parent` (the whole
         triangle) each point is also weighted by the three tents, and the result is
-        ``(npts, 3, n_components, 3)``. With ``whole`` the receivers are at the
+        `(npts, 3, n_components, 3)`. With `whole` the receivers are at the
         surface and the table is the whole surface field, not the remainder: point
-        sources, ordered by the point-source rule. With ``strain`` the last axis is the
-        six strain components (:func:`combine_strain`), every receiver reads the 3-D
-        tables (the surface ones carry no strain), and ``whole`` is refused. With
-        ``halfspace = (far, normal, slips)`` (strain only) the receivers flagged ``far``
-        also get each point source's half-space strain (:func:`~slipsolve._okada92.point_source_enu`,
-        with the piece's Poisson ratio), and are ordered by the point-source rule: the
-        whole field, for :meth:`strain`'s far path.
+        sources, ordered by the point-source rule. With `strain` the last axis is the
+        six strain components (`combine_strain`), every receiver reads the 3-D
+        tables (the surface ones carry no strain), and `whole` is refused. With
+        `halfspace = (far, normal, slips)` (strain only) the receivers flagged `far`
+        also get each point source's half-space strain (`slipsolve._okada92.point_source_enu`,
+        with the piece's Poisson ratio), and are ordered by the far rule (`far_rule`): the
+        whole field, for `strain`'s far path.
         """
         n = x.size
         tents = parent is not None
@@ -621,7 +613,7 @@ class LayeredTDE:
         return out
 
     def _strain_remainder(self, pieces, packing, x, y, z, parent, halfspace, out):
-        """:meth:`_remainder` for strain, into ``out``: one rule at a time in chunks of :data:`STRAIN_BATCH` pairs.
+        """`_remainder` for strain, into `out`: one rule at a time in chunks of `STRAIN_BATCH` pairs.
 
         The same pairs and weights; the sums come out the same to rounding.
         """
@@ -677,8 +669,8 @@ class LayeredTDE:
                         out[chunk] += np.einsum("qj,mqic->mjic", weights[:, None] * phi, pair)
 
     def _gauss_orders(self, tri, x, y, z, tolerance=STRAIN_FAR_TOLERANCE):
-        """Points a side of :func:`_rule_gauss` for far receivers: the least ``n`` with
-        ``C (a / 2R)**(2n)`` within ``tolerance`` (:data:`TRIANGLE_FAR_CONSTANT`)."""
+        """Points a side of `_rule_gauss` for far receivers: the least `n` with
+        `C (a / 2R)**(2n)` within `tolerance` (`TRIANGLE_FAR_CONSTANT`)."""
         side = float(max(np.linalg.norm(tri[1] - tri[0]), np.linalg.norm(tri[2] - tri[1]),
                          np.linalg.norm(tri[0] - tri[2])))
         centroid = tri.mean(axis=0)
@@ -688,7 +680,7 @@ class LayeredTDE:
         return np.clip(n, TRIANGLE_FAR_MIN_ORDER, self.max_order).astype(int)
 
     def _point_orders(self, tri, size, x, y, z, tolerance=None):
-        """The point-source rule of :class:`~slipsolve.layered.LayeredPointSource` for the whole field."""
+        """The point-source rule of `slipsolve.layered.LayeredPointSource` for the whole field."""
         centroid = tri.mean(axis=0)
         distance = np.sqrt((x - centroid[0]) ** 2 + (y - centroid[1]) ** 2 + (z - centroid[2]) ** 2)
         tolerance = self.tolerance if tolerance is None else tolerance
@@ -699,8 +691,8 @@ class LayeredTDE:
     def _orders(self, tri, size, x, y, z):
         """Quadrature order per receiver, from the length the remainder varies over.
 
-        The point-source rule's ``C (k L / l)**-2`` error model
-        (:data:`~slipsolve.layered._QUADRATURE_CONSTANT`), with ``l`` the larger of
+        The point-source rule's `C (k L / l)**-2` error model
+        (`slipsolve.layered._QUADRATURE_CONSTANT`), with `l` the larger of
         the receiver's distance and, for a receiver in the piece's own layer, the
         distance to the nearest image across that layer's interfaces -- the
         remainder is smooth on that scale even at the source. A receiver in another
@@ -731,11 +723,11 @@ class LayeredTDE:
 
 
 def _combine(values, azimuth, packing):
-    """East, north and up of each tabulated pair for each moment packing: ``(npairs, ncomp, 3)``.
+    """East, north and up of each tabulated pair for each moment packing: `(npairs, ncomp, 3)`.
 
-    ``values`` are the ten table columns at each pair and ``azimuth`` the direction
+    `values` are the ten table columns at each pair and `azimuth` the direction
     from source to receiver, clockwise from north. The azimuthal factors are the
-    ones :class:`~slipsolve.layered.LayeredPointSource` puts back, plus the
+    ones `slipsolve.layered.LayeredPointSource` puts back, plus the
     explosion's, which is axisymmetric like the CLVD.
     """
     cos1, sin1 = np.cos(azimuth), np.sin(azimuth)
@@ -757,7 +749,7 @@ def _combine(values, azimuth, packing):
     return out
 
 
-#: The engine a pool worker holds (:func:`engine_pool`).
+#: The engine a pool worker holds (`engine_pool`).
 _WORKER = {}
 
 
@@ -768,12 +760,12 @@ def _start_worker(path, options):
 
 
 def worker_engine():
-    """The :class:`LayeredTDE` a pool worker holds (:func:`engine_pool`)."""
+    """The `LayeredTDE` a pool worker holds (`engine_pool`)."""
     return _WORKER["engine"]
 
 
 class _Borrowed:
-    """A pool someone else owns: used, not shut down, by ``with``."""
+    """A pool someone else owns: used, not shut down, by `with`."""
 
     def __init__(self, pool):
         self.pool = pool
@@ -789,11 +781,11 @@ class _Borrowed:
 
 
 def pool_map(pool, fn, jobs, window=None):
-    """Run ``fn(*args)`` for each ``(key, args)`` of ``jobs`` in ``pool``; yield ``(key, result)`` as each finishes.
+    """Run `fn(*args)` for each `(key, args)` of `jobs` in `pool`; yield `(key, result)` as each finishes.
 
-    At most ``window`` jobs (default twice the pool's workers) are pending at once, and each result is let go once
-    yielded, so memory holds a few results rather than all of them. A list of futures keeps every result alive until
-    its loop ends: the interface operator's columns twice over, and every block of a streamed ``H`` (2026-11-05).
+    At most `window` jobs (default twice the pool's workers) are pending at once, and each result is let go once
+    yielded, so memory holds a few results rather than all of them. A list of futures would keep every result alive
+    until its loop ends: an interface operator's columns twice over, or every block of a streamed `H`.
     """
     from concurrent.futures import FIRST_COMPLETED, wait
 
@@ -823,16 +815,16 @@ def pool_map(pool, fn, jobs, window=None):
 
 
 def engine_pool(engine, workers):
-    """A process pool whose workers each hold a copy of ``engine``; None (run here) for ``workers`` < 2.
+    """A process pool whose workers each hold a copy of `engine`; None (run here) for `workers` < 2.
 
-    ``workers`` may also be a pool this returned before: it is used and left open, so one pool
+    `workers` may also be a pool this returned before: it is used and left open, so one pool
     (and one load of the tables a worker) can serve several operators.
 
-    Every worker loads the engine's tables from their file once (``RemainderTables.load`` and
-    ``save`` record it; a v3 strain table is ~3 GB a worker) and builds the engine with the same
-    options. Threads do not help here (``slipsolve.greens``); processes do (2026-11-04).
-    ⚠️ The workers are spawned (macOS's default), which re-imports the calling script: a script
-    that passes ``workers`` must keep its work under ``if __name__ == "__main__":``.
+    Every worker loads the engine's tables from their file once (`RemainderTables.load` and
+    `save` record the path; tables with strain can take several GB a worker) and builds the
+    engine with the same options. Threads do not help here (see `slipsolve.greens`); processes
+    do. The workers are spawned (macOS's default), which re-imports the calling script: a script
+    that passes `workers` must keep its work under `if __name__ == "__main__":`.
     """
     from concurrent.futures import Executor
 
@@ -851,8 +843,8 @@ def engine_pool(engine, workers):
 
 
 def _strain_share(elements, vertices, triangles, x, y, z, nodal, n):
-    """A worker's chunk of :meth:`LayeredTDE.strain`: ``(columns, part)``, ``part`` ``(npts, 6, 2 k)``
-    for the ``k`` columns (nodes, or elements) its elements touch: strike columns, then dip."""
+    """A worker's chunk of `LayeredTDE.strain`: `(columns, part)`, `part` `(npts, 6, 2 k)`
+    for the `k` columns (nodes, or elements) its elements touch: strike columns, then dip."""
     engine = worker_engine()
     cols = np.unique(np.asarray(triangles).ravel()) if nodal else np.asarray(elements)
     k = cols.size
@@ -873,29 +865,29 @@ def _strain_share(elements, vertices, triangles, x, y, z, nodal, n):
 
 def tent_levelset(vertices, x, y, z, near, out, components, kernel, gain, min_points,
                   interfaces, poisson, split=False, batched=False):
-    """Add each of a triangle's three tents' half-space fields at the points ``near`` into ``out[near]``.
+    """Add each of a triangle's three tents' half-space fields at the points `near` into `out[near]`.
 
-    A linear tent is ``int_0^1 [tent >= t] dt`` and the set ``tent >= t`` is the triangle
-    shrunk toward its vertex by ``1 - t``, so a tent's field is a 1-D integral of
-    constant-slip dislocations, each exact, taken by Gauss-Legendre in ``t`` with
-    ``ceil(gain L / d) + 1`` points for a receiver ``d`` from the triangle (at least
-    ``min_points``, at most :data:`TENT_MAX_POINTS`), split where a shrinking triangle
-    stops crossing an interface. Each shrunk triangle is cut at ``interfaces`` and each
-    piece takes ``poisson(mid-depth)``. ``kernel`` is
-    :func:`~slipsolve._tde.tde_disp_hs_unit` or :func:`~slipsolve._tde.tde_strain_hs_unit`;
-    ``out`` is ``(npts, 3, ncomp, 3 or 6)``, axis 1 the tent of vertex 0, 1, 2.
+    A linear tent is `int_0^1 [tent >= t] dt` and the set `tent >= t` is the triangle
+    shrunk toward its vertex by `1 - t`, so a tent's field is a 1-D integral of
+    constant-slip dislocations, each exact, taken by Gauss-Legendre in `t` with
+    `ceil(gain L / d) + 1` points for a receiver `d` from the triangle (at least
+    `min_points`, at most `TENT_MAX_POINTS`), split where a shrinking triangle
+    stops crossing an interface. Each shrunk triangle is cut at `interfaces` and each
+    piece takes `poisson(mid-depth)`. `kernel` is
+    `slipsolve._tde.tde_disp_hs_unit` or `slipsolve._tde.tde_strain_hs_unit`;
+    `out` is `(npts, 3, ncomp, 3 or 6)`, axis 1 the tent of vertex 0, 1, 2.
 
-    ``split`` treats receivers the rule would give more than :data:`TENT_MAX_POINTS` (closer
-    than about ``gain / TENT_MAX_POINTS`` sizes) one at a time, splitting the level integral
-    where the shrinking triangle passes them: its moving edge at ``t* = tent_j`` of the
+    `split` treats receivers the rule would give more than `TENT_MAX_POINTS` (closer
+    than about `gain / TENT_MAX_POINTS` sizes) one at a time, splitting the level integral
+    where the shrinking triangle passes them: its moving edge at `t* = tent_j` of the
     receiver's projection, each moving vertex where it comes closest. The integrand has a
-    near-jump there, of width ``height / size``, which a capped rule cannot resolve and each
-    piece's end-clustered nodes can (:data:`SPLIT_POINTS` a piece).
+    near-jump there, of width `height / size`, which a capped rule cannot resolve and each
+    piece's end-clustered nodes can (`SPLIT_POINTS` a piece).
 
-    ``batched`` evaluates every shrunk piece of a receiver group in one call of the
-    triangle-vectorised kernels (:func:`~slipsolve._tde.tde_disp_hs_unit_many`,
-    :func:`~slipsolve._tde.tde_strain_hs_unit_many`), instead of three calls a level: the
-    scalar kernels cost ~10 ms a call in overhead whatever the number of receivers. Equal
+    `batched` evaluates every shrunk piece of a receiver group in one call of the
+    triangle-vectorised kernels (`slipsolve._tde.tde_disp_hs_unit_many`,
+    `slipsolve._tde.tde_strain_hs_unit_many`), instead of three calls a level: the
+    scalar kernels carry a fixed overhead per call whatever the number of receivers. Equal
     to the scalar path to rounding for displacement; for strain the difference step is the
     receiver's distance to the parent triangle (not to each piece), so the two agree to the
     differences' own accuracy (~1e-7).
@@ -936,14 +928,14 @@ def tent_levelset(vertices, x, y, z, near, out, components, kernel, gain, min_po
 
 
 def tensor_packing(moment, lam, mu):
-    """``(m1, m2, m3, m4, m5, e)`` of a moment tensor, for tables carrying ``mu`` and ``K``.
+    """`(m1, m2, m3, m4, m5, e)` of a moment tensor, for tables carrying `mu` and `K`.
 
-    ``moment`` is ``(3, 3)`` east/north/up (or ``(n, 3, 3)``), at a source whose layer
-    has ``lam`` and ``mu``. The tables give the field per unit potency with the moment
-    ``mu`` times a deviatoric unit tensor (``ss``, ``ds``, ``cl``) or ``K = lam + 2 mu / 3``
-    times the identity (``ep``), so the packing is ``dev(M) / mu`` in EDCMP's five and
-    ``e = tr(M) / (3 K)``. A dislocation's moment, ``mu (n d + d n) + lam (n . d) I``,
-    packs exactly as :func:`moment_packing` packs ``n`` and ``d``.
+    `moment` is `(3, 3)` east/north/up (or `(n, 3, 3)`), at a source whose layer
+    has `lam` and `mu`. The tables give the field per unit potency with the moment
+    `mu` times a deviatoric unit tensor (`ss`, `ds`, `cl`) or `K = lam + 2 mu / 3`
+    times the identity (`ep`), so the packing is `dev(M) / mu` in EDCMP's five and
+    `e = tr(M) / (3 K)`. A dislocation's moment, `mu (n d + d n) + lam (n . d) I`,
+    packs exactly as `moment_packing` packs `n` and `d`.
     """
     m = np.asarray(moment, dtype=float)
     single = m.ndim == 2
@@ -960,29 +952,29 @@ def tensor_packing(moment, lam, mu):
 
 
 def combine_strain(values, derivatives, azimuth, packing):
-    """Strain of each tabulated pair for each moment packing: ``(npairs, ncomp, 6)``.
+    """Strain of each tabulated pair for each moment packing: `(npairs, ncomp, 6)`.
 
-    ``values`` are the ten table columns at each pair (:func:`_combine`'s input) and
-    ``derivatives`` the 27 strain columns (:data:`~slipsolve.wavenumber.STRAIN_KEYS`:
-    derivatives in distance and in receiver depth, then the ``1/r`` combinations), as
-    :meth:`~slipsolve.wavenumber.RemainderTables.gather_strain` returns them; ``azimuth``
+    `values` are the ten table columns at each pair (`_combine`'s input) and
+    `derivatives` the 27 strain columns (`slipsolve.wavenumber.STRAIN_KEYS`:
+    derivatives in distance and in receiver depth, then the `1/r` combinations), as
+    `slipsolve.wavenumber.RemainderTables.gather_strain` returns them; `azimuth`
     is the direction from source to receiver clockwise from north. Components as
-    :data:`~slipsolve._tde.STRAIN_COMPONENTS`: east, north, up, tensor shears.
+    `slipsolve._tde.STRAIN_COMPONENTS`: east, north, up, tensor shears.
 
-    In EDGRN's north/east/down frame ``(r, phi, z)`` is a right-handed cylindrical
-    system with ``z`` down, so the usual formulas hold::
+    In EDGRN's north/east/down frame `(r, phi, z)` is a right-handed cylindrical
+    system with `z` down, so the usual formulas hold:
 
         e_rr = d_r u_r          e_pp = (d_phi u_t + u_r) / r       e_zz = d_z u_z
         e_rp = (d_r u_t + (d_phi u_r - u_t) / r) / 2
         e_rz = (d_z u_r + d_r u_z) / 2          e_pz = (d_z u_t + d_phi u_z / r) / 2
 
-    The azimuthal derivatives need no table: the patterns :func:`_combine` puts back
-    differentiate into each other (``sin 2phi`` and ``cos 2phi`` swap with a factor 2,
-    ``sin phi`` and ``cos phi`` with 1; ``cl`` and ``ep`` have none). What is divided by
-    ``r`` is read from the tables' ``1/r`` columns, never divided here, so the axis
-    (``r = 0``, where a volume rule puts points) needs no special case. Then
-    ``eps_ENU = Q' eps_cyl Q`` with rows ``e_r = (sin, cos, 0)``, ``e_phi = (cos, -sin, 0)``,
-    ``e_down = (0, 0, -1)``.
+    The azimuthal derivatives need no table: the patterns `_combine` puts back
+    differentiate into each other (`sin 2phi` and `cos 2phi` swap with a factor 2,
+    `sin phi` and `cos phi` with 1; `cl` and `ep` have none). What is divided by
+    `r` is read from the tables' `1/r` columns, never divided here, so the axis
+    (`r = 0`, where a volume rule puts points) needs no special case. Then
+    `eps_ENU = Q' eps_cyl Q` with rows `e_r = (sin, cos, 0)`, `e_phi = (cos, -sin, 0)`,
+    `e_down = (0, 0, -1)`.
     """
     values = np.asarray(values, dtype=float).T
     derivatives = np.asarray(derivatives, dtype=float).T
@@ -1022,13 +1014,13 @@ def combine_strain(values, derivatives, azimuth, packing):
 
 
 def _tent_levels(vertices, j, interfaces, count):
-    """Gauss-Legendre levels and weights for vertex ``j``'s tent, split where the integrand kinks.
+    """Gauss-Legendre levels and weights for vertex `j`'s tent, split where the integrand kinks.
 
-    The level-``t`` triangle has vertex ``j`` fixed and the others at
-    ``v_j + (1 - t)(v_k - v_j)``, so it stops crossing an interface ``z_I`` at
-    ``1 - t = (z_I - z_j) / (z_k - z_j)``. One rule across that is slow (a triangle
-    crossing 2 km: 2 points 3e-3, 4 points 7e-4 at 30 sizes, against 1e-5 inside one
-    layer); a rule on each side is not.
+    The level-`t` triangle has vertex `j` fixed and the others at
+    `v_j + (1 - t)(v_k - v_j)`, so it stops crossing an interface `z_I` at
+    `1 - t = (z_I - z_j) / (z_k - z_j)`. One rule across that kink converges slowly
+    (errors near 1e-3 where a triangle inside one layer gets 1e-5); a rule on each side
+    does not.
     """
     depth = -np.asarray(vertices, dtype=float)[:, 2]
     cuts = []
@@ -1052,7 +1044,7 @@ BATCH_PAIRS = 2_000_000
 
 def _tent_levelset_batched(vertices, x, y, z, near, out, components, kernel, gain, min_points,
                            interfaces, poisson, split):
-    """:func:`tent_levelset` with every shrunk piece of a receiver group in one batched call."""
+    """`tent_levelset` with every shrunk piece of a receiver group in one batched call."""
     strain = kernel is tde_strain_hs_unit
     if not strain and kernel is not tde_disp_hs_unit:
         raise ValueError("batched tents take tde_disp_hs_unit or tde_strain_hs_unit")
@@ -1106,11 +1098,11 @@ def _tent_levelset_batched(vertices, x, y, z, near, out, components, kernel, gai
 
 
 def _tent_levels_split(vertices, j, interfaces, receiver, count):
-    """:func:`_tent_levels` for one receiver, also split where the shrinking triangle passes it.
+    """`_tent_levels` for one receiver, also split where the shrinking triangle passes it.
 
-    The level-``t`` triangle's moving edge is the level line ``tent_j = t``, so it crosses the
-    receiver's projection at ``t* = tent_j(projection)``; its moving vertex ``k`` comes closest
-    at ``1 - (p - v_j) . (v_k - v_j) / |v_k - v_j|^2``. ``count`` points on each piece.
+    The level-`t` triangle's moving edge is the level line `tent_j = t`, so it crosses the
+    receiver's projection at `t* = tent_j(projection)`; its moving vertex `k` comes closest
+    at `1 - (p - v_j) . (v_k - v_j) / |v_k - v_j|^2`. `count` points on each piece.
     """
     from ._tde import barycentric
 
@@ -1140,14 +1132,14 @@ def _tent_levels_split(vertices, j, interfaces, receiver, count):
     return levels, weights
 
 
-#: Gauss-Legendre points on each piece of a split level integral (:func:`tent_levelset`).
+#: Gauss-Legendre points on each piece of a split level integral (`tent_levelset`).
 SPLIT_POINTS = 16
 
 _GAUSS = {}
 
 
 def _gauss01(count):
-    """Gauss-Legendre points and weights on ``[0, 1]``, cached."""
+    """Gauss-Legendre points and weights on `[0, 1]`, cached."""
     if count not in _GAUSS:
         t, w = np.polynomial.legendre.leggauss(count)
         _GAUSS[count] = (0.5 * (t + 1.0), 0.5 * w)
@@ -1158,10 +1150,10 @@ _RULES = {}
 
 
 def _rule(order):
-    """:func:`~slipsolve.layered._triangle_quadrature`'s rule as barycentric rows, cached.
+    """`slipsolve.layered._triangle_quadrature`'s rule as barycentric rows, cached.
 
-    The same points (sub-triangle centroids) and equal weights; building them once
-    per order instead of once per piece and receiver group took 14% of an
+    The same points (sub-triangle centroids) and equal weights, built once per order:
+    building them for every piece and receiver group is a sizeable share of an
     interface solve.
     """
     if order not in _RULES:
@@ -1172,16 +1164,14 @@ def _rule(order):
 
 
 def _rule_quadratic(order):
-    """``order**2`` equal sub-triangles, each with the three-point rule exact for quadratics: barycentric rows.
+    """`order**2` equal sub-triangles, each with the three-point rule exact for quadratics: barycentric rows.
 
-    The strain's rule (:meth:`LayeredTDE._remainder`). The sub-triangle centroids of
-    :func:`_rule` integrate a tent times a smooth kernel with an error FIRST order in
-    ``size / distance``: at one point each tent gets a third of the element, its first
-    moment wrong. Measured on the two-layer test crust (2026-11-04), a tent's strain from
-    the centroid-rule remainder was 2e-3 to 3e-2 of its peak off its converged value at
-    1-40 sizes, the element's 3e-4 to 3e-3. This rule (points at 2/3, 1/6, 1/6 of each
-    sub-triangle's vertices, Strang & Fix) makes the first moment exact, so a tent's
-    error is second order like a uniform slip's.
+    The strain's rule, and the displacement's with `quadratic=True` (`LayeredTDE._remainder`).
+    The sub-triangle centroids of `_rule` integrate a tent times a smooth kernel with an
+    error first order in `size / distance`: at one point each tent gets a third of the
+    element, its first moment wrong, and a tent's error is about ten times the element's.
+    This rule (points at 2/3, 1/6, 1/6 of each sub-triangle's vertices, Strang & Fix) makes
+    the first moment exact, so a tent's error is second order like a uniform slip's.
     """
     key = ("quadratic", order)
     if key not in _RULES:
@@ -1196,14 +1186,14 @@ def _rule_quadratic(order):
 
 
 def _rule_gauss(order):
-    """A collapsed Gauss rule of ``order x order`` points on the triangle: barycentric rows, cached.
+    """A collapsed Gauss rule of `order x order` points on the triangle: barycentric rows, cached.
 
-    The square ``(u, v)`` maps onto the triangle as ``(1 - u, u (1 - v), u v)``, with the
-    Jacobian ``2 u``; Gauss-Jacobi points in ``u`` (weight ``u``) and Gauss-Legendre in ``v``. A
+    The square `(u, v)` maps onto the triangle as `(1 - u, u (1 - v), u v)`, with the
+    Jacobian `2 u`; Gauss-Jacobi points in `u` (weight `u`) and Gauss-Legendre in `v`. A
     product Gauss rule, so its error falls geometrically with the order for a kernel smooth
-    over the triangle (``C (a / 2R)**(2n)``, :data:`TRIANGLE_FAR_CONSTANT`), where the composite
-    rules fall as ``order**-2``. It integrates every polynomial of degree below ``2 n`` exactly;
-    one point is the centroid, which is NOT enough for a tent (:data:`TRIANGLE_FAR_MIN_ORDER`).
+    over the triangle (`C (a / 2R)**(2n)`, `TRIANGLE_FAR_CONSTANT`), where the composite
+    rules fall as `order**-2`. It integrates every polynomial of degree below `2 n` exactly;
+    one point is the centroid, which is not enough for a tent (`TRIANGLE_FAR_MIN_ORDER`).
     """
     key = ("gauss", order)
     if key not in _RULES:

@@ -273,12 +273,10 @@ def test_interfaces_come_from_the_layer_block(tmp_path):
 def test_interpolation_never_blends_layers():
     """Per unit potency a table steps by the rigidity ratio at an interface.
 
-    On the Venezuela crust strike-slip values just below / above 2 km differ by
-    3.6-3.8x (mu 33.7 / 9.0 GPa = 3.74), and the plain stencil blended the two
-    layers for every source within a depth spacing of the step -- the whole 1.5-2 km
-    band on the production grid, whose node at exactly 2 km EDGRN puts on the stiff
-    side. Re-solving the real problem with and without the blend moved the slip by
-    up to 4.1% of peak.
+    Under a 9 GPa lid on 33.7 GPa crust, strike-slip values just above and below
+    the step differ by about 3.7x. A plain bilinear stencil blends the two layers
+    for every source within one depth spacing of the step, an error that reaches
+    the slip.
 
     A depth profile linear within each layer must come back exactly, both for an
     interface between two nodes and for one lying on a node (which belongs to
@@ -403,13 +401,10 @@ def test_write_edgrn_input_round_trips_the_grid(tmp_path):
 def test_run_edgrn_says_what_to_do_when_there_is_no_binary(tmp_path, monkeypatch):
     """The message names all three ways to supply EDGRN, so it is actionable.
 
-    Both resolution routes are stubbed out rather than left to the machine. The
-    test used to pass ``executable="/nonexistent"`` when a binary happened to be
-    installed, which does not reach this path at all -- ``run_edgrn`` takes the
-    caller's word for it and hands the path to ``subprocess``, so what came back
-    was a bare ``FileNotFoundError``. That made the test quietly dependent on
-    ``pygrnwang`` being *absent*, and it failed the moment the optional extra was
-    installed.
+    Both resolution routes are stubbed out rather than left to the machine, so the
+    test does not depend on whether `pygrnwang` or a binary is installed. A bad
+    `executable=` would not reach this path at all: `run_edgrn` takes the caller's
+    word for it and hands the path to `subprocess`.
     """
     from slipsolve import edgrn as edgrn_module
     from slipsolve.edgrn import run_edgrn
@@ -423,15 +418,14 @@ def test_run_edgrn_says_what_to_do_when_there_is_no_binary(tmp_path, monkeypatch
 
 
 def test_interpolation_is_unchanged_by_the_clip_rewrite():
-    """`interpolate` is the layered engine's hot path and was rewritten for speed.
+    """`interpolate` avoids `np.clip` on the layered engine's hot path, and must still match it.
 
     `np.clip` routes through `_methods._clip`, which builds a `finfo` per call for
-    NaN handling -- profiled at 316 096 `getlimits.__init__` calls and 20% of
-    assembly time, all overhead. `minimum(maximum(...))` skips it. Equivalent here
-    because nothing in the stencil is ever NaN, but "equivalent" is worth pinning
-    rather than asserting, so this checks the rewrite against a literal
-    transcription of what the function used to compute -- including the corners:
-    below the table, above it, and exactly on the last node.
+    NaN handling -- a large share of assembly time, all overhead.
+    `minimum(maximum(...))` skips it. Equivalent here because nothing in the
+    stencil is ever NaN, but "equivalent" is worth pinning rather than asserting,
+    so this checks it against a literal `np.clip` stencil -- including the
+    corners: below the table, above it, and exactly on the last node.
     """
     r = np.linspace(0.0, 100e3, 21)
     z = np.linspace(500.0, 20e3, 11)

@@ -1,4 +1,4 @@
-"""Triangular dislocations in a layered half-space (``slipsolve.layered_tde``)."""
+"""Triangular dislocations in a layered half-space (`slipsolve.layered_tde`)."""
 
 import numpy as np
 import pytest
@@ -123,8 +123,8 @@ def _point_source_sum(vertices, slip_index, x, y, z, order=4):
 def test_far_away_it_is_the_point_source_sum(two_layer_tables, vertices):
     """Half-space TDE plus the remainder equals the whole layered kernel's point sources.
 
-    The bar is the coarse test tables'. Measured on the crossing triangle against
-    an order-8 reference (itself 1.3e-4 from order 4): 1.6e-3 of the peak on these
+    The bar is the coarse test tables'. On the crossing triangle, against an order-8
+    reference (itself 1.3e-4 from order 4), the error is 1.6e-3 of the peak on these
     tables (36 depths, 20 distances a decade) and 5e-4 on 60 depths and 40 a decade,
     whatever the quadrature tolerance -- it is the tables' resolution.
     """
@@ -188,9 +188,9 @@ def test_a_tent_is_its_finely_subdivided_triangle(one_layer_tables):
 def test_nodal_columns_match_point_sources_away_from_the_fault(two_layer_tables):
     """Two independent tent integrations of one crust, a few km and more from the fault.
 
-    ``LayeredPointSource`` on tables of the full layered kernel from the same solver
+    `LayeredPointSource` on tables of the full layered kernel from the same solver
     (remainder plus half-space, at the surface), integrating each tent with point sources.
-    Measured: 2-5e-3 of each receiver's largest column, the same at point-source
+    They agree to 2-5e-3 of each receiver's largest column, the same at point-source
     tolerance 1e-3 and 1e-4 -- the point sources' own 100 m tables. Projecting
     element means instead differs from these tents by 9-14% on this coarse mesh.
     """
@@ -227,8 +227,8 @@ def test_far_surface_receivers_take_point_sources_of_the_same_field(two_layer_ta
     """The far path (whole surface field, point sources) against the near one, 4-30 sizes out.
 
     Against tent-weighted point sources of the exact layered kernel (converged to 1e-4), the
-    crossing triangle's tents measured 1.3e-3 (near) and 2.9e-3 (far) at 10 sizes, and up to
-    7e-3 elsewhere on these coarse test tables; element fields 1e-3 for both.
+    crossing triangle's tents are off by 1.3e-3 (near) and 2.9e-3 (far) at 10 sizes, and up to
+    7e-3 elsewhere on these coarse test tables; element fields by 1e-3 for both.
     """
     near = LayeredTDE(two_layer_tables, far=None)
     far = LayeredTDE(two_layer_tables, far=4.0)
@@ -248,12 +248,12 @@ def test_far_surface_receivers_take_point_sources_of_the_same_field(two_layer_ta
 
 
 def test_the_quadratic_rule_splits_the_remainder_among_the_tents(two_layer_tables):
-    """The default (``quadratic=True``): the remainder and far path by a rule exact for quadratics.
+    """The default (`quadratic=True`): the remainder and far path by a rule exact for quadratics.
 
-    The sub-triangle centroids (``quadratic=False``, every model before 2026-11-04) give each
-    far-away tent a third of the element, an error first order in size / distance. Measured
-    against the converged tents (these tables, surface, 1.5-30 sizes): centroids 2e-3 to
-    1.8e-2 of a tent's peak, the quadratic rule at most 2e-4.
+    The sub-triangle centroids (`quadratic=False`) give each far-away tent a third of the
+    element, an error first order in size / distance. Against the converged tents (these
+    tables, surface, 1.5-30 sizes): centroids 2e-3 to 1.8e-2 of a tent's peak, the quadratic
+    rule at most 2e-4.
     """
     reference = LayeredTDE(two_layer_tables, tolerance=1e-7)
     default, centroids = LayeredTDE(two_layer_tables), LayeredTDE(two_layer_tables, quadratic=False)

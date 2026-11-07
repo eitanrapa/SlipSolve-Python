@@ -1,11 +1,11 @@
-"""Pins the shared lattice: :mod:`slipsolve.resample` and ``LocalFrame``'s
+"""Pins the shared lattice: `slipsolve.resample` and `LocalFrame`'s
 two coordinate systems.
 
 The whole point of resampling is that every track ends up on **one** grid, so
 most of what is checked here is sameness rather than correctness of any single
-value. The rest guards the distinction that made this subtle: a ``LocalFrame`` is
-a projection *with an origin subtracted*, so ``frame.crs`` and the local metres
-everything else speaks are different numbers -- on the Venezuela frame, 500 km
+value. The rest guards the distinction that makes this subtle: a `LocalFrame` is
+a projection *with an origin subtracted*, so `frame.crs` and the local metres
+everything else speaks are different numbers -- on this test's frame, 500 km
 and 1167 km apart.
 """
 
@@ -77,11 +77,11 @@ def test_local_crs_agrees_with_to_local_everywhere(setup):
 
 
 def test_crs_and_local_crs_differ_by_the_origin(setup):
-    """Tagging local metres with ``crs`` is the bug ``local_crs`` exists to stop.
+    """Tagging local metres with `crs` is the mistake `local_crs` exists to stop.
 
     Pinned with the actual magnitude, because "they differ" understates it: on
     this frame the two disagree by a UTM false easting and 1167 km of northing,
-    which put an exported grid in the wrong hemisphere.
+    enough to put an exported grid in the wrong hemisphere.
     """
     _, frame, _ = setup
     x, y = frame.to_projected(0.0, 0.0)
@@ -126,7 +126,7 @@ def test_lattice_does_not_depend_on_which_stacks_were_passed(setup, scenes):
 
 
 def test_arcsec_10_is_ten_arcseconds():
-    """The default spacing is the ALOS-2 posting. The measured D134 grid is
+    """The default spacing is the ALOS-2 posting. A real ALOS-2 product's grid is
     0.00277836 deg = 10.0021 arcsec, hence the 3e-4 rather than an exact match."""
     assert ARCSEC_10 == pytest.approx(309.2, abs=0.5)
     assert 0.00277836 * 111320.0 == pytest.approx(ARCSEC_10, rel=3e-4)
@@ -170,8 +170,8 @@ def test_resampling_preserves_the_look_vectors(setup, scenes):
 
 
 def test_sampling_a_resampled_stack_matches_the_utm_original(setup, scenes):
-    """The seam that matters: ``from_los`` must read a frame-gridded raster's
-    ``x``/``y`` as local metres. Reading them as projected values put every
+    """The seam that matters: `from_los` must read a frame-gridded raster's
+    `x`/`y` as local metres. Reading them as projected values would put every
     observation ~1200 km from the fault while still inverting to a plausible
     number, which is exactly the kind of failure this pins."""
     trace, frame, _ = setup
@@ -189,11 +189,11 @@ def test_sampling_a_resampled_stack_matches_the_utm_original(setup, scenes):
 
 
 def test_surface_displacement_is_georeferenced_where_the_fault_is(setup, scenes):
-    """A regression guard for the ``crs``/``local_crs`` mix-up.
+    """A guard against mixing up `crs` and `local_crs`.
 
-    ``surface_displacement`` returns local metres; tagging them with the frame's
-    bare projection placed the exported field at latitude -0.06 instead of +10.5,
-    and ``SlipModel.to_grd`` baked that into a lon/lat file.
+    `surface_displacement` returns local metres; tagging them with the frame's
+    bare projection would place the exported field at latitude -0.06 instead of
+    +10.5, and `SlipModel.to_grd` would bake that into a lon/lat file.
     """
     from slipsolve import SlipInversion
 
@@ -212,13 +212,13 @@ def test_surface_displacement_is_georeferenced_where_the_fault_is(setup, scenes)
 
 
 def test_to_grd_writes_the_field_where_the_fault_is(setup, scenes, tmp_path):
-    """The half of the mix-up the test above did not reach.
+    """The half of the mix-up the test above cannot reach.
 
-    ``surface_displacement`` tagging the grid correctly is not enough: ``to_grd``
-    re-tagged it with the frame's bare projection on the way out, which put the
-    written file 10.6 degrees of latitude -- about 1180 km -- south of the fault.
-    Checking the CRS of the in-memory grid could not catch that; only reading the
-    file back can.
+    `surface_displacement` tagging the grid correctly is not enough: if `to_grd`
+    re-tagged it with the frame's bare projection on the way out, the written
+    file would land 10.6 degrees of latitude -- about 1180 km -- south of the
+    fault. Checking the CRS of the in-memory grid cannot catch that; only reading
+    the file back can.
     """
     import xarray as _xr
     from slipsolve import SlipInversion
@@ -247,10 +247,9 @@ def test_frame_round_trips_through_a_dict(setup):
 # ---------------------------------------------------------------------------
 # The `.grd` round trip.
 #
-# `write_grd` came across in the extraction and `read_grd` did not, so for a
-# while a standalone slipsolve could write a GMT grid it could not read back --
-# and `.grd` is how ALOS and GMTSAR products arrive. These pin both halves and
-# the two things a `.grd` cannot record, `units` and `sign`.
+# `.grd` is how ALOS and GMTSAR products arrive, so a GMT grid slipsolve writes
+# must read back. These pin both halves and the two things a `.grd` cannot
+# record, `units` and `sign`.
 # ---------------------------------------------------------------------------
 
 

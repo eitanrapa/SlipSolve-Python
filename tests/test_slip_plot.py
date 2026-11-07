@@ -131,11 +131,11 @@ def test_plot_fit_shares_one_scale_between_data_and_model(solved):
 
 
 def test_plot_fit_names_the_tracks_when_given_one_that_is_not_there(solved):
-    """A wrong track name used to surface as a numpy reduction error.
+    """A wrong track name is named, not left to surface as a numpy reduction error.
 
-    The empty selection reached the colour-scale line as `np.abs([]).max()`,
-    raising "zero-size array to reduction operation maximum which has no
-    identity" -- which names neither the track nor the model. The usual cause is
+    An empty selection would reach the colour-scale line as `np.abs([]).max()`
+    and raise "zero-size array to reduction operation maximum which has no
+    identity", which names neither the track nor the model. The usual cause is
     a name read off a *different* Observations than the model carries.
     """
     *_, model = solved
@@ -360,8 +360,8 @@ def test_a_reloaded_model_still_separates_its_ramp(solved_with_ramp, tmp_path):
 
 
 def test_an_old_model_without_the_recorded_ramp_kind_still_splits(solved_with_ramp):
-    """Models saved before the options carried ``ramp`` are read back by
-    counting columns per track, which is one-to-one with the degree."""
+    """A model whose options do not record `ramp` is read back by counting
+    columns per track, which is one-to-one with the degree."""
     from slipsolve.regularize import ramp_kind_for
 
     _, obs, model = solved_with_ramp
@@ -391,7 +391,7 @@ def test_plot_slip_can_draw_the_resolving_length(solved):
 # -- a nodal model must not be drawn as a piecewise-constant one -------------
 
 def test_a_nodal_model_is_drawn_as_the_linear_field_it_is(solved_nodal):
-    """⚠️ Flat shading draws a *different model* -- the user's objection.
+    """Flat shading draws a *different model*.
 
     A nodal basis expands slip in piecewise-linear tents, so the field varies
     linearly across every triangle. Colouring each triangle one colour draws the
@@ -418,11 +418,11 @@ def test_a_nodal_model_is_drawn_as_the_linear_field_it_is(solved_nodal):
 
 
 def test_the_title_quotes_the_value_the_panel_actually_draws(solved_nodal):
-    """Title and colourbar must agree. They differed by 51% on the real model.
+    """Title and colourbar must agree.
 
     Flat shading reduces the peak to the element mean while `model.max_slip` is
-    the peak of the continuous field -- 3.04 m against 4.59 m on the six-scene
-    run, the larger number printed above a colourbar that stopped at the smaller.
+    the peak of the continuous field, so quoting it would print the larger number
+    above a colourbar that stops at the smaller.
     """
     model = solved_nodal
     nodal = float(np.hypot(model.strike_slip, model.dip_slip).max())

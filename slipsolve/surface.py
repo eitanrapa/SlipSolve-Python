@@ -1,24 +1,23 @@
 """The curved fault surface: where the fault goes once it stops being vertical.
 
-A dipping fault is described here as a single scalar field ``cross = f(s, z)``
-over the ``(arc length, depth)`` rectangle -- how far, and which way, the fault
-has stepped off its surface trace by the time it reaches depth ``z``. That is
-enough to place every mesh node, and it keeps the whole of
-:mod:`slipsolve.mesh` working in the parameterization it already uses.
+A dipping fault is described here as a single scalar field `cross = f(s, z)`
+over the `(arc length, depth)` rectangle: how far, and which way, the fault
+has stepped off its surface trace by the time it reaches depth `z`. That is
+enough to place every mesh node, and it keeps the whole of `slipsolve.mesh`
+working in the parameterization it already uses.
 
 The field is *fitted*, not evaluated, because the constraints are sparse: the
-surface trace pins ``cross = 0`` at ``z = 0``, and each deep segment pins a
-bottom line at ``z = -max_depth``, and between them there is nothing. What fills
-that gap is the regularizer, so the regularizer is not a detail -- it **is** the
-dip profile. This module therefore ports the specific gridder the reference
-implementation uses (John D'Errico's ``gridfit``, vendored in SlipSolve-Curve)
-rather than substituting a generic smoother:
+surface trace pins `cross = 0` at `z = 0`, and each deep segment pins a
+bottom line at `z = -max_depth`, and between them there is nothing. What fills
+that gap is the regularizer, so the regularizer sets the dip profile. This
+module therefore ports the gridder SlipSolve-Curve uses (John D'Errico's
+`gridfit`) rather than substituting a generic smoother:
 
-* ``RBFInterpolator`` and ``SmoothBivariateSpline`` are not linear in the node
-  values in the same way and do not reproduce ``gridfit``'s ``smoothness``.
-* :func:`nisar_tools._kernels.smooth_surface` is a filled-grid smoother -- it
-  needs a value at (almost) every cell and returns NaN interiors when handed a
-  cloud with a hole through the middle, which is exactly this cloud's shape.
+* `RBFInterpolator` and `SmoothBivariateSpline` are not linear in the node
+  values in the same way and do not reproduce `gridfit`'s `smoothness`.
+* A filled-grid smoother needs a value at (almost) every cell and returns NaN
+  interiors when handed a cloud with a hole through the middle, which is
+  exactly this cloud's shape.
 """
 
 import warnings
@@ -29,22 +28,18 @@ from scipy.sparse.linalg import lsqr
 
 from .trace import VERTICAL_TOL_DEG, FaultTrace, dip_offset  # noqa: F401  (re-exported)
 
-#: Default smoothing weight, matching the reference's Myanmar configuration
-#: (``cfg.geometry.surfaceFitSmoothness``).
+#: Default smoothing weight, as in SlipSolve-Curve's example configuration
+#: (`cfg.geometry.surfaceFitSmoothness`).
 DEFAULT_SMOOTHNESS = 0.008
 
-#: How much more the surface trace counts than the deep bottom lines.
+#: Row weight of the surface-trace control points relative to the bottom lines.
 #:
-#: The reference does not weight rows; it *oversamples*, interpolating the
-#: surface trace to ``1e5`` times its vertex count and the bottom lines to only
-#: ``1e2`` times theirs (``surfaceInterpolationFactor`` /
-#: ``bottomInterpolationFactor``). In a least-squares fit those are the same
-#: thing -- a thousand collinear copies of a constraint is a constraint with a
-#: thousand times the weight -- except that the literal reading also builds a
-#: twelve-million-row design matrix for a 240 km trace. Weighting the rows
-#: reproduces the effect at a few thousand rows. Sampling density is set
-#: separately, by :data:`SAMPLES_PER_CELL`, and only has to be enough that every
-#: grid cell is covered.
+#: SlipSolve-Curve does not weight rows; it oversamples, interpolating the
+#: surface trace to 1e5 times its vertex count and the bottom lines to 1e2
+#: times theirs (`surfaceInterpolationFactor` / `bottomInterpolationFactor`).
+#: Weighting the rows makes the surface trace dominate in the same way without
+#: a design matrix of millions of rows. Sampling density is set separately, by
+#: `SAMPLES_PER_CELL`, and only has to cover every grid cell.
 SURFACE_WEIGHT_RATIO = 1e3
 
 #: Control points per grid cell along each constraint line.
@@ -54,34 +49,34 @@ SAMPLES_PER_CELL = 8
 def gridfit(x, y, v, x_nodes, y_nodes, smoothness=1.0, weights=None,
             interp="triangle", regularizer="gradient", autoscale=True,
             solver="lsqr"):
-    """Fit a smooth surface on a lattice through scattered ``(x, y, v)`` samples.
+    """Fit a smooth surface on a lattice through scattered `(x, y, v)` samples.
 
-    A port of ``gridfit.m`` restricted to the options the reference actually
-    passes -- it supplies only ``smoothness``, so everything else here defaults
-    to ``gridfit``'s own default. Returns the fitted values on the lattice with
-    shape ``(len(y_nodes), len(x_nodes))``.
+    A port of John D'Errico's `gridfit.m` restricted to the options
+    SlipSolve-Curve passes: it supplies only `smoothness`, so everything else
+    defaults to `gridfit`'s own default. Returns the fitted values on the
+    lattice with shape `(len(y_nodes), len(x_nodes))`.
 
     Unlike an interpolant this is an *approximation*: the surface is not required
     to pass through the data, and it is defined everywhere on the lattice
-    including where there is no data at all. Both properties are wanted here --
+    including where there is no data at all. Both properties are wanted here:
     the control points are contradictory where segments meet, and most of the
-    ``(s, z)`` rectangle has no constraint whatsoever.
+    `(s, z)` rectangle has no constraint whatsoever.
 
-    ``regularizer="gradient"`` is the reference's choice and is **not** the
+    `regularizer="gradient"` is SlipSolve-Curve's choice and is not the
     Laplacian. Both build the same second-difference stencils in each direction;
-    ``"diffusion"`` *adds* them, penalising only the sum, while ``"gradient"``
+    `"diffusion"` *adds* them, penalising only the sum, while `"gradient"`
     *stacks* them, penalising each direction separately. Penalising the sum lets
     curvature in one direction pay for curvature in the other, which on this
     problem lets the surface bow along strike to buy a straighter dip profile.
 
-    ``autoscale`` divides each direction's spacing by its mean before the
+    `autoscale` divides each direction's spacing by its mean before the
     stencils are built. It is not cosmetic: the along-strike node spacing is
     kilometres and the depth spacing is hundreds of metres, so without it the
     smoothing is anisotropic by that ratio squared.
 
-    ``weights`` scales the data rows only, before the regularizer is normalised
-    against them -- so a row's weight changes what the fit is, not what
-    ``smoothness`` means relative to it.
+    `weights` scales the data rows only, before the regularizer is normalised
+    against them, so a row's weight changes what the fit is, not what
+    `smoothness` means relative to it.
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
@@ -105,8 +100,8 @@ def gridfit(x, y, v, x_nodes, y_nodes, smoothness=1.0, weights=None,
     x_scale = dx.mean() if autoscale else 1.0
     y_scale = dy.mean() if autoscale else 1.0
 
-    # Node (ix, iy) is column iy + ny*ix -- MATLAB's column-major order, kept so
-    # the stencil offsets below read the same as the reference's.
+    # Node (ix, iy) is column iy + ny*ix: MATLAB's column-major order, kept so
+    # the stencil offsets below read the same as gridfit's.
     ix = np.clip(np.searchsorted(x_nodes, x, side="right") - 1, 0, nx - 2)
     iy = np.clip(np.searchsorted(y_nodes, y, side="right") - 1, 0, ny - 2)
     tx = np.clip((x - x_nodes[ix]) / dx[ix], 0.0, 1.0)
@@ -135,7 +130,7 @@ def gridfit(x, y, v, x_nodes, y_nodes, smoothness=1.0, weights=None,
     reg = _regularizer(nx, ny, dx, dy, x_scale, y_scale, regularizer)
 
     # Scale the regularizer against the data block so that `smoothness` means the
-    # same thing whatever the units are. The 1-norm, as the reference uses.
+    # same thing whatever the units are. The 1-norm, as gridfit uses.
     n_data = _norm1(design)
     n_reg = _norm1(reg)
     if n_reg == 0:
@@ -144,9 +139,9 @@ def gridfit(x, y, v, x_nodes, y_nodes, smoothness=1.0, weights=None,
     full_rhs = np.concatenate([rhs, np.zeros(reg.shape[0])])
 
     if solver == "lsqr":
-        # The regularizer leaves the stacked system well conditioned, but it is
-        # rank-deficient without it, so an iterative least-squares solve is the
-        # honest analogue of MATLAB's sparse QR backslash.
+        # The data block alone is rank-deficient and the regularizer makes the
+        # stacked system well conditioned, so an iterative least-squares solve
+        # stands in for MATLAB's sparse QR backslash.
         z = lsqr(stacked, full_rhs, atol=1e-12, btol=1e-12,
                  iter_lim=max(10000, 10 * ngrid))[0]
     elif solver == "normal":
@@ -194,28 +189,28 @@ def _regularizer(nx, ny, dx, dy, x_scale, y_scale, kind):
 
 
 def _norm1(matrix):
-    """Maximum absolute column sum -- MATLAB's ``norm(A, 1)``."""
+    """Maximum absolute column sum, MATLAB's `norm(A, 1)`."""
     if matrix.shape[0] == 0:
         return 0.0
     return float(abs(matrix).sum(axis=0).max())
 
 
 def centres(values):
-    """Midpoints of consecutive entries -- the reference's ``movmean(x, 2)``."""
+    """Midpoints of consecutive entries, SlipSolve-Curve's `movmean(x, 2)`."""
     values = np.asarray(values, dtype=float)
     return 0.5 * (values[:-1] + values[1:])
 
 
 class FaultSurface:
-    """A fitted ``cross(s, z)`` field, on the mesh lattice and at cell centres.
+    """A fitted `cross(s, z)` field, on the mesh lattice and at cell centres.
 
-    Two grids, because they serve different consumers: the **node** grid places
-    the mesh's vertices, and the **centre** grid is where the layered Green's
-    functions put their point sources. The reference computes the centre grid by
-    running the fit a second time on the centre lattice rather than interpolating
-    the node grid (``gridFitInterpolate.m``), and that is reproduced here -- the
-    two differ wherever the regularizer is doing the work, which for this cloud
-    is almost everywhere.
+    Two grids, because they serve different consumers: the node grid places
+    the mesh's vertices, and the centre grid is where the layered Green's
+    functions put their point sources. SlipSolve-Curve computes the centre grid
+    by running the fit a second time on the centre lattice rather than
+    interpolating the node grid (`gridFitInterpolate.m`), and that is
+    reproduced here: the two differ wherever the regularizer is doing the work,
+    which for this cloud is almost everywhere.
     """
 
     def __init__(self, s_nodes, z_nodes, cross_nodes,
@@ -255,13 +250,13 @@ class FaultSurface:
                       samples_per_cell=SAMPLES_PER_CELL, **kwargs):
         """Build the control cloud from a trace plus one dip per deep segment.
 
-        ``segments`` is a sequence of :class:`~slipsolve.trace.FaultSegment`
-        and ``dips`` one dip in degrees for each. The cloud has exactly two
-        constrained depths -- ``cross = 0`` all along ``z = 0``, and each
-        segment's down-dip projection at ``z = z_nodes.min()`` -- which is why
-        the reference's "variable dip" is really *dip varying along strike, and
-        planar with depth*. ``depth_control`` supplies intermediate
-        ``(x, y, depth)`` points (from relocated seismicity, say) and is the only
+        `segments` is a sequence of `slipsolve.trace.FaultSegment` and
+        `dips` one dip in degrees for each. The cloud has exactly two
+        constrained depths (`cross = 0` all along `z = 0`, and each segment's
+        down-dip projection at `z = z_nodes.min()`), which is why
+        SlipSolve-Curve's "variable dip" is really dip varying along strike,
+        and planar with depth. `depth_control` supplies intermediate
+        `(x, y, depth)` points (from relocated seismicity, say) and is the only
         way to bend the profile with depth.
         """
         segments = list(segments)
@@ -331,42 +326,38 @@ class FaultSurface:
                           samples_per_cell=SAMPLES_PER_CELL, **kwargs):
         """Build the control cloud from a surface trace plus a *bottom* trace.
 
-        The same fit as :meth:`from_segments`, but the bottom line is digitised
+        The same fit as `from_segments`, but the bottom line is digitised
         rather than derived from a dip. Nothing downstream of the control cloud
         changes, because dips were never used as angles in the first place: a dip
-        is turned into a bottom line by
-        :meth:`~slipsolve.trace.FaultSegment.project` and only the line is
-        fitted. A bottom trace *is* that line, so this constructor simply skips
-        the angle.
+        is turned into a bottom line by `slipsolve.trace.FaultSegment.project`
+        and only the line is fitted. A bottom trace is that line, so this
+        constructor simply skips the angle.
 
-        ``bottom`` is a :class:`~slipsolve.trace.FaultTrace` or a path to
-        one -- ``.kml`` or the same whitespace-separated text
-        :meth:`~slipsolve.trace.FaultTrace.from_file` already reads. It is
-        the *map view* position of the fault's bottom edge; a KML carries no
-        usable depth (Google Earth writes every vertex at altitude 0), so the
-        depth it represents is ``bottom_depth``, defaulting to the base of the
-        mesh.
+        `bottom` is a `slipsolve.trace.FaultTrace` or a path to one (`.kml`
+        or the whitespace-separated text `slipsolve.trace.FaultTrace.from_file`
+        reads). It is the map-view position of the fault's bottom edge; a KML
+        carries no usable depth (Google Earth writes every vertex at altitude
+        0), so the depth it represents is `bottom_depth`, defaulting to the
+        base of the mesh.
 
-        ``bottom_depth`` **below** ``max_depth`` is the useful case and not a
-        mistake: the control row then sits inside the lattice and the levels
-        under it are set by the regularizer alone, which continues the dip
-        linearly. So a bottom trace digitised at a 15 km locking depth still
-        gives a sensible 40 km mesh. Deeper than ``max_depth`` is refused --
-        :func:`gridfit` clips control points into the lattice, so it would be
-        silently flattened onto the bottom row rather than ignored.
+        A `bottom_depth` shallower than the base of the mesh is the useful case,
+        not a mistake: the control row then sits inside the lattice and the
+        levels under it are set by the regularizer alone, which continues the
+        dip linearly. So a bottom trace digitised at a 15 km locking depth still
+        gives a sensible 40 km mesh. Deeper than the base is refused: `gridfit`
+        clips control points into the lattice, so it would be silently flattened
+        onto the bottom row rather than ignored.
 
-        Two things this has to do that :meth:`from_segments` does not. The bottom
-        line is a *polyline*, not a chord, so it is densified by arc length
-        (via :meth:`~slipsolve.trace.FaultTrace.resample`) instead of by
+        Two things this has to do that `from_segments` does not. The bottom
+        line is a polyline, not a chord, so it is densified by arc length
+        (via `slipsolve.trace.FaultTrace.resample`) instead of by
         interpolating between two endpoints. And a digitised bottom trace
-        routinely runs past the ends of the surface trace, which
-        :meth:`~slipsolve.trace.FaultTrace.to_curvilinear` cannot express:
-        it clamps to the polyline, so an overhanging point reports the full
-        distance to the *endpoint*, along-strike component and all, and every
-        such point piles onto one ``s``. Measured on the San Sebastian pair, a
-        17 km overhang turned a -7.5 km offset into -18.3 km -- a 65 degree dip
-        at the tip of an otherwise 76-90 degree fault, with nothing to notice.
-        Those samples are dropped, with a warning naming how many.
+        often runs past the ends of the surface trace, which
+        `slipsolve.trace.FaultTrace.to_curvilinear` cannot express: it clamps
+        to the polyline, so an overhanging point reports the full distance to
+        the endpoint, along-strike component and all, and every such point
+        piles onto one `s`, faking a change of dip at that end. Those samples
+        are dropped, with a warning when their offsets are inflated.
         """
         if not isinstance(bottom, FaultTrace):
             bottom = FaultTrace.from_file(bottom)
@@ -462,9 +453,8 @@ class FaultSurface:
             s_nodes, z_nodes, smoothness=smoothness, weights=np.concatenate(w_all),
             **kwargs,
         )
-        # Reported, not just recorded: a bottom trace that crosses the surface
-        # trace flips which way the fault leans, and nothing else in the pipeline
-        # would say so.
+        # Recorded in attrs: a bottom trace that crosses the surface trace flips
+        # which way the fault leans, and nothing else in the pipeline would say so.
         dips = np.degrees(np.arctan2(bottom_depth, cross_bottom))
         surface.attrs.update(
             bottom_trace=bottom.name,
@@ -482,7 +472,7 @@ class FaultSurface:
 
     @classmethod
     def vertical(cls, s_nodes, z_nodes):
-        """A surface with ``cross`` identically zero -- the phase-one fault."""
+        """A surface with `cross` identically zero: a vertical fault."""
         shape = (np.asarray(z_nodes).size, np.asarray(s_nodes).size)
         s_c, z_c = centres(s_nodes), centres(z_nodes)
         return cls(s_nodes, z_nodes, np.zeros(shape), s_c, z_c,
@@ -490,10 +480,10 @@ class FaultSurface:
 
     # -- use ---------------------------------------------------------------
     def nodes(self, trace, frame):
-        """Map positions of every lattice node; ``(x, y, z, s)``, each ``(nz*ns,)``.
+        """Map positions of every lattice node; `(x, y, z, s)`, each `(nz*ns,)`.
 
         Flattened with the along-strike index fastest, which is the ordering
-        :func:`slipsolve.mesh._lattice_triangles` assumes.
+        `slipsolve.mesh._lattice_triangles` assumes.
         """
         return self._place(trace, frame, self.s_nodes, self.z_nodes, self.cross_nodes)
 

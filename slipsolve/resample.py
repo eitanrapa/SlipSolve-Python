@@ -1,21 +1,21 @@
 """Putting every scene on one lattice, in the frame the inversion works in.
 
 Tracks arrive on whatever grid their processor chose -- a NISAR product at 25-50 m
-in its own UTM zone, a GMTSAR ``.grd`` at 10 arc-seconds in lon/lat. Sampling them
+in its own UTM zone, a GMTSAR `.grd` at 10 arc-seconds in lon/lat. Sampling them
 as they are is not neutral, because a quadtree cell is an integer number of
-pixels halved at its midpoint: the reachable cell sizes form a **dyadic ladder set
-by the pixel size**, per axis and per scene (see
-:func:`~nisar_tools.slip.diagnostics.cell_size_ladder`). Two scenes at different
-resolutions land on different ladders, so one ``width_min`` means two different
+pixels halved at its midpoint: the reachable cell sizes form a dyadic ladder set
+by the pixel size, per axis and per scene (see
+`slipsolve.diagnostics.cell_size_ladder`). Two scenes at different
+resolutions land on different ladders, so one `width_min` means two different
 things, the per-track sample counts diverge for a reason that has nothing to do
 with the data, and that reaches the inversion as an unintended reweighting
-through :meth:`~nisar_tools.slip.sampling.Observations.concat`.
+through `slipsolve.sampling.Observations.concat`.
 
 So: resample everything onto one lattice first. The lattice is built in the
-shared :class:`~nisar_tools.slip.frame.LocalFrame` rather than in a UTM zone,
+shared `slipsolve.frame.LocalFrame` rather than in a UTM zone,
 because the frame is what the inversion measures in anyway and it is the same
 grid for every track -- a study area spanning a zone boundary has no single UTM
-grid, which is the whole reason :class:`LocalFrame` exists.
+grid, which is the whole reason `LocalFrame` exists.
 
 The default spacing is 10 arc-seconds, which is what ALOS-2 interferograms are
 usually delivered at, and is already ~20x finer than a fault element. Going finer
@@ -26,27 +26,26 @@ import numpy as np
 
 from ._geo import transform_native_bbox, warp_onto_lattice
 
-#: 10 arc-seconds of latitude, in metres -- the conventional InSAR posting, and
-#: the exact spacing of the ALOS-2 grids this was written for (measured
-#: ``0.00277836 deg`` = 10.0021 arcsec).
+#: 10 arc-seconds of latitude, in metres: the conventional InSAR posting, and that of
+#: ALOS-2 interferogram grids.
 ARCSEC_10 = 10.0 / 3600.0 * 111320.0
 
 
 def frame_lattice(stacks, frame, spacing=ARCSEC_10, bounds=None, pad=0.0):
-    """One north-up ``(x, y)`` lattice in ``frame`` covering every stack.
+    """One north-up `(x, y)` lattice in `frame` covering every stack.
 
-    Anchored on multiples of ``spacing`` from the frame origin, so the lattice
+    Anchored on multiples of `spacing` from the frame origin, so the lattice
     depends only on the frame and the spacing -- not on which stacks were passed,
     nor on the order they came in. Two runs over different subsets of the same
     tracks therefore produce grids that line up exactly.
 
-    ``bounds`` is ``(x_min, x_max, y_min, y_max)`` in local frame metres and
-    overrides the union of the stacks' footprints; ``pad`` widens that union.
+    `bounds` is `(x_min, x_max, y_min, y_max)` in local frame metres and
+    overrides the union of the stacks' footprints; `pad` widens that union.
 
-    The returned coordinates **are** local frame metres, because the grid is
-    built in :attr:`~nisar_tools.slip.frame.LocalFrame.local_crs` -- the frame's
+    The returned coordinates are local frame metres, because the grid is
+    built in `slipsolve.frame.LocalFrame.local_crs` -- the frame's
     projection with the origin folded into its false easting. That is what lets
-    the sampler read ``x``/``y`` straight off the raster while the raster stays
+    the sampler read `x`/`y` straight off the raster while the raster stays
     correctly georeferenced for export.
     """
     stacks = [stacks] if hasattr(stacks, "ds") else list(stacks)
@@ -64,7 +63,7 @@ def frame_lattice(stacks, frame, spacing=ARCSEC_10, bounds=None, pad=0.0):
     spacing = float(spacing)
     if spacing <= 0:
         raise ValueError(f"spacing must be positive, not {spacing}")
-    # Snap outward to whole multiples of the spacing **in local metres**, so the
+    # Snap outward to whole multiples of the spacing in local metres, so the
     # grid phase is tied to the study area rather than to a false easting.
     x = np.arange(np.floor(x_min / spacing), np.ceil(x_max / spacing) + 1) * spacing
     y = np.arange(np.ceil(y_max / spacing), np.floor(y_min / spacing) - 1, -1) * spacing
@@ -73,18 +72,17 @@ def frame_lattice(stacks, frame, spacing=ARCSEC_10, bounds=None, pad=0.0):
 
 def resample_to_frame(stack, frame, x=None, y=None, spacing=ARCSEC_10,
                       resampling="bilinear", name=None):
-    """Warp one gridded LOS product onto a lattice in ``frame``.
+    """Warp one gridded LOS product onto a lattice in `frame`.
 
-    Pass the ``x``/``y`` from :func:`frame_lattice` to put several tracks on the
+    Pass the `x`/`y` from `frame_lattice` to put several tracks on the
     *same* grid; without them a lattice is built for this stack alone, which is
     only useful when there is one track.
 
     The result is the same kind of object it was given, except that it carries
-    ``attrs["frame"]`` and **no** ``attrs["epsg"]`` -- the frame's transverse
-    Mercator has no EPSG code. :meth:`~nisar_tools.slip.sampling.Observations.from_los`
+    `attrs["frame"]` and no `attrs["epsg"]` -- the frame's transverse
+    Mercator has no EPSG code. `slipsolve.sampling.Observations.from_los`
     recognises the frame attribute and skips its usual reprojection, and anything
-    that only needs the projection should read
-    :attr:`~nisar_tools._base.RasterStackMixin.crs`.
+    that only needs the projection should read the stack's `crs`.
     """
     if x is None or y is None:
         x, y = frame_lattice([stack], frame, spacing=spacing)
@@ -118,20 +116,18 @@ def resample_to_frame(stack, frame, x=None, y=None, spacing=ARCSEC_10,
     if name is not None:
         ds.attrs["direction"] = ds.attrs.get("direction") or name
         ds.attrs["track"] = name
-    # ⚠️ Return the type we were handed, not a named class. This package is
-    # duck-typed on `.ds`/`.x`/`.y`/`.crs`, so it works on a NISAR `LOSStack`, a
-    # plain wrapper around a Dataset, or anything else with that shape -- and
-    # naming a class here would put the raster package back in the dependency
-    # list for one constructor call.
+    # Return the type we were handed, not a named class: the package is duck-typed
+    # on `.ds`/`.x`/`.y`/`.crs`, and naming a class here would make a raster
+    # package a dependency for one constructor call.
     return type(stack)(ds)
 
 
 def resample_all(scenes, frame, spacing=ARCSEC_10, bounds=None, pad=0.0,
                  resampling="bilinear"):
-    """Put a ``{name: stack}`` mapping on one shared lattice.
+    """Put a `{name: stack}` mapping on one shared lattice.
 
     Returns a mapping of the same keys. Every output shares bit-identical
-    ``x``/``y``, which is what makes their quadtree cell-size ladders -- and so
+    `x`/`y`, which is what makes their quadtree cell-size ladders -- and so
     their sample counts -- comparable.
     """
     scenes = dict(scenes)

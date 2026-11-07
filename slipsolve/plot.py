@@ -1,23 +1,22 @@
 """Figures for a slip inversion: the model, the fit, the sampling, the L-curve.
 
-Slip on a **vertical** fault is best read on an *unrolled* section -- along-strike
-distance against depth -- rather than in 3-D. The unrolling is exact, since the
+Slip on a vertical fault is best read on an *unrolled* section (along-strike
+distance against depth) rather than in 3-D. The unrolling is exact, since the
 fault is parameterized by exactly those two coordinates, and it wastes no space
 on a projection that would show a nearly edge-on plane. That panel stays correct
 for a dipping fault too, but it projects the dip away by construction, so
-:func:`plot_slip_3d` is the view that shows where the fault actually goes.
+`plot_slip_3d` is the view that shows where the fault actually goes.
 
-Every function returns ``(fig, ax)`` and draws nothing on import, matching
-:mod:`nisar_tools.plot`.
+Every function returns `(fig, ax)` and draws nothing on import.
 """
 
 import numpy as np
 
 
 def _slip_component(model, component):
-    """The per-element field named by ``component``.
+    """The per-element field named by `component`.
 
-    Shared by the 2-D and 3-D views so the two cannot drift apart -- they are
+    Shared by the 2-D and 3-D views so the two cannot drift apart: they are
     meant to be compared by eye, which only works if "strike slip" means the
     same array and the same colour scale in both.
     """
@@ -50,13 +49,12 @@ def _scale_slip(coll, value, component, vmin, vmax):
 def _slip_title(model, component, drawn=None):
     """Title for a slip panel.
 
-    ⚠️ ``max`` quotes the value **actually drawn**, not ``model.max_slip``. Those
-    differ for a nodal model: the panel shades each triangle by the mean of its
-    three nodes while ``max_slip`` is the peak of the continuous tent field, and
-    on the real six-scene model that gap was 3.04 m against 4.59 m -- **51%**, with
-    the larger number printed above a colourbar that stopped at the smaller one.
-    The nodal peak is still reported, in brackets, because it is the peak of the
-    field and the more conventional headline; it is simply labelled.
+    `max` quotes the value actually drawn, not `model.max_slip`. Those differ
+    when a nodal model is drawn per element: each triangle then shows the mean
+    of its three nodes while `max_slip` is the peak of the continuous tent
+    field, which can be well above anything on the colour bar. The nodal peak
+    is still reported, in brackets and labelled, because it is the peak of the
+    field and the more conventional headline.
     """
     head = (f"{component} slip -- VR {model.variance_reduction:.1f}%, "
             f"Mw {model.moment_magnitude:.2f}")
@@ -73,41 +71,35 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
               vmin=None, vmax=None, title=None, kernels=None, shading="auto"):
     """Slip on the unrolled fault: along-strike distance against depth.
 
-    ``component`` is ``"magnitude"``, ``"strike"`` or ``"dip"``. Elements are
+    `component` is `"magnitude"`, `"strike"` or `"dip"`. Elements are
     drawn as true triangles, so the mesh itself is visible and a bad element
     cannot hide behind interpolation.
 
-    ``kernels`` takes a :func:`~slipsolve.resolution.resolution_report`
-    and draws the **resolving length** as a bar on the panel, with the median
-    along-strike kernel width in the title. Worth doing whenever the figure will
-    be read for structure: on the real six-scene data the elements are 2.4 km and
-    the along-strike kernel is 26-41 km, so a slip map drawn at element scale
-    shows roughly ten times more detail than the data supports, and nothing in
-    the picture itself says so.
+    `kernels` takes a `slipsolve.resolution.resolution_report` and draws the
+    resolving length as a bar on the panel, with the median along-strike kernel
+    width in the title. Worth doing whenever the figure will be read for
+    structure: the resolving length is often many elements long, so a slip map
+    drawn at element scale shows more detail than the data support, and nothing
+    in the picture itself says so.
 
-    ``shading`` decides how a triangle is coloured, and it is not cosmetic:
+    `shading` decides how a triangle is coloured, and it is not cosmetic:
 
-    * ``"auto"`` (default) -- **Gouraud** for a nodal model, flat for an element
+    * `"auto"` (default): Gouraud for a nodal model, flat for an element
       one. Each draws the field the model actually holds.
-    * ``"flat"`` -- one colour per triangle from the element mean, whatever the
+    * `"flat"`: one colour per triangle from the element mean, whatever the
       basis. Use it only to put a nodal and an element model on the same footing
       for a side-by-side.
 
-    ⚠️ **A nodal model must not be drawn flat by default.** Its slip is expanded
-    in piecewise-linear tents, so it varies *linearly* across every triangle;
-    colouring each one constant draws the piecewise-constant field a
-    constant-slip TDE would give -- which is exactly what this parameterization
-    exists not to be, and a reader cannot tell the difference by looking. The
-    Gouraud interpolation is not a smoothing convenience, it is the exact field.
+    A nodal model is not drawn flat by default. Its slip is expanded in
+    piecewise-linear tents, so it varies linearly across every triangle;
+    colouring each one constant draws the piecewise-constant field of
+    constant-slip elements instead, and a reader cannot tell the difference by
+    looking. The Gouraud interpolation is not a smoothing convenience, it is the
+    exact field, and it keeps the peak in the title and the top of the colour
+    scale the same number.
 
-    It also removes a reporting trap. Under flat shading the panel's peak was the
-    element *mean* while the title quoted the nodal peak; on the real six-scene
-    model those were 3.04 m and 4.59 m, a **51%** disagreement between a figure
-    and its own caption. Drawing the nodal field makes the two the same number.
-
-    :func:`plot_slip_edges` is the other honest view -- nodal values along the
-    element edges, where adjacent edges disagreeing at a shared node is the nodal
-    signature a shaded triangle hides.
+    `plot_slip_edges` is the other view of a nodal model: slip along the
+    element edges, which shows the gradients a shaded triangle hides.
     """
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
@@ -122,17 +114,9 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
         _, ax = plt.subplots(figsize=(12, 3.2))
 
     if nodal is not None:
-        # ⚠️ **Gouraud, because the field really is linear across a triangle.**
-        # A nodal basis expands slip in piecewise-linear tents, so shading each
-        # triangle one colour draws a *different model* -- the piecewise-constant
-        # field a constant-slip TDE would give, which is precisely what this
-        # parameterization exists not to be. Interpolating from the three nodal
-        # values is not a smoothing convenience; it is the exact field.
-        #
-        # It also removes a reporting trap: with flat shading the panel's peak was
-        # the element mean while the title quoted the nodal peak, and on the real
-        # model those were 3.04 m and 4.59 m -- a 51% disagreement between a
-        # figure and its own caption.
+        # Gouraud, because a nodal field really is linear across a triangle:
+        # interpolating from the three nodal values is the exact field, and flat
+        # shading would draw a different, piecewise-constant model.
         coll = ax.tripcolor(mesh.params[:, 0] / 1e3, mesh.params[:, 1] / 1e3,
                             mesh.triangles, nodal, shading="gouraud", cmap=cmap)
         _scale_slip(coll, nodal, component, vmin, vmax)
@@ -172,26 +156,26 @@ def plot_slip_3d(model, component="magnitude", ax=None, cmap="magma_r",
                  view=(22.0, -70.0), trace=None, edgecolors="0.4"):
     """Slip on the fault surface in three dimensions, in local-frame kilometres.
 
-    What :func:`plot_slip` cannot show: the unrolled section is parameterized by
+    What `plot_slip` cannot show: the unrolled section is parameterized by
     arc length and depth, so it projects the dip away by construction. On a
-    curved or dipping mesh -- especially one built from a bottom trace, where the
-    dip varies along strike and may reverse -- this is the view that shows where
+    curved or dipping mesh (especially one built from a bottom trace, where the
+    dip varies along strike and may reverse) this is the view that shows where
     the fault actually goes.
 
-    Slip is drawn **per element**, on the same colour scale
-    :func:`plot_slip` uses, so the two figures can be read against each other.
+    Slip is drawn per element, on the same colour scale `plot_slip` uses, so
+    the two figures can be read against each other.
 
-    ``exaggeration`` stretches every axis except the longest one. A real fault is
-    far longer along strike than it is deep -- the San Sebastian mesh is
-    264 x 25 x 40 km -- so at true scale (``exaggeration=1``) it renders as an
-    unreadable sliver. Because the *two* short axes are stretched together, the
-    apparent dip is preserved whenever the fault strikes near a grid axis, which
-    is the case this default is chosen for; on a fault striking diagonally the
-    across-strike direction has components on both stretched and unstretched
-    axes, and the dip is then distorted like any vertically exaggerated section.
+    `exaggeration` stretches every axis except the longest one. A fault is
+    usually far longer along strike than it is deep, so at true scale
+    (`exaggeration=1`) it renders as an unreadable sliver. Because the two
+    short axes are stretched together, the apparent dip is preserved whenever
+    the fault strikes near a grid axis, which is the case this default is chosen
+    for; on a fault striking diagonally the across-strike direction has
+    components on both stretched and unstretched axes, and the dip is then
+    distorted like any vertically exaggerated section.
 
-    ``view`` is ``(elevation, azimuth)`` in degrees. The default looks along
-    strike from slightly above; ``(60, -90)`` looks down on the surface, which is
+    `view` is `(elevation, azimuth)` in degrees. The default looks along
+    strike from slightly above; `(60, -90)` looks down on the surface, which is
     where a dip reversal is easiest to see.
     """
     import matplotlib.pyplot as plt
@@ -246,17 +230,17 @@ def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis",
               label=None):
     """The fault discretisation itself: map view beside the unrolled section.
 
-    Takes a bare :class:`~slipsolve.mesh.FaultMesh`, no solved model
-    needed -- this is the figure to look at *before* committing to an inversion,
-    which is when the mesh can still be changed.
+    Takes a bare `slipsolve.mesh.FaultMesh`, no solved model needed: this is
+    the figure to look at *before* committing to an inversion, which is when the
+    mesh can still be changed.
 
-    ``color`` is ``"area"`` (the default), ``"depth"``, ``"dip"``, or a
-    per-element array with ``label`` naming it -- which is how model resolution
-    is drawn, and resolution is the field this figure is most worth reading for
+    `color` is `"area"` (the default), `"depth"`, `"dip"`, or a
+    per-element array with `label` naming it, which is how model resolution
+    is drawn; resolution is the field this figure is most worth reading for
     on an irregular mesh. Element area is the other one: it is what grading
     changes, and it should be read against the sample spacing from
-    :func:`~slipsolve.plot.plot_samples` -- elements much smaller than the
-    data that constrain them are what the smoothing weight then has to paper over.
+    `plot_samples`, since elements much smaller than the data that constrain
+    them are what the smoothing weight then has to paper over.
     """
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
@@ -319,22 +303,22 @@ def plot_mesh(mesh, trace=None, color="area", axes=None, cmap="viridis",
 def plot_fit(model, track=None, cmap="RdBu_r", trace=None, ramp=True):
     """Data, model and residual for one track, as map panels.
 
-    Sharing one colour scale between data and model is the point -- an
+    Sharing one colour scale between data and model is the point: an
     independently scaled model panel can make a poor fit look convincing. The
     residual gets its own, tighter, scale.
 
-    The residual is **observed minus modelled**, so it reads in the same sense as
+    The residual is observed minus modelled, so it reads in the same sense as
     the data panel beside it: red where there is more displacement than the model
     accounts for, not less.
 
-    **When the inversion solved a nuisance ramp, the figure gains a second row**
-    (``ramp=False`` keeps the three-panel form): the ramp on its own, the data
+    When the inversion solved a nuisance ramp, the figure gains a second row
+    (`ramp=False` keeps the three-panel form): the ramp on its own, the data
     with that ramp taken out, and the fault's own prediction. The top row shows
     the fit; the bottom row shows *what was fitted with*. That separation is the
-    only way to see the failure mode :func:`~slipsolve.regularize.ramp_columns`
-    warns about -- unbounded ramp columns drifting into the coseismic signal --
+    only way to see the failure mode `slipsolve.regularize.ramp_columns`
+    warns about (unbounded ramp columns drifting into the coseismic signal),
     because it leaves variance reduction untouched while the slip model quietly
-    goes wrong. The ramp panel deliberately shares the **data** panel's colour
+    goes wrong. The ramp panel deliberately shares the data panel's colour
     scale, so how much of the data the ramp is carrying can be read off directly;
     the deramped pair share their own, since between them that is the comparison
     that matters.
@@ -347,9 +331,8 @@ def plot_fit(model, track=None, cmap="RdBu_r", trace=None, ramp=True):
     if not sel.any():
         # Otherwise this surfaces as "zero-size array to reduction operation
         # maximum" from the colour-scale line below, which names nothing. The
-        # usual cause is a track name read off a *different* Observations than
-        # the one the model carries -- a stale notebook variable, or a config
-        # whose SCENES keys were renamed since the model was saved.
+        # usual cause is a track name read off a different Observations than the
+        # one the model carries, such as a stale notebook variable.
         raise ValueError(
             f"No observations for track {track!r}. This model has {obs.tracks}. "
             "Track names come from the Observations the model was built on; "
@@ -400,7 +383,7 @@ def plot_fit(model, track=None, cmap="RdBu_r", trace=None, ramp=True):
     title = f"{track}: RMS residual {np.sqrt(np.mean(residual ** 2)):.4f} m"
     if show_ramp:
         # How much of the data the nuisance columns are carrying, in the units
-        # the panels are drawn in -- the number to weigh against peak slip when
+        # the panels are drawn in: the number to weigh against peak slip when
         # deciding whether the ramp degree is too generous.
         title += (f" | ramp spans {np.ptp(ramp_surface):.3f} m of "
                   f"{np.ptp(data):.3f} m")
@@ -443,7 +426,7 @@ def plot_l_curve(curve, ax=None):
     """Model roughness against misfit, one point per smoothing weight.
 
     The corner is the conventional choice: to its left the fit stops improving
-    and the model only gets rougher. Deliberately left to the eye -- automatic
+    and the model only gets rougher. Deliberately left to the eye: automatic
     corner detection on a short discrete sweep is unreliable.
     """
     import matplotlib.pyplot as plt
@@ -467,15 +450,13 @@ def plot_l_curve(curve, ax=None):
 def plot_coverage(report, ax=None, name=None):
     """Valid area on each side of the trace, against along-strike distance.
 
-    A scalar coverage fraction cannot express the failure this is for. On the
-    Venezuela scenes "19% of samples north of the trace" reads like thin
-    two-sided coverage; the profile showed the north block was missing along the
-    eastern *two-thirds* -- precisely where the largest signal was -- which is a
-    resolution limit no sampling parameter can repair. Shaded spans mark the
-    stretches with data on one side only.
+    A scalar coverage fraction cannot express the failure this is for: a scene
+    can have a fair share of its samples on each side of the trace and still
+    miss one side entirely along much of the fault, which is a resolution limit
+    no sampling parameter can repair. Shaded spans mark the stretches with data
+    on one side only.
 
-    Takes the :class:`xarray.Dataset` from
-    :func:`~slipsolve.diagnostics.scene_report`.
+    Takes the `xarray.Dataset` from `slipsolve.diagnostics.scene_report`.
     """
     import matplotlib.pyplot as plt
 
@@ -510,32 +491,27 @@ def plot_quadrature_order(engine, mesh, obs, ax=None, cmap="viridis",
     """Where the adaptive quadrature actually spends its points.
 
     Shades each triangle by how many point sources it is cut into, reduced over
-    the observations with ``stat``:
+    the observations with `stat`:
 
-    ``"total"``
-        Sum over observations -- the *work* that triangle costs, which is what
-        the runtime is made of.
-    ``"mean"`` / ``"max"``
-        Per-observation order, for reading the rule rather than the bill.
+    - `"total"`: sum over observations, the work that triangle costs, which is
+      what the runtime is made of.
+    - `"mean"` / `"max"`: per-observation order, for reading the rule rather
+      than the bill.
 
-    The order is ``(L/r) * sqrt(C / tolerance)``, and looking at it is worth more
-    than reasoning about it. On the real Venezuela mesh the cost is heaviest at
-    **depth**, not at the surface -- the opposite of what "``r`` is at least the
-    element's own depth" suggests on its own. The reason is ``bias_w``: a graded
-    mesh runs 0.99 km levels at the top to 4.96 km at the base, so ``L`` varies
-    **5x** with depth and beats the ``r`` variation outright. Deep elements are
-    bigger, so they need more points despite being further away.
-
-    Two consequences worth having in mind. Depth grading is a quadrature-cost
-    knob as much as a resolution one, and the expensive half of a graded mesh is
-    the half that resolves slip worst. The along-strike variation, by contrast,
-    does track observation proximity, since the mesh is uniform along strike.
+    The order is `(L/r) * sqrt(C / tolerance)`, with `L` the element size and
+    `r` the distance to the observation. On a mesh graded with depth
+    (`bias_w`) the cost can be heaviest at depth rather than at the surface:
+    `L` grows down dip faster than `r` does, so deep elements need more points
+    despite being further away. Depth grading is therefore a quadrature-cost
+    knob as much as a resolution one, and the expensive part of a graded mesh is
+    the part that resolves slip worst. Along strike, on a mesh uniform in that
+    direction, the cost tracks observation proximity.
 
     A plot that comes out uniform means the tolerance is tight enough that
     everything saturated at the cap.
 
-    ``engine`` must be a :class:`~slipsolve.layered.LayeredPointSource`;
-    the half-space engine evaluates a closed form and has no quadrature at all.
+    `engine` must be a `slipsolve.layered.LayeredPointSource`; the half-space
+    engine evaluates a closed form and has no quadrature at all.
     """
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
@@ -585,7 +561,7 @@ def plot_quadrature_order(engine, mesh, obs, ax=None, cmap="viridis",
 
 
 def _nodal_component(model, component):
-    """Per-*node* slip, for a model whose parameters actually live on nodes."""
+    """Per-node slip, for a model whose parameters actually live on nodes."""
     basis = getattr(model, "basis", None)
     if getattr(basis, "name", None) != "node":
         raise ValueError(
@@ -607,20 +583,18 @@ def plot_slip_edges(model, component="magnitude", ax=None, cmap="magma_r",
                     title=None):
     """Nodal slip drawn along the mesh edges, varying linearly between nodes.
 
-    :func:`plot_slip` shades each triangle by the mean of its three nodes, which
-    is what makes a nodal and an element model comparable by eye -- but it also
-    throws away the thing that distinguishes them. A nodal basis represents slip
-    as a continuous field, linear across every element, and this draws that
-    directly: each edge is subdivided into ``segments`` pieces coloured by the
-    interpolated value, so the gradient between two nodes is visible rather than
-    averaged away.
+    A nodal basis represents slip as a continuous field, linear across every
+    element, and this draws that field along the mesh edges: each edge is
+    subdivided into `segments` pieces coloured by the interpolated value, so
+    the gradient between two nodes is visible rather than averaged away (as it
+    is by `plot_slip` with `shading="flat"`).
 
     Reading it: a smooth model shows colour changing gradually along every edge.
     Adjacent edges disagreeing sharply at a shared node is the nodal signature of
-    an under-smoothed solve -- the same thing ``roughness`` scores, but localised
+    an under-smoothed solve, the same thing `roughness` scores, but localised
     so you can see *where*.
 
-    Needs ``basis="node"``; an element-constant model has no nodal values to
+    Needs `basis="node"`; an element-constant model has no nodal values to
     interpolate and raises rather than inventing some.
     """
     import matplotlib.pyplot as plt

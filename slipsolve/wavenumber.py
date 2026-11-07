@@ -1,8 +1,8 @@
 """Static Green's functions of a layered half-space, by wavenumber integration.
 
-:mod:`slipsolve.edgrn` reads what Rongjiang Wang's EDGRN computes. This module
+`slipsolve.edgrn` reads what Rongjiang Wang's EDGRN computes. This module
 computes the same kind of table itself, because the exact bimaterial solve
-(:mod:`slipsolve.bimaterial`) needs three things EDGRN does not give:
+(`slipsolve.bimaterial`) needs three things EDGRN does not give:
 
 * **Receivers at depth.** An EDGRN run tabulates one receiver depth, and ours are at
   the surface. The interface solve needs the field on the fault itself, at every
@@ -10,60 +10,58 @@ computes the same kind of table itself, because the exact bimaterial solve
 * **An explosion source.** EDGRN's three sources (strike-slip, dip-slip, CLVD) span
   the shear dislocations only. An opening has an isotropic moment tensor.
 * **Accuracy next to the source.** Every element needs its own field at its own
-  centroid. The fine EDGRN tables already read 11% low 300 m from the trace and
-  75% low at 60 m.
+  centroid, where interpolated EDGRN tables can be tens of percent low within a few
+  hundred metres of a shallow source.
 
-**What is tabulated is a remainder.** ``R = layered - half-space``, where the
+**What is tabulated is a remainder.** `R = layered - half-space`, where the
 half-space has the elastic constants of the source's own layer and the same free
-surface. The two share the singularity at the source, so ``R`` is smooth there,
-and the half-space part is added back exactly by :mod:`slipsolve._tde` (see
-:mod:`slipsolve.layered_tde`). The subtraction happens in the wavenumber domain,
+surface. The two share the singularity at the source, so `R` is smooth there,
+and the half-space part is added back exactly by `slipsolve._tde` (see
+`slipsolve.layered_tde`). The subtraction happens in the wavenumber domain,
 before the Hankel transform, so the remainder never passes through a difference of
 two large numbers in space.
 
-⚠️ **Smooth except next to a layer interface.** A source near an interface has an
-image across it, so ``R`` grows like ``1 / (r**2 + (z_s + z_r - 2 z_I)**2)`` as source
+**Smooth except next to a layer interface.** A source near an interface has an
+image across it, so `R` grows like `1 / (r**2 + (z_s + z_r - 2 z_I)**2)` as source
 and receiver approach the interface together. The depth grid is graded toward
-every interface for that reason (:func:`depth_grid`), and lookups never
+every interface for that reason (`depth_grid`), and lookups never
 interpolate across one.
 
-The formulation. Depth ``z`` is positive down and the horizontal axes are EDGRN's
-(``x`` north, ``y`` east, azimuth from north toward east). For azimuthal order
-``m`` and wavenumber ``k``, with ``Y = J_m(kr) e^{i m phi}``::
+The formulation. Depth `z` is positive down and the horizontal axes are EDGRN's
+(`x` north, `y` east, azimuth from north toward east). For azimuthal order
+`m` and wavenumber `k`, with `Y = J_m(kr) e^{i m phi}`:
 
     u_z = U(z) Y,    u_h = V(z) grad_h Y / k  -  W(z) e_z x grad_h Y / k,
 
-and the tractions on a horizontal plane are ``R = sigma_zz`` and the poloidal and
-toroidal parts ``S = mu (V' + k U)``, ``T = mu W'``. In a homogeneous layer::
+and the tractions on a horizontal plane are `R = sigma_zz` and the poloidal and
+toroidal parts `S = mu (V' + k U)`, `T = mu W'`. In a homogeneous layer:
 
     U' = (R + lam k V) / (lam + 2 mu)      R' = k S
     V' = S / mu - k U                      S' = -k lam R / (lam + 2 mu)
                                                 + 4 k^2 mu (lam + mu) V / (lam + 2 mu)
     W' = T / mu                            T' = k^2 mu W
 
-whose solutions are ``e^{-kz}``, ``kz e^{-kz}``, ``e^{kz}`` and ``kz e^{kz}`` (from
+whose solutions are `e^{-kz}`, `kz e^{-kz}`, `e^{kz}` and `kz e^{kz}` (from
 the Papkovich-Neuber potentials). Each layer writes its decaying family from its
 top and its growing family from its bottom, so nothing exceeds 1 and the global
-matrix stays well conditioned at any ``k h`` -- the global-matrix method of Schmidt
-and Tango (1986). A point source is a jump in ``(U, V, R, S)`` and ``(W, T)`` at its
-depth, derived from the equivalent body force ``-M grad delta``.
+matrix stays well conditioned at any `k h` -- the global-matrix method of Schmidt
+and Tango (1986). A point source is a jump in `(U, V, R, S)` and `(W, T)` at its
+depth, derived from the equivalent body force `-M grad delta`.
 
-Checked three ways (``tests/test_slip_wavenumber.py``; 2026-10-12):
+Checked three ways (`tests/test_slip_wavenumber.py`):
 
 * **Homogeneous half-space against the analytic point source** (tiny triangular
-  dislocations through :func:`slipsolve._tde.tde_disp_hs`, the way
-  :meth:`~slipsolve.edgrn.EdgrnTables.homogeneous` builds its tables): all four
+  dislocations through `slipsolve._tde.tde_disp_hs`, the way
+  `slipsolve.edgrn.EdgrnTables.homogeneous` builds its tables): all four
   sources, all three components, receivers at the surface and at depth, within
   1.7e-5 of each component's peak over 100 m - 200 km.
-* **Reciprocity of point forces across the Venezuela crust's layers**:
-  ``G_zz``, ``G_xx``, ``G_yy`` and ``G_xz = G_zx`` between depths in different layers
+* **Reciprocity of point forces across a layered crust**:
+  `G_zz`, `G_xx`, `G_yy` and `G_xz = G_zx` between depths in different layers
   agree to 1e-14 - 1e-17. A wrong layer matrix or interface condition breaks it.
-* **Against the fine EDGRN tables** (1601 x 401, the production crust) at the
-  surface: 1e-6 - 1e-3 of each component's peak beyond 10 km. Inside it, EDGRN is
-  the one that is off: a 550 m deep CLVD reads -2.0e-9 at 1 km against our
-  +2.3e-9 and EDGRN's own +2.9e-9 at 2 km, and a 25 km deep dip-slip source's
-  transverse component flips sign between EDGRN's nodes at 0, 1 and 2 km, where
-  the field cannot vary on that scale.
+* **Against fine EDGRN tables** at the surface: 1e-6 - 1e-3 of each component's
+  peak beyond 10 km. Inside 10 km the differences are EDGRN's: its small components
+  have sign-flipping artefacts between its nodes near the epicentre, where the field
+  cannot vary on that scale.
 """
 
 from pathlib import Path
@@ -75,31 +73,31 @@ from scipy import fft as _fft
 SOURCE_TYPES = ("ss", "ds", "cl", "ep")
 
 #: The (source, component) pairs that are not identically zero, in table order.
-#: ``cl`` and ``ep`` are axisymmetric and drive no transverse motion.
+#: `cl` and `ep` are axisymmetric and drive no transverse motion.
 TABLE_KEYS = (("ss", "uz"), ("ss", "ur"), ("ss", "ut"),
               ("ds", "uz"), ("ds", "ur"), ("ds", "ut"),
               ("cl", "uz"), ("cl", "ur"),
               ("ep", "uz"), ("ep", "ur"))
 
-#: The combinations of :data:`TABLE_KEYS` that the strain divides by ``r``
-#: (:func:`~slipsolve.layered_tde.combine_strain`), each tabulated over ``r``.
+#: The combinations of `TABLE_KEYS` that the strain divides by `r`
+#: (`slipsolve.layered_tde.combine_strain`), each tabulated over `r`.
 OVER_R_KEYS = (("ss", "ur-2ut"), ("ss", "2ur-ut"), ("ss", "uz"), ("ds", "ur+ut"), ("ds", "uz"),
                ("cl", "ur"), ("ep", "ur"))
 
-#: The strain tables' columns: :data:`TABLE_KEYS`' derivatives in distance (``"dr"``), then
-#: in receiver depth (``"dz"``, depth positive down), then :data:`OVER_R_KEYS` over ``r``
-#: (``"/r"``). The azimuthal derivatives need no table: the azimuthal patterns are known.
+#: The strain tables' columns: `TABLE_KEYS`' derivatives in distance (`"dr"`), then
+#: in receiver depth (`"dz"`, depth positive down), then `OVER_R_KEYS` over `r`
+#: (`"/r"`). The azimuthal derivatives need no table: the azimuthal patterns are known.
 STRAIN_KEYS = (tuple(("dr",) + key for key in TABLE_KEYS)
                + tuple(("dz",) + key for key in TABLE_KEYS)
                + tuple(("/r",) + key for key in OVER_R_KEYS))
 
 #: Wavenumber range (1/m) of the Hankel transforms, and the number of samples.
 #: Fourteen decades put the transform's periodic ends far outside any distance
-#: used: ``1/k`` spans 1 cm to 1e12 m against tables from 0.5 m to 2000 km.
+#: used: `1/k` spans 1 cm to 1e12 m against tables from 0.5 m to 2000 km.
 K_RANGE = (1e-12, 1e2)
 N_WAVENUMBERS = 4096
 
-#: Traction rows of the global matrix are divided by ``k * MU_SCALE`` so that
+#: Traction rows of the global matrix are divided by `k * MU_SCALE` so that
 #: every entry is of order one.
 MU_SCALE = 3e10
 
@@ -108,13 +106,13 @@ _TWO_PI = 2.0 * np.pi
 
 # -- the layer stack ---------------------------------------------------------------
 def layer_stack(model):
-    """``(tops, lam, mu)`` of a piecewise-constant :class:`~slipsolve.edgrn.VelocityModel`.
+    """`(tops, lam, mu)` of a piecewise-constant `slipsolve.edgrn.VelocityModel`.
 
     The last layer is the half-space. Rows at one depth are a step; two rows at
     different depths with the same properties are one layer, and consecutive
     layers with equal properties are merged.
 
-    ⚠️ A gradient (two rows at different depths with different values) raises:
+    A gradient (two rows at different depths with different values) raises:
     this solver needs homogeneous layers, and cutting a gradient into steps would
     put an interface -- with its graded depth grid -- at every step.
     """
@@ -151,11 +149,11 @@ def layer_stack(model):
 def depth_grid(tops, z_max=200e3, first=5.0, growth=1.5, spacing=500.0, deep_spacing=5000.0):
     """Depth nodes for sources and receivers, graded toward every interface.
 
-    Inside each finite layer the nodes start ``first`` from each interface and
-    grow by ``growth`` until they are ``spacing`` apart, with a uniform middle. The
+    Inside each finite layer the nodes start `first` from each interface and
+    grow by `growth` until they are `spacing` apart, with a uniform middle. The
     top layer starts at the surface itself, where the remainder is smooth (both
     fields have the free surface). Below the last interface the spacing grows to
-    ``deep_spacing``, since the remainder decays away from it. No node sits on an
+    `deep_spacing`, since the remainder decays away from it. No node sits on an
     interface.
     """
     tops = np.asarray(tops, dtype=float)
@@ -185,17 +183,17 @@ def depth_grid(tops, z_max=200e3, first=5.0, growth=1.5, spacing=500.0, deep_spa
 
 
 def distance_grid(r_min=0.5, r_max=2000e3, per_decade=25):
-    """Log-spaced horizontal distances; a lookup below ``r_min`` takes its value."""
+    """Log-spaced horizontal distances; a lookup below `r_min` takes its value."""
     n = int(np.ceil(np.log10(r_max / r_min) * per_decade)) + 1
     return np.geomspace(r_min, r_max, n)
 
 
 # -- the wavenumber-domain solution ------------------------------------------------
 def _psv_columns(zt, zb, lam, mu, half):
-    """P-SV solutions as columns, rows ``(U, V, R / (k MU_SCALE), S / (k MU_SCALE))``.
+    """P-SV solutions as columns, rows `(U, V, R / (k MU_SCALE), S / (k MU_SCALE))`.
 
-    ``zt = k (z - top) >= 0`` and ``zb = k (z - bottom) <= 0``, so every exponential
-    is at most 1. ``half`` keeps only the family that decays downward.
+    `zt = k (z - top) >= 0` and `zb = k (z - bottom) <= 0`, so every exponential
+    is at most 1. `half` keeps only the family that decays downward.
     """
     c = (lam + 3.0 * mu) / (lam + mu)          # 3 - 4 nu
     g = (lam + 2.0 * mu) / (lam + mu)
@@ -214,7 +212,7 @@ def _psv_columns(zt, zb, lam, mu, half):
 
 
 def _sh_columns(zt, zb, mu, half):
-    """SH solutions as columns, rows ``(W, T / (k MU_SCALE))``."""
+    """SH solutions as columns, rows `(W, T / (k MU_SCALE))`."""
     s = mu / MU_SCALE
     ea = np.exp(-zt)
     cols = [np.stack([ea, -s * ea], -1)]
@@ -225,18 +223,18 @@ def _sh_columns(zt, zb, mu, half):
 
 
 def source_jumps(lam, mu):
-    """Jumps in ``(U, V, R', S')`` and ``(W, T')`` across a unit-potency point source.
+    """Jumps in `(U, V, R', S')` and `(W, T')` across a unit-potency point source.
 
-    ``(4, 4)`` and ``(4, 2)``, one row per :data:`SOURCE_TYPES`, with ``R'``, ``S'``,
-    ``T'`` scaled as in the global matrix. The moment of a unit potency is ``mu``
-    times the unit tensor for ``ss`` (``m12``), ``ds`` (``m13``) and ``cl``
-    (``m33 = 1``, ``m11 = m22 = -1/2``), and ``K = lam + 2 mu / 3`` times the
-    identity for ``ep`` -- so like EDGRN's, a table carries the source layer's
+    `(4, 4)` and `(4, 2)`, one row per `SOURCE_TYPES`, with `R'`, `S'`,
+    `T'` scaled as in the global matrix. The moment of a unit potency is `mu`
+    times the unit tensor for `ss` (`m12`), `ds` (`m13`) and `cl`
+    (`m33 = 1`, `m11 = m22 = -1/2`), and `K = lam + 2 mu / 3` times the
+    identity for `ep` -- so like EDGRN's, a table carries the source layer's
     moduli and a value steps where the source crosses an interface.
 
-    The pairing of P-SV and SH follows the azimuthal pattern: ``ss`` is the
-    ``sin 2 phi`` P-SV system with the ``cos 2 phi`` SH one, ``ds`` the ``cos phi``
-    P-SV with the ``sin phi`` SH.
+    The pairing of P-SV and SH follows the azimuthal pattern: `ss` is the
+    `sin 2 phi` P-SV system with the `cos 2 phi` SH one, `ds` the `cos phi`
+    P-SV with the `sin phi` SH.
     """
     lam, mu = float(lam), float(mu)
     p = lam + 2.0 * mu
@@ -315,12 +313,12 @@ class _Solution:
         self.c_sh = np.linalg.solve(b, rhs_sh)
 
     def at(self, z_receiver, derivatives=False):
-        """``U``, ``V``, ``W`` at the receiver depths: each ``(n_z, n_k, n_sources)``.
+        """`U`, `V`, `W` at the receiver depths: each `(n_z, n_k, n_sources)`.
 
-        With ``derivatives``, also their derivatives in depth (``z`` down), ``U'``,
-        ``V'``, ``W'``: six arrays. They come from the layer's equations and the
-        tractions the solution already carries, ``U' = (R + lam k V) / (lam + 2 mu)``,
-        ``V' = S / mu - k U`` and ``W' = T / mu``, with the receiver layer's constants.
+        With `derivatives`, also their derivatives in depth (`z` down), `U'`,
+        `V'`, `W'`: six arrays. They come from the layer's equations and the
+        tractions the solution already carries, `U' = (R + lam k V) / (lam + 2 mu)`,
+        `V' = S / mu - k U` and `W' = T / mu`, with the receiver layer's constants.
         A receiver at the source depth takes the side below it.
         """
         z_receiver = np.atleast_1d(np.asarray(z_receiver, dtype=float))
@@ -360,13 +358,13 @@ def wavenumbers(k_range=K_RANGE, n=N_WAVENUMBERS):
 
 
 def kernels(tops, lam, mu, z_source, z_receiver, k, remainder=True, derivatives=False):
-    """``U``, ``V``, ``W`` per unit potency, ``(n_z, n_k, 4)`` each.
+    """`U`, `V`, `W` per unit potency, `(n_z, n_k, 4)` each.
 
-    ``remainder=True`` subtracts the half-space with the source layer's ``lam`` and
-    ``mu``, which is what the tables hold. ``False`` keeps the whole layered field,
+    `remainder=True` subtracts the half-space with the source layer's `lam` and
+    `mu`, which is what the tables hold. `False` keeps the whole layered field,
     which is singular at the source: transform it only for receivers off the
-    source's depth. ``derivatives`` adds their depth derivatives ``U'``, ``V'``,
-    ``W'`` (see :meth:`_Solution.at`), six arrays in all; the remainder's are
+    source's depth. `derivatives` adds their depth derivatives `U'`, `V'`,
+    `W'` (see `_Solution.at`), six arrays in all; the remainder's are
     continuous at the source, where both fields jump alike.
     """
     j = int(_layer_index(tops, z_source))
@@ -380,11 +378,11 @@ def kernels(tops, lam, mu, z_source, z_receiver, k, remainder=True, derivatives=
 
 
 def hankel(f, k, dln, order):
-    """``int f(k) J_order(k r) k dk`` by FFTLog; returns ``(r, values)`` on its own grid.
+    """`int f(k) J_order(k r) k dk` by FFTLog; returns `(r, values)` on its own grid.
 
-    ``f`` is ``(..., n_k)`` on :func:`wavenumbers`' grid. ``scipy.fft.fht`` computes
-    ``int a(k) J(k r) r dk``, so it is handed ``a = k f`` and its output divided by
-    ``r``. The offset is FFTLog's low-ringing one.
+    `f` is `(..., n_k)` on `wavenumbers`' grid. `scipy.fft.fht` computes
+    `int a(k) J(k r) r dk`, so it is handed `a = k f` and its output divided by
+    `r`. The offset is FFTLog's low-ringing one.
     """
     offset = _fft.fhtoffset(dln, mu=order, initial=0.0)
     values = _fft.fht(k * f, dln, mu=order, offset=offset)
@@ -396,12 +394,12 @@ def hankel(f, k, dln, order):
 
 
 def _log_distance(r):
-    """``log r``, with ``r = 0`` at the smallest positive float: interpolation clamps it to the first node."""
+    """`log r`, with `r = 0` at the smallest positive float: interpolation clamps it to the first node."""
     return np.log(np.maximum(np.asarray(r, dtype=float), np.finfo(float).tiny))
 
 
 def _hankel_at(f, k, dln, order, log_r):
-    """:func:`hankel` at ``r = exp(log_r)``, linear in ``log r`` between its own nodes."""
+    """`hankel` at `r = exp(log_r)`, linear in `log r` between its own nodes."""
     grid, values = hankel(f, k, dln, order)
     flat = values.reshape(-1, values.shape[-1])
     out = np.stack([np.interp(log_r, np.log(grid), row) for row in flat])
@@ -409,10 +407,10 @@ def _hankel_at(f, k, dln, order, log_r):
 
 
 def _hankel_dr_at(f, k, dln, order, log_r):
-    """``d/dr`` of :func:`_hankel_at`'s integral: ``(H_{n-1}[k f] - H_{n+1}[k f]) / 2``.
+    """`d/dr` of `_hankel_at`'s integral: `(H_{n-1}[k f] - H_{n+1}[k f]) / 2`.
 
-    From ``J_n'(x) = (J_{n-1}(x) - J_{n+1}(x)) / 2`` under the integral, and
-    ``J_{-1} = -J_1`` for order 0 (FFTLog's kernel has a pole at order -1).
+    From `J_n'(x) = (J_{n-1}(x) - J_{n+1}(x)) / 2` under the integral, and
+    `J_{-1} = -J_1` for order 0 (FFTLog's kernel has a pole at order -1).
     """
     g = k * f
     lower = (-_hankel_at(g, k, dln, 1, log_r) if order == 0
@@ -421,12 +419,12 @@ def _hankel_dr_at(f, k, dln, order, log_r):
 
 
 def _hankel_over_r_at(f, k, dln, order, log_r):
-    """:func:`_hankel_at`'s integral over ``r``: ``(H_{n-1}[k f] + H_{n+1}[k f]) / (2 n)``.
+    """`_hankel_at`'s integral over `r`: `(H_{n-1}[k f] + H_{n+1}[k f]) / (2 n)`.
 
-    From ``J_n(x) / x = (J_{n-1}(x) + J_{n+1}(x)) / (2 n)``, ``n >= 1``. No division by
-    ``r``: dividing a transform that vanishes on the axis by ``r`` amplifies FFTLog's
-    absolute error floor there (a strike-slip source's strain was 1000x off on the axis,
-    2026-11-04), where these are finite and accurate.
+    From `J_n(x) / x = (J_{n-1}(x) + J_{n+1}(x)) / (2 n)`, `n >= 1`. No division by
+    `r`: dividing a transform that vanishes on the axis by `r` amplifies FFTLog's
+    absolute error floor there (by orders of magnitude for a strike-slip source's
+    strain), where these are finite and accurate.
     """
     if order < 1:
         raise ValueError("over r needs order >= 1; an order-0 transform does not vanish on the axis")
@@ -436,19 +434,19 @@ def _hankel_over_r_at(f, k, dln, order, log_r):
 
 
 def transform(U, V, W, k, dln, r, radial=False):
-    """The ten table components from ``U``, ``V``, ``W``, at distances ``r``.
+    """The ten table components from `U`, `V`, `W`, at distances `r`.
 
-    Returns ``(..., n_r, 10)`` in :data:`TABLE_KEYS` order, with EDGRN's azimuthal
-    factors stripped: ``ss`` is ``sin 2 phi`` in ``uz``/``ur`` and ``cos 2 phi`` in
-    ``ut``; ``ds`` is ``cos phi`` and ``sin phi``; ``cl`` and ``ep`` are axisymmetric.
-    The horizontal components use ``J_m' = (J_{m-1} - J_{m+1}) / 2`` and
-    ``m J_m / x = (J_{m-1} + J_{m+1}) / 2``.
+    Returns `(..., n_r, 10)` in `TABLE_KEYS` order, with EDGRN's azimuthal
+    factors stripped: `ss` is `sin 2 phi` in `uz`/`ur` and `cos 2 phi` in
+    `ut`; `ds` is `cos phi` and `sin phi`; `cl` and `ep` are axisymmetric.
+    The horizontal components use `J_m' = (J_{m-1} - J_{m+1}) / 2` and
+    `m J_m / x = (J_{m-1} + J_{m+1}) / 2`.
 
-    ``radial=True`` returns their derivatives in ``r`` instead: every column is a sum
+    `radial=True` returns their derivatives in `r` instead: every column is a sum
     of Hankel transforms, and each transform's derivative is two more
-    (:func:`_hankel_dr_at`), so the recipe is the same. Their derivatives in depth are
-    this transform of ``U'``, ``V'``, ``W'`` (:func:`kernels` with ``derivatives``).
-    A distance below FFTLog's first node (about 1 cm), ``r = 0`` included, takes that
+    (`_hankel_dr_at`), so the recipe is the same. Their derivatives in depth are
+    this transform of `U'`, `V'`, `W'` (`kernels` with `derivatives`).
+    A distance below FFTLog's first node (about 1 cm), `r = 0` included, takes that
     node's value.
     """
     log_r = _log_distance(r)
@@ -474,12 +472,12 @@ def transform(U, V, W, k, dln, r, radial=False):
 
 
 def transform_over_r(U, V, W, k, dln, r):
-    """The :data:`OVER_R_KEYS` combinations divided by ``r``, at distances ``r``: ``(..., n_r, 7)``.
+    """The `OVER_R_KEYS` combinations divided by `r`, at distances `r`: `(..., n_r, 7)`.
 
-    With :func:`transform`'s recipe, ``ss_ur = (S1 - S3) / 2`` and ``ss_ut = (S1 + S3) / 2``
-    for ``S1 = H_1[V - W]``, ``S3 = H_3[V + W]``; ``ds_ur + ds_ut = -H_2[V - W]`` (the order-0
-    parts cancel exactly); ``cl_ur = -H_1[V]``. Every term has order >= 1, so each goes
-    over ``r`` by :func:`_hankel_over_r_at`, finite and smooth on the axis.
+    With `transform`'s recipe, `ss_ur = (S1 - S3) / 2` and `ss_ut = (S1 + S3) / 2`
+    for `S1 = H_1[V - W]`, `S3 = H_3[V + W]`; `ds_ur + ds_ut = -H_2[V - W]` (the order-0
+    parts cancel exactly); `cl_ur = -H_1[V]`. Every term has order >= 1, so each goes
+    over `r` by `_hankel_over_r_at`, finite and smooth on the axis.
     """
     log_r = _log_distance(r)
 
@@ -498,7 +496,7 @@ def transform_over_r(U, V, W, k, dln, r):
 
 
 def strain_columns(U, V, W, dU, dV, dW, k, dln, r):
-    """The :data:`STRAIN_KEYS` columns from the kernels and their depth derivatives: ``(..., n_r, 27)``."""
+    """The `STRAIN_KEYS` columns from the kernels and their depth derivatives: `(..., n_r, 27)`."""
     return np.concatenate([transform(U, V, W, k, dln, r, radial=True),
                            transform(dU, dV, dW, k, dln, r),
                            transform_over_r(U, V, W, k, dln, r)], axis=-1)
@@ -511,12 +509,12 @@ SURFACE_SOURCE_FLOOR = 0.5
 
 
 def surface_depth_grid(tops, fine_to=60e3, z_max=200e3, first=5.0, growth=1.5, spacing=100.0):
-    """Source depths for the surface tables: ``spacing`` to ``fine_to``, then growing to 2 km.
+    """Source depths for the surface tables: `spacing` to `fine_to`, then growing to 2 km.
 
     A point source's field at the surface varies over a length near its depth, so
     linear interpolation in depth needs about 100 m to hold 1e-3 at a few km
-    (EDGRN's fine tables use the same). The surface tables are 2-D, so this costs
-    little; the 3-D remainder (:func:`depth_grid`) cannot afford it.
+    (as fine EDGRN tables do). The surface tables are 2-D, so this costs
+    little; the 3-D remainder (`depth_grid`) cannot afford it.
     """
     fine = depth_grid(tops, z_max=fine_to, first=first, growth=growth, spacing=spacing,
                       deep_spacing=spacing)
@@ -529,8 +527,8 @@ def surface_depth_grid(tops, fine_to=60e3, z_max=200e3, first=5.0, growth=1.5, s
 
 
 def _one_source_depth(task):
-    """One source depth's remainder slice, ``(n_r, n_z, 10)``, and with ``strain`` its
-    strain columns, ``(n_r, n_z, 27)`` (:data:`STRAIN_KEYS`), else ``None``."""
+    """One source depth's remainder slice, `(n_r, n_z, 10)`, and with `strain` its
+    strain columns, `(n_r, n_z, 27)` (`STRAIN_KEYS`), else `None`."""
     tops, lam, mu, z_source, z, r, k_range, n_k, strain = task
     k, dln = wavenumbers(k_range, n_k)
     if not strain:
@@ -543,7 +541,7 @@ def _one_source_depth(task):
 
 
 def _one_surface_depth(task):
-    """One source depth's whole and remainder fields at the surface, two ``(n_r, 10)`` rows."""
+    """One source depth's whole and remainder fields at the surface, two `(n_r, 10)` rows."""
     tops, lam, mu, z_source, r, k_range, n_k = task
     k, dln = wavenumbers(k_range, n_k)
     z_s = max(float(z_source), SURFACE_SOURCE_FLOOR)
@@ -605,25 +603,25 @@ class _DepthAxis:
 
 
 class RemainderTables:
-    """``R = layered - half-space`` per unit potency, on a ``(r, z_source, z_receiver)`` grid.
+    """`R = layered - half-space` per unit potency, on a `(r, z_source, z_receiver)` grid.
 
-    ``values`` is ``(n_r, n_z, n_z, 10)`` in :data:`TABLE_KEYS` order, in EDGRN's
-    north/east/down with the azimuthal factors stripped (see :func:`transform`).
-    Sources and receivers share the depth grid ``z``. ``tops``, ``lam`` and ``mu``
+    `values` is `(n_r, n_z, n_z, 10)` in `TABLE_KEYS` order, in EDGRN's
+    north/east/down with the azimuthal factors stripped (see `transform`).
+    Sources and receivers share the depth grid `z`. `tops`, `lam` and `mu`
     are the layer stack the half-space part takes its constants from: a source at
-    depth ``z_s`` subtracts the half-space with its own layer's ``lam`` and ``mu``.
+    depth `z_s` subtracts the half-space with its own layer's `lam` and `mu`.
 
-    ``surface`` (optional) holds receivers at the surface on their own, finer 2-D
-    grid -- a dict of ``r``, ``z`` and two ``(n_r, n_z, 10)`` arrays: ``remainder``,
-    and ``whole``, the whole layered field (EDGRN's kind of table) for point
-    sources seen from far away (:class:`~slipsolve.layered_tde.LayeredTDE`'s
-    ``far``). ⚠️ The 3-D grid is too coarse in depth for a point source's field at
+    `surface` (optional) holds receivers at the surface on their own, finer 2-D
+    grid -- a dict of `r`, `z` and two `(n_r, n_z, 10)` arrays: `remainder`,
+    and `whole`, the whole layered field (EDGRN's kind of table) for point
+    sources seen from far away (`slipsolve.layered_tde.LayeredTDE`'s
+    `far`). The 3-D grid is too coarse in depth for a point source's field at
     the surface (500 m mid-layer against the ~100 m that 1e-3 needs at a few km),
-    so surface receivers should always come from ``surface``.
+    so surface receivers should always come from `surface`.
 
-    ``strain`` (optional) is ``(n_r, n_z, n_z, 27)`` on the 3-D grid: the remainder's
-    derivatives in distance and receiver depth and its ``1/r`` combinations
-    (:data:`STRAIN_KEYS`), for the strain of a point source at depth (:meth:`gather_strain`).
+    `strain` (optional) is `(n_r, n_z, n_z, 27)` on the 3-D grid: the remainder's
+    derivatives in distance and receiver depth and its `1/r` combinations
+    (`STRAIN_KEYS`), for the strain of a point source at depth (`gather_strain`).
     Receivers at the surface need none.
     """
 
@@ -667,14 +665,14 @@ class RemainderTables:
     @classmethod
     def compute(cls, model, z=None, r=None, k_range=K_RANGE, n_k=N_WAVENUMBERS,
                 z_max=200e3, surface_z=None, surface_r=None, workers=None, strain=False):
-        """Tabulate the remainder for ``model`` (a :class:`~slipsolve.edgrn.VelocityModel`).
+        """Tabulate the remainder for `model` (a `slipsolve.edgrn.VelocityModel`).
 
-        ``z`` defaults to :func:`depth_grid` to ``z_max`` and ``r`` to
-        :func:`distance_grid`; the surface tables to :func:`surface_depth_grid` and
-        50 distances a decade. Each source depth is independent; ``workers`` runs
-        them in that many processes (the Venezuela crust's 172 depths took 377 s in
-        one). ``strain`` also tabulates the 3-D grid's strain columns (:attr:`strain`):
-        about five times the transforms and 2.7 times the memory of the 3-D part.
+        `z` defaults to `depth_grid` to `z_max` and `r` to
+        `distance_grid`; the surface tables to `surface_depth_grid` and
+        50 distances a decade. Each source depth is independent; `workers` runs
+        them in that many processes. `strain` also tabulates the 3-D grid's strain
+        columns (`strain`): about five times the transforms and 2.7 times the memory
+        of the 3-D part.
         """
         tops, lam, mu = layer_stack(model)
         z = depth_grid(tops, z_max) if z is None else np.asarray(z, dtype=float)
@@ -729,7 +727,7 @@ class RemainderTables:
         return self._z_axis.stencil(depth)
 
     def interpolate(self, distance, z_source, z_receiver):
-        """Trilinear lookup in ``(log r, z_source, z_receiver)``; ``(..., 10)``.
+        """Trilinear lookup in `(log r, z_source, z_receiver)`; `(..., 10)`.
 
         Below the first distance the value is the first node's (the remainder is
         flat there); depths interpolate within their own layer only.
@@ -754,7 +752,7 @@ class RemainderTables:
     def gather(self, distance, source, receiver, table=None):
         """The trilinear sum over three stencils, one gather of all eight corners.
 
-        ``table`` is the 3-D array to read, :attr:`values` by default.
+        `table` is the 3-D array to read, `values` by default.
         """
         table = self.values if table is None else table
         i0, ti = distance
@@ -772,15 +770,15 @@ class RemainderTables:
         return np.einsum("cn,cnk->nk", np.stack(weight), corners)
 
     def gather_strain(self, distance, source, receiver):
-        """:meth:`gather` on the strain tables: ``(n, 27)`` in :data:`STRAIN_KEYS` order."""
+        """`gather` on the strain tables: `(n, 27)` in `STRAIN_KEYS` order."""
         if self.strain is None:
             raise ValueError("these tables carry no strain; compute them with strain=True")
         return self.gather(distance, source, receiver, table=self.strain)
 
     def surface_lookup(self, distance, source_depth, which="remainder"):
-        """Bilinear lookup in ``(log r, z_source)`` for receivers at the surface; ``(n, 10)``.
+        """Bilinear lookup in `(log r, z_source)` for receivers at the surface; `(n, 10)`.
 
-        ``which`` is ``"remainder"`` or ``"whole"``.
+        `which` is `"remainder"` or `"whole"`.
         """
         i0, ti = self._surface_r.stencil(distance)
         s0, s1, ts = self._surface_z.stencil(source_depth)
@@ -807,7 +805,7 @@ class RemainderTables:
         if not path.suffix:
             path = path.with_suffix(".npz")
         #: The file the tables were saved to or loaded from: where pool workers load their own copy
-        #: (:func:`~slipsolve.layered_tde.engine_pool`).
+        #: (`slipsolve.layered_tde.engine_pool`).
         self.path = path
         return path
 

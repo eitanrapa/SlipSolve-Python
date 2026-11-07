@@ -1,7 +1,7 @@
 """Pins regularization, the solver, and end-to-end slip recovery.
 
-The acceptance test is :func:`test_recovers_a_planted_slip_patch`: plant a known
-slip distribution on the real fault geometry, forward-model it through two
+The acceptance test is `test_recovers_a_planted_slip_patch`: plant a known
+slip distribution on a real fault geometry, forward-model it through two
 viewing geometries, add noise, quadtree it, invert, and require the answer back.
 Everything else here guards a specific way that can go quietly wrong.
 """
@@ -25,8 +25,8 @@ from slipsolve.regularize import (
     zero_slip_boundary,
 )
 
-# The real San Sebastian trace, decimated: nearly east-west, which is the
-# orientation that stresses the winding and boundary logic.
+# A real fault trace, decimated: nearly east-west, which is the orientation
+# that stresses the winding and boundary logic.
 _LON = np.array([-68.681, -68.300, -67.900, -67.500, -67.100, -66.700, -66.523])
 _LAT = np.array([10.410, 10.490, 10.540, 10.565, 10.595, 10.620, 10.630])
 
@@ -188,9 +188,9 @@ def test_higher_degree_ramps_stay_per_track_and_nest(recovery, kind, per_track,
 def test_higher_ramp_absorbs_a_curvature_that_linear_cannot(recovery):
     """The point of the option: a real quadratic nuisance has somewhere to go.
 
-    A deep copy, because ``recovery`` is module-scoped and ``Dataset.copy()`` is
-    shallow -- editing ``los`` in place would hand every later test a different
-    scene than the one its numbers were measured on.
+    A deep copy, because `recovery` is module-scoped and `Dataset.copy()` is
+    shallow -- editing `los` in place would hand every later test a different
+    scene than the one its thresholds were set on.
     """
     mesh, _, obs, _ = recovery
     curved = Observations(obs.ds.copy(deep=True))
@@ -297,12 +297,9 @@ def test_l_curve_is_monotone_in_roughness(recovery):
 def test_l_curve_takes_no_worker_pool(recovery):
     """`l_curve` is serial on purpose -- see its docstring.
 
-    A `workers=` argument was written, verified to give identical results, and
-    removed: a sweep is dominated by the one weight that runs to the iteration
-    cap (67% of an 8-weight sweep, capping any scheduler at 1.50x) and scipy's
-    pure-Python `lsmr` holds the GIL anyway, so it measured 1.02x at best and
-    slower above. This pins that it stays out of the signature rather than
-    getting reintroduced on the same reasoning.
+    A sweep is dominated by the one weight that runs to the iteration cap, and
+    scipy's pure-Python `lsmr` holds the GIL anyway, so a worker pool buys almost
+    nothing. This pins that `workers=` stays out of the signature.
     """
     _, _, _, inversion = recovery
     with pytest.raises(TypeError, match="workers"):
@@ -324,20 +321,19 @@ def _count_matvecs(monkeypatch):
 
 
 def test_lsmr_tol_auto_is_the_default_and_cuts_work(recovery, monkeypatch):
-    """The shipped default must be the adaptive inner tolerance, and must reduce
-    work versus scipy's ``None`` -- for the same model.
+    """The default must be the adaptive inner tolerance, and must reduce work
+    versus scipy's `None` -- for the same model.
 
-    Counted in **matrix-vector products, not outer iterations**. ``"auto"`` solves
+    Counted in matrix-vector products, not outer iterations. `"auto"` solves
     each sub-problem loosely, so it can take *more* outer steps while doing far
-    less total work; ``nit`` is the wrong meter, and pinning it pinned a fixture
-    accident instead of the property -- it broke when the fixtures moved to the
-    left-looking geometry NISAR actually flies, with no change to the solver.
+    less total work; `nit` is the wrong meter, and pinning it would pin a fixture
+    accident instead of the property.
 
-    Summed over two weights, because the win is **not uniform in the weight**.
-    Measured on this fixture, ``None``/``"auto"`` matvecs are 2.18x at lam=1.0,
-    1.93x at 0.5 and 1.91x at 0.3, but **0.70x at lam=2.0 and 0.78x at 0.05** --
-    the adaptive tolerance loses at both ends. Over a whole sweep it still comes
-    out ahead (1.17x here), which is how :meth:`l_curve` uses it.
+    Summed over two weights, because the win is not uniform in the weight. On
+    this fixture `None` needs about twice the products of `"auto"` at lam 0.3 to
+    1.0, but fewer at lam 2.0 and 0.05 -- the adaptive tolerance loses at both
+    ends. Over a whole sweep it still comes out ahead, which is how `l_curve`
+    uses it.
     """
     _, _, _, inversion = recovery
     weights = (1.0, 0.3)
@@ -454,12 +450,12 @@ def test_box_qp_is_the_bounded_minimiser():
 
 
 def test_active_set_is_the_exact_minimiser(setup, recovery):
-    """The active-set answer is the minimiser; ``lsq_linear`` stops short of it.
+    """The active-set answer is the minimiser; `lsq_linear` stops short of it.
 
-    Measured on this fixture against BVLS on the stacked system: the active set
-    agrees with it to 3e-13 m (element basis, lam 0.3) and 1e-10 m (nodes and a
-    quadratic ramp, lam 0.002), while ``lsq_linear`` sits 0.36 mm and 48 mm away
-    at a cost 1.1e-5 and 3.1e-6 higher, though it reports convergence.
+    On this fixture, against BVLS on the stacked system, the active set agrees
+    to 3e-13 m (element basis, lam 0.3) and 1e-10 m (nodes and a quadratic ramp,
+    lam 0.002), while `lsq_linear` sits 0.36 mm and 48 mm away at a cost 1.1e-5
+    and 3.1e-6 higher, though it reports convergence.
     """
     _, _, mesh = setup
     _, _, obs, inversion = recovery
@@ -478,7 +474,7 @@ def test_active_set_agrees_with_lsq_linear(recovery, tmp_path):
         got = inversion.solve(smoothing=lam, polarity=(-1, 0, 0), method="active_set")
         assert got.converged and got.options["method"] == "active_set"
         assert got.result.cost <= ref.result.cost
-        # Measured 0.04 / 0.36 mm, all of it lsq_linear stopping short.
+        # 0.04 / 0.36 mm here, all of it lsq_linear stopping short.
         np.testing.assert_allclose(got.strike_slip, ref.strike_slip, atol=1e-3)
         np.testing.assert_allclose(got.dip_slip, ref.dip_slip, atol=1e-3)
         assert got.moment_magnitude == pytest.approx(ref.moment_magnitude, abs=1e-4)
@@ -487,12 +483,11 @@ def test_active_set_agrees_with_lsq_linear(recovery, tmp_path):
 
 
 def test_a_refused_active_set_answer_falls_back_to_lsq_linear(recovery, monkeypatch):
-    """A cycling or badly conditioned active set: the dense solve on small problems, ``lsq_linear`` on big ones.
+    """A cycling or badly conditioned active set: the dense solve on small problems, `lsq_linear` on big ones.
 
-    Small (up to ``EXACT_FALLBACK_MAX_PARAMS``): ``"lsq_linear_dense"``, at the minimiser to
-    within its approach to the bounds (5e-7 m from BVLS here, 2e-11 m on the point test's
-    problem; a trust region nears a bound asymptotically). Above it: the trust-region answer,
-    bit for bit.
+    Small (up to `EXACT_FALLBACK_MAX_PARAMS`): `"lsq_linear_dense"`, at the minimiser to
+    within its approach to the bounds (5e-7 m from BVLS here; a trust region nears a bound
+    asymptotically). Above it: the trust-region answer, bit for bit.
     """
     import slipsolve.inversion as module
 
@@ -663,7 +658,7 @@ def test_vertex_tables_rebuild_the_element_table(recovery, tmp_path):
     assert -180.0 < nodes[:, 1].min() and nodes[:, 1].max() < 180.0
     assert nodes[:, 3].max() == 0.0 and nodes[:, 3].min() < 0.0
 
-    # The rows partition the LUMPED moment exactly -- the rule the file's columns
+    # The rows partition the lumped moment exactly -- the rule the file's columns
     # are. The default moment integrates over the tent field instead.
     table_moment = np.sum(nodes[:, 8] * nodes[:, 7] * np.hypot(nodes[:, 5], nodes[:, 6]))
     assert table_moment == pytest.approx(model.moment(rule="lumped"), rel=1e-9)
@@ -728,7 +723,7 @@ def test_persist_round_trip(recovery, tmp_path):
 
 
 def test_save_load_keeps_per_row_smoothing(recovery, tmp_path):
-    """``solve`` takes one smoothing weight per row; the saved model must reopen with them (``load`` read a float)."""
+    """`solve` takes one smoothing weight per row; the saved model must reopen with them, not with one float."""
     from slipsolve.inversion import SlipModel
 
     _, _, _, inversion = recovery
@@ -748,14 +743,14 @@ def test_save_load_keeps_per_row_smoothing(recovery, tmp_path):
 
 @pytest.fixture(scope="module")
 def dipping_recovery():
-    """The phase-two acceptance run: a 70-degree fault with genuine dip-slip.
+    """The dipping-fault acceptance run: a 70-degree fault with genuine dip-slip.
 
-    Two things are new relative to :func:`recovery`, and both matter. The mesh
-    dips, so every element's Green's function comes out of the general branch of
-    the triangular-dislocation solution rather than the exactly-vertical one; and
-    the planted patch has ``rake=25``, so the dip-slip half of the design matrix
+    Two things differ from `recovery`, and both matter. The mesh dips, so every
+    element's Green's function comes out of the general branch of the
+    triangular-dislocation solution rather than the exactly-vertical one; and
+    the planted patch has `rake=25`, so the dip-slip half of the design matrix
     is actually excited. With a pure strike-slip patch on a vertical fault -- the
-    phase-one fixture -- half the columns could be wrong and the recovery test
+    `recovery` fixture -- half the columns could be wrong and the recovery test
     would still pass.
     """
     trace = FaultTrace(_LON, _LAT, name="test_fault")
@@ -780,7 +775,7 @@ def dipping_recovery():
 
 
 def test_recovers_a_planted_patch_on_a_dipping_fault(dipping_recovery):
-    """The phase-two gate, held to the same bar as the vertical one."""
+    """The dipping-fault gate, held to the same bar as the vertical one."""
     mesh, truth, inversion = dipping_recovery
     model = inversion.solve(smoothing=0.3, ds_ratio=3.0, polarity=(-1, 0, 0),
                             strike=(-6.0, 6.0), dip=(-3.0, 3.0))

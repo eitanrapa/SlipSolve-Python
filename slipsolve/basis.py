@@ -5,11 +5,11 @@ of a slip field expanded in some basis. Two are available here and the choice
 changes what a parameter *means*, so it propagates to the smoothing operator, the
 bounds, the moment and every plot:
 
-* :class:`ElementBasis` -- slip is constant on each triangle. Phase one's
-  parameterization, and still the default, because the triangular-dislocation
-  solution assumes exactly this: a patch of constant Burgers vector. One
-  parameter per element per component, and a Green's-function column is one call.
-* :class:`NodeBasis` -- slip is the piecewise-linear "tent" that is 1 at one node
+* `ElementBasis` -- slip is constant on each triangle. The default, because the
+  triangular-dislocation solution assumes exactly this: a patch of constant
+  Burgers vector. One parameter per element per component, and a Green's-function
+  column is one call.
+* `NodeBasis` -- slip is the piecewise-linear "tent" that is 1 at one node
   and 0 at every other, so the field is continuous across every edge. This is
   what the reference implementation's layered path uses, and it is the natural
   partner for a point-source engine, which is already integrating over each
@@ -19,13 +19,10 @@ The tent basis is the better *model* -- a real slip distribution is continuous,
 and a piecewise-constant one has a spurious stress singularity on every edge --
 but it is not free: there are roughly half as many nodes as triangles, so it also
 halves the parameter count, and it needs a smoothing operator defined on nodes
-(:func:`slipsolve.regularize.laplace_beltrami`) rather than on element
-adjacency.
+(`slipsolve.regularize.laplace_beltrami`) rather than on element adjacency.
 
-Both remain reachable on purpose. The layered engine has to be checked against
-the homogeneous one, and that comparison is only meaningful if both can be
-assembled in the same basis; and every phase-one result stays comparable only
-while the element basis keeps meaning what it meant.
+Both remain available so that the layered engine can be checked against the
+homogeneous one in the same basis.
 """
 
 import numpy as np
@@ -33,26 +30,13 @@ import scipy.sparse as sp
 
 #: Sub-triangle subdivisions per node basis function.
 #:
-#: The reference uses ``interpolate_triangle2(..., 15)``, a strictly interior
-#: barycentric lattice of ``(15-1)(15-2)/2 = 91`` points, and
-#: ``build_full_xyz.m`` hard-errors if asked for any other number
-#: (``pointSourcesPerTriangle ~= 15`` raises ``SlipSolve:LegacyCompatibility``).
-#: We subdivide into ``13**2 = 169`` sub-triangles instead -- the same order of
-#: work, and **second** order where the reference's rule is only first.
-#:
-#: ⚠️ **Corrected 2026-09-07.** This note used to say the reference takes "only
-#: the upright sub-triangles" and that its "error stops falling however many
-#: points are added". Both were wrong, and both were checked against the cloned
-#: MATLAB. It takes interior *lattice nodes*, dropping the boundary, and it
-#: converges at first order rather than stalling.
-#:
-#: ⚠️ Corrected again 2026-09-08: the cause is the **equal weights**, not the
-#: dropped boundary. Lattice nodes own unequal areas (interior shared by six
-#: sub-triangles, edge by three, corner by one); weighting them equally is the
-#: defect, and restoring the boundary does not help (``n**-1.03`` against
-#: ``n**-1.04``). Weighting them ``6:3:1`` does (``n**-1.99``). Centroids are never
-#: shared, so the question does not arise. See ``_triangle_quadrature`` and
-#: ``scripts/bench_quadrature_rule.py``.
+#: The reference uses `interpolate_triangle2(..., 15)`: the `(15-1)(15-2)/2 = 91`
+#: interior nodes of a barycentric lattice, equally weighted (`build_full_xyz.m`
+#: refuses any other number). Lattice nodes own unequal areas (an interior node is
+#: shared by six sub-triangles, an edge node by three, a corner by one), so equal
+#: weights make that rule first order. We take the centroids of `13**2 = 169`
+#: sub-triangles instead: the same order of work, and second order, since centroids
+#: are never shared. See `slipsolve.layered._triangle_quadrature`.
 DEFAULT_SUBDIVISION = 13
 
 
@@ -94,7 +78,7 @@ class ElementBasis:
 class NodeBasis:
     """Slip as a continuous piecewise-linear field: one parameter per node.
 
-    Basis function ``i`` is the barycentric weight of node ``i``, which is 1 at
+    Basis function `i` is the barycentric weight of node `i`, which is 1 at
     that node, falls linearly to 0 along every edge of every incident triangle,
     and is 0 outside them. Its integral over one incident triangle is a third of
     that triangle's area, so the total area a node carries -- its lumped mass --
@@ -119,24 +103,22 @@ class NodeBasis:
     def projection(self):
         """Each node's mean contribution to each element it touches: one third.
 
-        This is how a nodal design matrix is assembled -- build the element one
-        and multiply -- rather than by evaluating a tent-weighted point cloud per
-        node. The two differ, and the difference is worth being explicit about.
+        An engine that cannot integrate a tent directly (the closed-form
+        triangular dislocation, defined on a patch of constant slip) assembles
+        per element, and this matrix carries that onto the nodes.
 
         A tent function is linear across a triangle, and this replaces it with its
         *mean* over that triangle. The replacement is exact in every respect that
         the far field can see, because it preserves the integral: the tent's
-        integral over one incident triangle is exactly ``A/3``, which is what a
+        integral over one incident triangle is exactly `A/3`, which is what a
         third of a constant slip gives. What it loses is the variation *within* a
         triangle, so a receiver closer to the fault than one element sees a
         slightly different field.
 
-        The reason to take that trade is that the alternative costs a full
-        dislocation evaluation per sub-triangle per node -- of order a thousand
-        times the work -- for a difference confined to distances where
-        ``exclude_within`` has already removed the observations. It also keeps the
-        homogeneous and layered engines assembling identically, which is what lets
-        one be checked against the other in either basis.
+        Integrating the tent instead costs a dislocation evaluation per
+        sub-triangle per node -- of order a thousand times the work -- for a
+        difference confined to distances where `exclude_within` has usually
+        removed the observations.
         """
         rows = np.repeat(np.arange(self.mesh.n_elements), 3)
         cols = self.mesh.triangles.ravel()
@@ -148,7 +130,7 @@ class NodeBasis:
     def tent_weights(self, index):
         """The exact tent sample cloud for one node: points, areas, elements.
 
-        Not used to assemble a design matrix (see :meth:`projection` for why), but
+        Not used to assemble a design matrix (see `projection` for why), but
         it is the definition the projection approximates, and the check that the
         weights sum to the node's lumped area is what pins that.
         """
@@ -196,7 +178,7 @@ class NodeBasis:
 
 
 def make_basis(mesh, kind="element", **kwargs):
-    """``"element"`` or ``"node"`` by name; an already-built basis passes through."""
+    """`"element"` or `"node"` by name; an already-built basis passes through."""
     if hasattr(kind, "n_basis"):
         return kind
     if kind == "element":
@@ -216,11 +198,11 @@ def _incident_elements(triangles, n_nodes):
 
 
 def _barycentric_weight(vertices, triangle, node, points):
-    """The tent function of ``node`` sampled at ``points`` inside its triangle.
+    """The tent function of `node` sampled at `points` inside its triangle.
 
-    A port of ``taperTriangle.m``: solve the barycentric coordinates in the
-    triangle's own plane and return the one belonging to ``node``, clipped to
-    ``[0, 1]`` so a sample a hair outside the triangle cannot contribute a
+    A port of `taperTriangle.m`: solve the barycentric coordinates in the
+    triangle's own plane and return the one belonging to `node`, clipped to
+    `[0, 1]` so a sample a hair outside the triangle cannot contribute a
     negative area.
     """
     anchor = int(np.nonzero(triangle == node)[0][0])

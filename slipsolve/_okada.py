@@ -4,29 +4,29 @@ Okada, Y. (1985), "Surface deformation due to shear and tensile faults in a
 half-space", *Bulletin of the Seismological Society of America* **75**,
 1135-1154 -- surface displacements, equations 25-30 with Chinnery's notation.
 
-This exists to check :mod:`slipsolve._tde`, not to be used by the
-inversion: a rectangle tiles only a plane, which is the whole reason the
-inversion uses triangles. It is a genuinely *independent* derivation of the same
-physics -- a closed form integrated over a rectangle, versus a superposition of
-angular dislocations -- so a rectangle cut into two triangles agreeing with it to
-round-off is strong evidence that the port is right.
+This exists to check `slipsolve._tde`, not to be used by the inversion: a
+rectangle tiles only a plane, which is why the inversion uses triangles. It is
+an independent derivation of the same physics (a closed form integrated over a
+rectangle, versus a superposition of angular dislocations), so a rectangle cut
+into two triangles agreeing with it to round-off is strong evidence that the
+port is right.
 
 It is also a complementary special case: a vertical fault needs a separate
-``cos(dip) == 0`` branch here, while the triangular solution handles it without
+`cos(dip) == 0` branch here, while the triangular solution handles it without
 one.
 
 Geometry follows the paper. In the fault's own frame the rectangle spans
-``0 <= xi <= length`` along strike (the ``+x`` axis) and ``0 <= w <= width``
-down dip, with the **lower** edge at ``depth`` and the plane dipping so that
+`0 <= xi <= length` along strike (the `+x` axis) and `0 <= w <= width`
+down dip, with the lower edge at `depth` and the plane dipping so that
 
     P(xi, w) = (xi, w cos(dip), -(depth - w sin(dip)))
 
-(as :func:`rect_corners` builds it): the plane rises toward ``+y``, so its trace
-is at ``y = width cos(dip)`` when it reaches the surface and the hanging wall is
-the ``-y`` side. A positive ``U2`` moves that side up dip.
+(as `rect_corners` builds it): the plane rises toward `+y`, so its trace
+is at `y = width cos(dip)` when it reaches the surface and the hanging wall is
+the `-y` side. A positive `U2` moves that side up dip.
 
-Slip components are the paper's: ``U1`` left-lateral strike-slip, ``U2``
-dip-slip (thrust positive), ``U3`` tensile opening.
+Slip components are the paper's: `U1` left-lateral strike-slip, `U2`
+dip-slip (thrust positive), `U3` tensile opening.
 """
 
 import numpy as np
@@ -36,9 +36,9 @@ def rect_corners(length, width, depth, dip_deg):
     """The rectangle's four corners in the fault frame, counter-clockwise.
 
     Returned in the order lower-left, lower-right, upper-right, upper-left,
-    so ``[c[0], c[1], c[2]]`` and ``[c[0], c[2], c[3]]`` tile it with a shared
-    winding -- which is what :mod:`slipsolve._tde` needs to see the same
-    normal on both halves.
+    so `[c[0], c[1], c[2]]` and `[c[0], c[2], c[3]]` tile it with a shared
+    winding, which `slipsolve._tde` needs to see the same normal on both
+    halves.
     """
     dip = np.deg2rad(dip_deg)
     cos_d, sin_d = np.cos(dip), np.sin(dip)
@@ -53,8 +53,8 @@ def rect_corners(length, width, depth, dip_deg):
 def okada_disp_surface(x, y, length, width, depth, dip_deg, u1, u2, u3, nu=0.25):
     """Surface displacement of a rectangular dislocation.
 
-    ``x``, ``y`` are surface observation coordinates in the fault frame (``z``
-    is implicitly 0). Returns ``(ue, un, uv)`` as 1-D arrays.
+    `x`, `y` are surface observation coordinates in the fault frame (`z`
+    is implicitly 0). Returns `(ue, un, uv)` as 1-D arrays.
     """
     x = np.asarray(x, dtype=float).ravel()
     y = np.asarray(y, dtype=float).ravel()
@@ -121,7 +121,7 @@ def _terms(xi, eta, q, sin_d, cos_d, u1, u2, u3, nu):
 
 
 def _i_terms(xi, eta, q, r, y_t, d_t, r_eta, r_dt, sin_d, cos_d, nu):
-    """Okada's I1..I5. ``mu / (lambda + mu)`` reduces to ``1 - 2 nu``."""
+    """Okada's I1..I5. `mu / (lambda + mu)` reduces to `1 - 2 nu`."""
     f = 1.0 - 2.0 * nu
 
     if cos_d == 0.0:

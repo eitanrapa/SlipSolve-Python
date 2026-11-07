@@ -1,9 +1,9 @@
 """Green's functions for a layered crust, by superposing tabulated point sources.
 
-The half-space engine in :mod:`slipsolve.greens` evaluates a closed form
+The half-space engine in `slipsolve.greens` evaluates a closed form
 for each triangular element. A layered medium has no closed form, so this engine
 does what EDCMP does instead: cut each element into point sources, look each one
-up in the precomputed :class:`~slipsolve.edgrn.EdgrnTables`, put the
+up in the precomputed `slipsolve.edgrn.EdgrnTables`, put the
 azimuthal dependence back, and add them up.
 
 Why bother: a homogeneous half-space gives the whole crust one rigidity, and the
@@ -11,72 +11,57 @@ shallowest few kilometres are much softer than that. Assuming they are not makes
 the same surface displacement require less shallow slip and more deep slip, which
 is a systematic bias in exactly the quantity a coseismic inversion is for.
 
-Two departures from the reference, both deliberate:
+Two departures from the reference (SlipSolve-Curve), both deliberate:
 
-* **Evaluate at the observations, not on a grid.** SlipSolve precomputes onto an
-  adaptive grid and interpolates from there onto its few thousand observations:
-  its config stores ``G_e``/``G_n``/``G_u`` with "rows ordered as
-  ``adaptive_meshgrid(X,Y)(:)``" and then interpolates "each component to every
-  sample location". Going straight to the observations is less work and has no
-  interpolation error at all.
-
-  ⚠️ The grid is of order ``1e5`` points and the three component matrices are
-  several GB. This used to read "~190 000-point ... 4.5 GB"; reproducing
-  ``adaptive_meshgrid`` from the shipped config (``xRange`` +/-240 km, ``yRange``
-  -350..290 km, ``D1`` 1.3 km, ``D2`` 2.3 km, ``M`` 9 km) gives **86k-105k**
-  points, so the point count was overstated even though 105k x 1836 columns x 8 B
-  x 3 does land at 4.6 GB. The exact figure depends on their fault trace, which
-  is not in the repo, so it is quoted as an order of magnitude.
+* **Evaluate at the observations, not on a grid.** The reference precomputes onto
+  an adaptive grid and interpolates from there onto its few thousand observations:
+  its config stores `G_e`/`G_n`/`G_u` with "rows ordered as
+  `adaptive_meshgrid(X,Y)(:)`" and then interpolates "each component to every
+  sample location". That grid is of order `1e5` points and the three component
+  matrices are several GB. Going straight to the observations is less work and has
+  no interpolation error at all.
 * **Choose the quadrature order per triangle and observation.** The reference uses
   a fixed 91 points per triangle everywhere. A point source is a good
   approximation to a patch once you are a few patch-widths away, and almost every
   observation is far from almost every triangle, so a fixed order spends nearly
-  all of its effort where one point would have done. Measured on the real problem
-  (1148 elements, 8000 observations, r/L median 38): 89x fewer source-receiver
-  evaluations at 1e-2 accuracy, 52x at 3e-3, 10x at 1e-3. ``tolerance=None``
-  forces a fixed order at the cap; to reproduce the reference exactly, pair it
-  with ``max_points=REFERENCE_QUADRATURE_POINTS``, since the cap is no longer
-  that value.
+  all of its effort where one point would have done. On a typical problem
+  (observations a median 38 element sizes from each triangle) this takes 89x fewer
+  source-receiver evaluations at 1e-2 accuracy, 52x at 3e-3, 10x at 1e-3.
+  `tolerance=None` forces a fixed order at the cap; to reproduce the reference
+  exactly, pair it with `max_points=REFERENCE_QUADRATURE_POINTS`.
 
   **The triangle is the unit of quadrature, not the unit of a column, and the two
   differ under a nodal basis.** A nodal column is not one triangle: it is the
   superposition of every triangle incident on that node, each carrying slip that
-  varies linearly from 1 at the node to 0 at the other two vertices. ``_columns``
+  varies linearly from 1 at the node to 0 at the other two vertices. `_columns`
   builds exactly that, weighting each quadrature point by the tent function
   (hence ~3x the work of an element assembly -- every triangle is visited once
   per vertex). Choosing an order does not change *what* is integrated; it sets
   only how finely each term of that sum is sampled, and each term is judged on
   its own triangle's size and its own distance to the observation.
 
-  Two limits worth knowing. The distance is the **3-D source-receiver separation**,
+  Two limits worth knowing. The distance is the 3-D source-receiver separation,
   not the element's depth -- a shallow element far away laterally needs no
   refinement, which a depth criterion would miss. And the order is capped at
-  ``max_points``, so the tolerance is *not* met closer than about ``2 * L``; see
-  :data:`MAX_QUADRATURE_POINTS` for how far that actually bites, which is much
-  less far than the model claims. Measured against a fixed order-30 rule on a
-  nodal basis (240 elements, 400 observations, 6.5 km elements), the default
-  tolerance departs by **1.2e-5 relative**.
+  `max_points`, so the tolerance is *not* met closer than about `2 * L`; see
+  `MAX_QUADRATURE_POINTS` for how far that actually bites, which is much
+  less far than the model claims. Against a fixed order-30 rule on a nodal basis,
+  the default tolerance departs by about 1e-5 relative.
 
-  ⚠️ **The tolerance bounds the QUADRATURE, and with EDGRN tables that is not
-  what limits the assembly.** Two tolerances sample the tables at different
-  points -- 3.8 against 77 points per pair at 3e-3 against 1e-4 -- so each
-  averages the tables' own grid-scale interpolation error differently, and their
-  difference is dominated by that rather than by the rule. Measured on the real
-  problem (764 elements, 6393 observations, 1601 x 401 tables, 2026-09-16): the
-  two assemblies differ by **0.68%** through the tables and by **0.086%** with
-  the same mesh, receivers, rule and orders but the closed-form half-space point
-  source in their place -- a factor of 7.9, and the smaller figure is the
-  quadrature's own. Stripping the tables' layer interfaces changes it by 12%, so
-  the steps at interfaces are not the cause either. ⇒ Comparing two tolerances on
-  tables measures *sensitivity to how the tables are sampled*, which is an upper
+  **The tolerance bounds the quadrature, and with EDGRN tables that is not what
+  limits the assembly.** Two tolerances sample the tables at different points, so
+  each averages the tables' own grid-scale interpolation error differently, and
+  their difference is dominated by that rather than by the rule (several times the
+  quadrature's own difference, even on fine tables). Comparing two tolerances on
+  tables therefore measures sensitivity to how the tables are sampled, an upper
   bound on quadrature error; refining the order converges to the table's answer,
   not to the true layered Green's function.
 
-The moment tensor of an element is built from the element's **own** orthonormal
-basis rather than from a strike/dip/rake triple. ``edcdisc.m`` goes through
-angles because its input is a rectangular patch described that way; ours is a
-triangle that already carries ``Vnorm``, ``Vstrike`` and ``Vdip``, and the
-package's ``strike`` is deliberately the azimuth of ``cross(eZ, Vnorm)`` rather
+The moment tensor of an element is built from the element's own orthonormal
+basis rather than from a strike/dip/rake triple. The reference's `edcdisc.m` goes
+through angles because its input is a rectangular patch described that way; ours is
+a triangle that already carries `Vnorm`, `Vstrike` and `Vdip`, and the
+package's `strike` is deliberately the azimuth of `cross(eZ, Vnorm)` rather
 than the geological strike -- for an east-striking fault the two differ by 180
 degrees. Converting to angles and back would put that ambiguity in the middle of
 the one calculation whose sign nothing downstream can check.
@@ -90,87 +75,63 @@ from .greens import _as_points, _require_finite
 
 #: Relative accuracy the adaptive quadrature aims for, per element.
 #:
-#: The relative error of an order-``k`` rule on an element of size ``L`` seen from
-#: distance ``r`` is about ``0.31 * (k * r / L) ** -2`` (see
-#: :data:`_QUADRATURE_CONSTANT` for the measurement, and note the exponent is 2,
-#: not 1). 3e-3 is comfortably below the noise floor of a real
-#: interferogram -- measured at 11.8 mm within-cell scatter on the Venezuela
-#: scenes, against slip of order a metre -- while costing under two points per
+#: The relative error of an order-`k` rule on an element of size `L` seen from
+#: distance `r` is about `0.31 * (k * r / L) ** -2` (see
+#: `_QUADRATURE_CONSTANT`; the exponent is 2, not 1). 3e-3 is comfortably below the
+#: noise floor of a real interferogram (about a centimetre of within-cell scatter,
+#: against slip of order a metre) while costing under two points per
 #: source-receiver pair.
 DEFAULT_TOLERANCE = 3e-3
 
-#: The reference's fixed rule: ``interpolate_triangle2`` with ``n = 15``. Not the
-#: ceiling here any more, but the value to pass as ``max_points`` (with
-#: ``tolerance=None``) to reproduce what this replaces.
+#: The reference's fixed rule: `interpolate_triangle2` with `n = 15`. Pass it as
+#: `max_points` (with `tolerance=None`) to reproduce the reference.
 REFERENCE_QUADRATURE_POINTS = 91
 
-#: Quadrature order cap, i.e. order 30. This used to be
-#: :data:`REFERENCE_QUADRATURE_POINTS`, so the adaptive rule could never do more
-#: work than the fixed rule at any pair -- a tidy invariant that turned out to
-#: cost real accuracy where it matters most.
+#: Quadrature order cap, i.e. order 30.
 #:
-#: The order is ``(L / r) * sqrt(C / tolerance)``, so a cap refuses the request
-#: for ``r`` below about ``2 * L`` at the default tolerance. Since ``r`` is
+#: The order is `(L / r) * sqrt(C / tolerance)`, so a cap refuses the request
+#: for `r` below about `2 * L` at the default tolerance. Since `r` is
 #: measured from the element centroid it is never less than that element's own
-#: depth, which confines the refusal to
-#: **shallow elements seen by near-fault observations** -- exactly the pairs that
-#: carry the shallow-slip constraint. Measured against an order-30 rule, the
-#: error the old cap left is fine down to ``r/L`` ~ 1 (1e-4, well inside the
-#: tolerance) and then falls off a cliff: **7.2e-2 at r/L = 0.5**, where the
-#: observation is inside the element's own footprint and the smooth power law
-#: stops describing anything at all.
-#:
-#: Raising the cap is close to free because the adaptive rule only spends where
-#: the model asks, so the extra work lands on the ~1.5% of pairs that were
-#: saturated. Measured (240 elements, 6.5 km, transect weighted to the near
-#: field): error at ``r/L`` = 0.5 improves **9.4x** (7.2e-2 -> 7.6e-3) for
-#: **1.27x** the points per pair (13.2 -> 16.7) -- still 5x cheaper than the
-#: fixed rule's 81.
+#: depth, which confines the refusal to shallow elements seen by near-fault
+#: observations -- exactly the pairs that carry the shallow-slip constraint. A cap
+#: at the reference's 91 points is fine down to `r/L` ~ 1 (1e-4, well inside the
+#: tolerance) and then fails: about 7e-2 at `r/L = 0.5`, where the observation is
+#: inside the element's own footprint and the smooth power law stops describing the
+#: integrand. This cap brings that to about 8e-3, for about 1.3x the points per pair:
+#: the adaptive rule only spends where the model asks, so the extra work lands on the
+#: few pairs that saturate.
 MAX_QUADRATURE_POINTS = 900
 
-#: Constant in the error model ``err = C * (k * r / L) ** -2``, remeasured
-#: 2026-08-18 against a fixed order-40 rule over ``r/L`` 1.5-35 and ``k`` 1-9
-#: (356 element-observation pairs, error taken as the 2-norm of the ENU
-#: displacement vector so per-component zero crossings cannot inflate it).
+#: Constant in the error model `err = C * (k * r / L) ** -2`, fitted against a
+#: fixed order-40 rule over `r/L` 1.5-35 and `k` 1-9 (error taken as the 2-norm of
+#: the ENU displacement vector, so per-component zero crossings cannot inflate it).
 #:
-#: ⚠️ **The exponent is 2, not 1.** A triangle's first moment vanishes about its
-#: own centroid, so the centroid rule's leading error term is second order, and
-#: the measured exponent is **-2.14** -- consistent with the theory and not with
-#: the ``C * L / (k * r)`` law this used to carry. Fitting at the theoretical
-#: ``-2`` gives ``C = 0.312`` with the measured/model ratio centred at 1.01.
-#:
-#: What the old shape cost: solving a linear model against a quadratic truth
-#: makes the delivered error scale as ``tolerance ** 2``, so the knob did not
-#: mean what it said. Measured on the old rule, asking for 1e-2 delivered 5e-3
-#: but asking for 3e-3 delivered **1e-5** -- three times the cost for three
-#: hundred times the accuracy nobody requested. The value was nonetheless very
-#: nearly right *at the default*: 20.3 vs 20.0 points per unit ``L/r``, which is
-#: why this correction leaves 3e-3 runs essentially unchanged and only shows up
-#: when the tolerance is moved.
+#: The exponent is 2, not 1: a triangle's first moment vanishes about its own
+#: centroid, so the centroid rule's leading error term is second order (the fitted
+#: exponent is -2.14). A law linear in `k * r / L` would make the delivered error
+#: scale as `tolerance ** 2`, so the tolerance would not mean what it says.
 _QUADRATURE_CONSTANT = 0.312
 
 #: Fit scatter is 1.89x at one sigma, so a model centred on the median leaves
-#: half of all pairs above the tolerance they asked for. This multiplies ``C``
-#: before the solve, which raises the order by ``sqrt`` of itself: 4x here takes
-#: the fraction of pairs exceeding their tolerance from **51.7% to 5.6%**.
+#: half of all pairs above the tolerance they asked for. This multiplies `C`
+#: before the solve, which raises the order by `sqrt` of itself: 4x here takes
+#: the fraction of pairs exceeding their tolerance from about half to about 6%.
 _QUADRATURE_SAFETY = 4.0
 
 #: Fraction of source-receiver pairs allowed to hit the order cap before
-#: :meth:`LayeredPointSource.los_matrix` says so.
+#: `LayeredPointSource.los_matrix` warns.
 #:
-#: ⚠️ **A capped pair is a pair whose requested tolerance was not met**, and
-#: nothing used to report that. The cap binds inside roughly ``2 * L``, which is
-#: precisely where the near-fault observations that carry the shallow-slip
-#: constraint sit -- so silence there is the wrong default. The guarantee the
-#: adaptive rule actually offers is *"never coarser than the fixed rule it
-#: replaces"*, not the tolerance.
+#: A capped pair is a pair whose requested tolerance was not met. The cap binds
+#: inside roughly `2 * L`, which is precisely where the near-fault observations that
+#: carry the shallow-slip constraint sit, so it is reported rather than silent. The
+#: guarantee the adaptive rule actually offers is "never coarser than the fixed rule
+#: it replaces", not the tolerance.
 #:
-#: 5% rather than zero because saturation is not by itself a fault: measured,
-#: 1.54% of pairs saturate on a 240-element synthetic and the assembly is still
-#: accurate to 1.2e-5. The real six-scene run saturates **0.00%** of 3.4 M pairs
-#: at the current cap, so anything above a few percent means the geometry has
-#: changed -- much larger elements, or observations much closer to the fault --
-#: and `max_points` should be raised.
+#: 5% rather than zero because saturation is not by itself a fault: with about 1.5%
+#: of pairs saturated an assembly can still be accurate to about 1e-5, and a typical
+#: real problem saturates almost none at the default cap. Anything above a few
+#: percent means much larger elements, or observations much closer to the fault, and
+#: `max_points` should be raised.
 CAPPED_PAIR_WARN_FRACTION = 0.05
 
 
@@ -178,25 +139,25 @@ class LayeredPointSource:
     """Point-source superposition through EDGRN tables; a layered engine.
 
     Satisfies the same protocol as
-    :class:`~slipsolve.greens.HalfSpaceTDE` -- ``los_matrix``,
-    ``displacement``, ``forward``, ``name``, ``nu`` -- so
-    :class:`~slipsolve.inversion.SlipInversion` takes it with
-    ``engine=`` and nothing else changes.
+    `slipsolve.greens.HalfSpaceTDE` -- `los_matrix`,
+    `displacement`, `forward`, `name`, `nu` -- so
+    `slipsolve.inversion.SlipInversion` takes it with
+    `engine=` and nothing else changes.
     """
 
     name = "layered_point_source"
 
     def __init__(self, tables, nu=0.25, tolerance=DEFAULT_TOLERANCE,
                  max_points=MAX_QUADRATURE_POINTS):
-        """``tables`` carries the elastic structure; ``nu`` does **not**.
+        """`tables` carries the elastic structure; `nu` does not.
 
         Poisson's ratio is recorded for provenance and to satisfy the engine
         protocol, and is deliberately not used in any calculation here: EDGRN
         already integrated through the layer stack, so every elastic property the
         displacements depend on -- including how Poisson's ratio varies with depth
-        -- is baked into the tables. Passing a different ``nu`` changes nothing.
-        That is the opposite of :class:`~slipsolve.greens.HalfSpaceTDE`,
-        where ``nu`` is the only material parameter there is.
+        -- is baked into the tables. Passing a different `nu` changes nothing.
+        That is the opposite of `slipsolve.greens.HalfSpaceTDE`,
+        where `nu` is the only material parameter there is.
         """
         self.tables = tables
         self.nu = float(nu)
@@ -209,12 +170,12 @@ class LayeredPointSource:
 
     # -- the engine protocol ----------------------------------------------
     #: This engine can integrate a basis function directly, so
-    #: :class:`~slipsolve.inversion.SlipInversion` hands it the basis
+    #: `slipsolve.inversion.SlipInversion` hands it the basis
     #: instead of projecting an element-wise matrix afterwards.
     supports_basis = True
 
     def displacement(self, mesh, x, y, z=None, basis=None):
-        """ENU displacement per unit slip, shape ``(npts, 3, 2 * n_basis)``."""
+        """ENU displacement per unit slip, shape `(npts, 3, 2 * n_basis)`."""
         x, y, z = _as_points(x, y, z)
         n = _n_basis(mesh, basis)
         out = np.zeros((x.size, 3, 2 * n))
@@ -224,7 +185,7 @@ class LayeredPointSource:
         return out
 
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
-        """Line-of-sight design matrix, shape ``(npts, 2 * n_basis)``."""
+        """Line-of-sight design matrix, shape `(npts, 2 * n_basis)`."""
         x, y, z = _as_points(x, y, z)
         look = np.stack([np.asarray(look_e, dtype=float).ravel(),
                          np.asarray(look_n, dtype=float).ravel(),
@@ -252,20 +213,20 @@ class LayeredPointSource:
 
     # -- assembly ----------------------------------------------------------
     def _columns(self, mesh, x, y, z, basis=None):
-        """Yield ``(index, component, (npts, 3) ENU)`` for every column.
+        """Yield `(index, component, (npts, 3) ENU)` for every column.
 
         With no basis, or an element basis, one column per element with slip
-        constant over it. With a **nodal** basis, one column per node with slip
-        varying *linearly* from 1 at that node to 0 at every neighbour: each
+        constant over it. With a nodal basis, one column per node with slip
+        varying linearly from 1 at that node to 0 at every neighbour: each
         quadrature point in each incident triangle is weighted by the tent
         function there, so the integral is of the basis function itself rather
         than of its average.
 
         That is the difference between this and the projection
-        :meth:`~slipsolve.basis.NodeBasis.projection` applies to an
+        `slipsolve.basis.NodeBasis.projection` applies to an
         element-wise matrix. Both preserve the moment; only this one gets the
         near-field shape right, because a tent is not constant across a triangle.
-        It costs about **three times** an element assembly -- each triangle is
+        It costs about three times an element assembly -- each triangle is
         visited once per vertex -- not the thousandfold a fixed 91-point rule per
         node would.
         """
@@ -328,12 +289,10 @@ class LayeredPointSource:
             "tolerance": self.tolerance,
             "max_points": self.max_points,
             # How far past the cap the worst pair asked to go, and what the error
-            # model makes of that. ⚠️ `implied_error` is that model EXTRAPOLATED
-            # past where it was calibrated -- it was fitted over r/L 1.5-35 and a
-            # capped pair is inside r ~ 2L by construction, where the smooth
-            # 1/(k r) law stops describing the integrand at all. Read it as an
-            # order of magnitude on how much the cap cost, which is strictly more
-            # than the bare count said, and not as an error bar.
+            # model makes of that. `implied_error` extrapolates the model past where
+            # it was fitted (r/L 1.5-35; a capped pair is inside r ~ 2L by
+            # construction), so read it as an order of magnitude on what the cap
+            # cost, not as an error bar.
             "worst_capped_ratio": overshoot,
             "implied_error": (None if self.tolerance is None
                               else self.tolerance * overshoot ** 2),
@@ -342,9 +301,9 @@ class LayeredPointSource:
     def _warn_if_capped(self):
         """Say when the requested tolerance was not met, and on how many pairs.
 
-        The order cap binds inside roughly ``2 * L``, so the pairs it silences are
+        The order cap binds inside roughly `2 * L`, so the pairs it affects are
         near-fault observations of shallow elements -- the ones carrying the
-        shallow-slip constraint. See :data:`CAPPED_PAIR_WARN_FRACTION`.
+        shallow-slip constraint. See `CAPPED_PAIR_WARN_FRACTION`.
         """
         report = self.quadrature_report
         if not report or self.tolerance is None:
@@ -368,63 +327,46 @@ class LayeredPointSource:
     def _orders(self, centroid, size, x, y, z, clip=True):
         """Quadrature order for each observation, from how far away it is.
 
-        Solving the measured error model ``C * (k * r / L) ** -2 = tolerance``
-        for ``k``, then rounding up and clamping. **The exponent is 2**: a
-        triangle's first moment vanishes about its own centroid, so the leading
-        error term is second order, and the measured exponent is -2.14. The law
-        used to be written linear in ``k * r / L``, which made the delivered
-        error scale as ``tolerance ** 2`` -- the knob did not mean what it said.
-        See :data:`_QUADRATURE_CONSTANT`. The order is per *observation*, not
-        one per triangle: the point of the exercise is that a triangle is near a
-        handful of observations and far from thousands.
+        Solving the error model `C * (k * r / L) ** -2 = tolerance` for `k`,
+        then rounding up and clamping (the exponent is 2; see
+        `_QUADRATURE_CONSTANT`). The order is per observation, not one per
+        triangle: the point of the exercise is that a triangle is near a handful
+        of observations and far from thousands.
 
-        ``r`` is the full 3-D separation from this triangle's centroid, so it is
+        `r` is the full 3-D separation from this triangle's centroid, so it is
         the actual source-receiver distance rather than the element's depth.
 
-        Two things the clamp does. ``r`` is floored at ``size / 100`` so an
+        Two things the clamp does. `r` is floored at `size / 100` so an
         observation sitting on the centroid cannot ask for an infinite order; and
-        the order is capped at ``sqrt(max_points)``, so inside roughly ``2 * L``
-        the requested order is refused and the tolerance goes unmet -- silently,
-        which is why :data:`MAX_QUADRATURE_POINTS` carries the measured size of
-        the error rather than leaving it to the model, whose smooth ``1/(k*r)``
-        law stops describing anything once the observation is inside the
-        element's own footprint.
+        the order is capped at `sqrt(max_points)`, so inside roughly `2 * L`
+        the requested order is refused and the tolerance goes unmet.
+        `MAX_QUADRATURE_POINTS` states the size of that error, since the smooth
+        power law stops describing the integrand once the observation is inside
+        the element's own footprint.
 
-        ``clip=False`` returns the order that was *asked for* before the cap,
+        `clip=False` returns the order that was asked for before the cap,
         which is the only thing that says how far past the cap a pair sat -- and
         so the only route to how badly its tolerance was missed. See
-        :meth:`quadrature_report`'s ``implied_error``.
+        `quadrature_report`'s `implied_error`.
 
         The error constant was calibrated against constant-slip triangular
         dislocations. It carries over to the tented integrand a nodal basis
-        produces -- measured at 1.2e-5 relative against the fixed rule -- but it
-        was an extrapolation until that was checked, so re-measure before
-        trusting it on a basis with a different variation across the triangle.
+        produces (about 1e-5 relative against the fixed rule); check it again
+        before trusting it on a basis with a different variation across the
+        triangle.
 
-        ⚠️ **AND THE TOLERANCE IS STRUCTURALLY BLIND TO ONE THING, WHICH IS
-        MEASURED AND TURNS OUT NOT TO MATTER.** At ``k = 1``
-        :func:`_triangle_quadrature` returns the parent centroid, where every
-        barycentric coordinate is exactly ``1/3`` -- so under a nodal basis the
-        tent weight is ``1/3`` for all three nodes and **the triangle's three
-        design columns come out identical** for that observation. Such a pair
-        carries the element's *mean* slip and nothing about the linear variation
-        across it, and ``k = 1`` is **56.7%** of real pairs.
-
-        The calibration cannot see this and neither can the row-sum check that
-        verified it: both use the response to *uniform* slip, where
-        ``sum_j phi_j == 1`` identically, the tents cancel, and the error is the
-        constant-slip one at every order. Measured directly on one element, the
-        three columns genuinely differ by 8-13% of that element's own
-        contribution at the distances where ``k = 1`` is chosen, and the
-        one-point rule reproduces **none** of it (spread 1e-15).
-
-        What it costs the answer, measured end to end on the real seven-scene
-        problem by flooring the order at 2 and re-solving: **dMw 0.0000, dpeak
-        0.0001 m, slip field different by 0.04% of peak at rank 40 and 0.21% at
-        rank 79**, variance reduction identical to three decimals. The floor costs
-        4.19 -> 5.89 points per pair. ⇒ **Not worth paying**, and the reason is
-        that ``k = 1`` is selected exactly where the element's contribution is
-        small. Recorded because nothing else bounds it, not because it is a bug.
+        The tolerance is blind to one thing, which does not matter in practice.
+        At `k = 1` `_triangle_quadrature` returns the parent centroid, where every
+        barycentric coordinate is exactly `1/3` -- so under a nodal basis the tent
+        weight is `1/3` for all three nodes and the triangle's three design
+        columns come out identical for that observation. Such a pair carries the
+        element's mean slip and nothing about the linear variation across it, and
+        `k = 1` is about half of all pairs on a typical problem. The calibration
+        cannot see this: it uses the response to uniform slip, where
+        `sum_j phi_j == 1` identically and the tents cancel. Flooring the order at
+        2 costs about 40% more points per pair and moves a real inversion's slip
+        by a fraction of a percent of its peak and its moment not at all, because
+        `k = 1` is selected exactly where the element's contribution is small.
         """
         if self.tolerance is None:
             return np.full(x.size, int(np.sqrt(self.max_points)))
@@ -442,9 +384,9 @@ class LayeredPointSource:
     def _sum_sources(self, points, weights, moment, x, y):
         """Superpose every point source of one element at every observation.
 
-        ``points`` is ``(nq, 3)`` in ENU, ``weights`` the area each carries in
-        square metres, ``moment`` the element's five packed tensor components.
-        Broadcasting is ``(nobs, nq)`` throughout and collapsed at the end, so the
+        `points` is `(nq, 3)` in ENU, `weights` the area each carries in
+        square metres, `moment` the element's five packed tensor components.
+        Broadcasting is `(nobs, nq)` throughout and collapsed at the end, so the
         cost is one table lookup per source-receiver pair -- which is what the
         adaptive order exists to keep small.
         """
@@ -492,7 +434,7 @@ def _n_basis(mesh, basis):
 
 
 def _tent(vertices, triangle, node, points):
-    """The nodal tent function of ``node``, sampled inside its own triangle."""
+    """The nodal tent function of `node`, sampled inside its own triangle."""
     from .basis import _barycentric_weight
 
     return _barycentric_weight(vertices, triangle, node, points)
@@ -501,9 +443,9 @@ def _tent(vertices, triangle, node, points):
 def _slip_directions(normal):
     """The element's strike and dip unit vectors, in the order the columns use.
 
-    The same ``Vstrike = cross(eZ, Vnorm)``, ``Vdip = cross(Vnorm, Vstrike)`` the
-    triangular-dislocation solution uses, so column ``k`` of a layered design
-    matrix means precisely what column ``k`` of a half-space one means and the two
+    The same `Vstrike = cross(eZ, Vnorm)`, `Vdip = cross(Vnorm, Vstrike)` the
+    triangular-dislocation solution uses, so column `k` of a layered design
+    matrix means precisely what column `k` of a half-space one means and the two
     engines are interchangeable.
     """
     # The same expression `_tde._element_basis` uses, reproduced from the normal
@@ -519,18 +461,18 @@ def _slip_directions(normal):
 def _moment_components(normal, slip):
     """Pack a unit dislocation's moment tensor into EDCMP's five components.
 
-    A dislocation of area ``A`` and slip ``s`` on a plane with unit normal ``n``
-    in the unit direction ``d`` has moment tensor ``mu*A*s*(n(x)d + d(x)n)``. The
-    tables already carry the ``mu``, so what is needed here is the dimensionless
+    A dislocation of area `A` and slip `s` on a plane with unit normal `n`
+    in the unit direction `d` has moment tensor `mu*A*s*(n(x)d + d(x)n)`. The
+    tables already carry the `mu`, so what is needed here is the dimensionless
     tensor, converted to north/east/down and projected onto the basis EDCMP's
-    three source types span::
+    three source types span:
 
         m1 = M_ne      m2 = M_nd      m3 = M_dd
         m4 = (M_nn - M_ee) / 2        m5 = M_ed
 
     Five components, not six, because a shear dislocation's tensor is traceless
-    -- ``n`` and ``d`` are perpendicular -- so ``M_nn`` and ``M_ee`` are recovered
-    from ``m3`` and ``m4`` together.
+    -- `n` and `d` are perpendicular -- so `M_nn` and `M_ee` are recovered
+    from `m3` and `m4` together.
     """
     n = np.asarray(normal, dtype=float)
     d = np.asarray(slip, dtype=float)
@@ -543,57 +485,32 @@ def _moment_components(normal, slip):
 
 
 def _triangle_quadrature(p1, p2, p3, order):
-    """Equal-weight point sources on a triangle: ``order**2`` sub-triangle centroids.
+    """Equal-weight point sources on a triangle: `order**2` sub-triangle centroids.
 
-    Subdividing each edge into ``order`` gives ``order**2`` congruent
-    sub-triangles -- ``order*(order+1)/2`` pointing the same way as the parent and
-    ``order*(order-1)/2`` inverted -- and their centroids with equal weights is a
-    **second-order** rule -- and ``-2`` is exactly the exponent
-    :data:`_QUADRATURE_CONSTANT`'s error model assumes. Keeping both orientations
-    is what buys that order.
+    Subdividing each edge into `order` gives `order**2` congruent
+    sub-triangles -- `order*(order+1)/2` pointing the same way as the parent and
+    `order*(order-1)/2` inverted -- and their centroids with equal weights is a
+    second-order rule, which is exactly the exponent `_QUADRATURE_CONSTANT`'s error
+    model assumes. Keeping both orientations is what buys that order.
 
-    ⚠️ **Two claims that used to sit here were WRONG.** Both corrected 2026-09-07
-    by reading the reference and measuring against exact polynomial integrals
-    (``scripts/bench_quadrature_rule.py``).
+    The reference's rule is different, and first order. It is
+    `interpolate_triangle2(v1,v2,v3,15)`: the lattice points strictly inside the
+    triangle, `(n-1)(n-2)/2` of them (which is where 91 comes from, as a
+    consequence of `n = 15` rather than as a target), weighted equally by its
+    caller `comb_green_nodes_xyz.m` (`pmoment = area/npatch`), with a tent applied
+    through `taperTriangle`. It converges as `N**-0.48` in point count against this
+    rule's `N**-1.00`. The cause is the equal weights, not the excluded boundary:
+    a lattice's nodes own unequal areas -- an interior node is shared by six
+    sub-triangles, an edge node by three, a corner by one -- and only weights in
+    that `6:3:1` ratio (the P1 vertex rule) restore second order. Centroids avoid
+    the question: a sub-triangle centroid is interior to exactly one cell and owns
+    exactly `area/k**2`, so there is no sharing to weight for.
 
-    *It is not "only the upright sub-triangles".* The reference is
-    ``interpolate_triangle2(v1,v2,v3,15)`` in
-    ``external/legacy_matlab/Inversion/layered_green/``, whose own header reads
-    "points strictly INSIDE a 3D triangle ... Edge/vertex points are excluded",
-    with ``#points = (n-1)(n-2)/2`` -- which is where **91** comes from, as a
-    consequence of ``n = 15`` rather than as a target. Its caller
-    ``comb_green_nodes_xyz.m`` weights them equally (``pmoment = area/npatch``) and
-    applies a tent through ``taperTriangle``.
-
-    *And it does not plateau.* It converges at first order in ``n``, i.e.
-    ``N**-0.48`` in point count against this rule's ``N**-1.00``. The old "plateaus
-    around 5e-3" reading came from measuring on the real layered integrand, where
-    EDGRN table interpolation error takes over and hides the continued slow
-    convergence.
-
-    ⚠️ **A third correction, 2026-09-08: the cause is the EQUAL WEIGHTS, not the
-    excluded boundary.** This docstring blamed the ``(n-3)/n`` shrinkage of the
-    interior lattice. Measured, that is wrong: restore the boundary and the rule is
-    *still* first order (``n**-1.03`` against interior-only's ``n**-1.04``, errors
-    within 1%). A lattice's nodes own unequal areas -- an interior node is shared
-    by six sub-triangles, an edge node by three, a corner by one -- and weighting
-    them equally misrepresents that, with the mismatch in the ``O(1/n)`` boundary
-    layer. Give them the area they own (the P1 vertex rule, weights ``6:3:1``) and
-    second order comes back at ``n**-1.99``. So the reference is avoiding a real
-    problem with a fix that does not address it.
-
-    Centroids avoid the question rather than answering it: a sub-triangle centroid
-    is interior to exactly one cell and owns exactly ``area/k**2``, so there is no
-    sharing to weight for.
-
-    The cost at matched point count: **12.6x** worse at 91 points, 27.8x at 465,
-    120x at 9045 -- widening, because the orders differ. The reference's 91-point
-    accuracy is matched here by **9 points**.
-
-    ⚠️ This is separate from, and additive to, the adaptive-order win. Adapting
-    the order is what makes most pairs cheap (56.7% of real pairs need ``k=1``);
-    the boundary treatment is what makes each order accurate. Do not conflate them
-    when attributing the speed-up.
+    At matched point count the reference's rule is 12.6x less accurate at 91
+    points, 27.8x at 465 and 120x at 9045 -- widening, because the orders differ;
+    its 91-point accuracy is matched here by 9 points. That is separate from, and
+    additive to, the adaptive order, which is what makes most pairs cheap (about
+    half need `k = 1`).
     """
     p1, p2, p3 = (np.asarray(p, dtype=float) for p in (p1, p2, p3))
     order = max(1, int(order))
@@ -613,12 +530,12 @@ def _triangle_quadrature(p1, p2, p3, order):
 
 
 def _sub_triangles(order):
-    """The ``order**2`` sub-triangles of :func:`_triangle_quadrature`, as vertices.
+    """The `order**2` sub-triangles of `_triangle_quadrature`, as vertices.
 
-    ``(order**2, 3, 3)`` barycentric coordinates: sub-triangle, its vertex, parent
-    vertex. Same lattice and same order as ``_triangle_quadrature``, whose points
+    `(order**2, 3, 3)` barycentric coordinates: sub-triangle, its vertex, parent
+    vertex. Same lattice and same order as `_triangle_quadrature`, whose points
     are exactly these triangles' centroids -- so a caller that needs a piece's
-    extent as well as its centroid (``SlipModel.moment``, which averages the
+    extent as well as its centroid (`SlipModel.moment`, which averages the
     rigidity over each piece's depth range) stays on the rule the rest of the
     package uses.
     """

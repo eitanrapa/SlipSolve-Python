@@ -3,80 +3,75 @@
 A fault often separates two different rocks, and then the block on one side is
 softer than the block on the other. A softer block moves more for the same slip,
 so the contrast shows up in the data as an asymmetry across the trace -- the same
-asymmetry a dip makes. On Venezuela a north block about twice as soft stood in
-for the west's 80 degree north dip (2026-10-07).
+asymmetry a dip makes, so the two can stand in for each other.
 
 **The model.** The material boundary is the fault surface itself, continued down
 dip and past the trace's ends. The two blocks' moduli are one reference model --
 the velocity model, or a homogeneous half-space -- scaled by a constant on each
 side, so the layering and Poisson's ratio are the same on both sides and only the
-level differs. :class:`RigidityContrast` says which block is softer, by how much,
+level differs. `RigidityContrast` says which block is softer, by how much,
 and where along strike that changes.
 
-**The exact solution.** Give each block ``a = mu_ref / mu_block``. The
-displacement in a block is then exactly ``a F(D)``, where ``F(D)`` is the
-reference half-space's field of a displacement discontinuity ``D`` on the
-boundaries, and ``D`` solves::
+**The exact solution.** Give each block `a = mu_ref / mu_block`. The
+displacement in a block is then exactly `a F(D)`, where `F(D)` is the
+reference half-space's field of a displacement discontinuity `D` on the
+boundaries, and `D` solves:
 
     (a+ + a-)/2 D + (a+ - a-) Fbar(D) = s     on every boundary,
 
-with ``s`` the slip on the fault (zero elsewhere) and ``Fbar`` the reference
+with `s` the slip on the fault (zero elsewhere) and `Fbar` the reference
 field averaged across the boundary. Each scaled field is in equilibrium in its
 block and traction-free at the surface. It is traction-continuous across the
-boundary, because ``mu a`` is the same on both sides and a dislocation's traction
+boundary, because `mu a` is the same on both sides and a dislocation's traction
 is continuous; the equation sets its jump. Nothing here assumes the boundary is
 flat or vertical, or the reference homogeneous: with a layered reference the same
-holds layer by layer, since both blocks scale it by a constant. :class:`Bimaterial`
-with ``exact=True`` solves it with the half-space engine, or with
-:class:`~slipsolve.layered_tde.LayeredTDE` for a layered crust. Both give the
+holds layer by layer, since both blocks scale it by a constant. `Bimaterial`
+with `exact=True` solves it with the half-space engine, or with
+`slipsolve.layered_tde.LayeredTDE` for a layered crust. Both give the
 field at depth with opening as well as slip; EDGRN's tables give neither.
 
-**The scaled mode is its first term.** Dropping ``Fbar`` leaves::
+**The scaled mode is its first term.** Dropping `Fbar` leaves:
 
     G = diag(a_obs) G_ref diag(1/m),        m = (a+ + a-)/2:
 
-each sample's row times its own block's ``a``, and each slip column times
-``1/m``, which is the harmonic mean of the two rigidities over the reference one.
-With one ratio ``r = mu_other / mu_side`` that is ``2r/(1+r)`` on the named side
-and ``2/(1+r)`` on the other, which is what the Venezuela scripts used.
+each sample's row times its own block's `a`, and each slip column times
+`1/m`, which is the harmonic mean of the two rigidities over the reference one.
+With one ratio `r = mu_other / mu_side` that is `2r/(1+r)` on the named side
+and `2/(1+r)` on the other.
 
-``Fbar`` vanishes only for strike-slip on a vertical fault in 2-D. Elsewhere the
+`Fbar` vanishes only for strike-slip on a vertical fault in 2-D. Elsewhere the
 scaled mode is still a model of the exact form, but its slip is the effective
-``D``, not the slip. Measured in 2-D (strike-slip, slip free, two-sided data):
+`D`, not the slip. In 2-D (strike-slip, two-sided data) it recovers the true
+ratio, but its potency is biased -- by about a fifth at a 50 degree dip with a
+ratio of 2, low with the hanging wall softer and high with the footwall softer
+-- and correcting the slip afterwards removes only about two thirds of the bias.
 
-- it recovered the true ratio (2.00-2.01 at dips 80-50 degrees);
-- its potency was x0.95 at 80 degrees and x0.83 at 50 (ratio 2, hanging wall
-  softer), and x1.06 / x1.23 with the footwall softer;
-- correcting the slip afterwards recovered only about two thirds of that.
+In 3-D, `Fbar` also opens the boundary near the rupture ends and slip
+gradients, and an opening lifts the ground, which LOS sees. The scaled mode's
+error is then a sizeable fraction of the contrast's effect, larger on a dipping
+fault, and a sweep run with it can misread both the dip and the ratio. So the
+scaled mode is for exploring; take a dip, ratio or moment from `exact=True`.
 
-In 3-D, ``Fbar`` also opens the boundary near the rupture ends and slip
-gradients, and an opening lifts the ground, which LOS sees. On the Panama
-synthetic (Mw 7.7, two-sided, ratio 2) the scaled mode's error was 11% of the
-contrast's effect on a vertical fault and 44% at 60 degrees. A scaled-mode sweep
-fed exact-mode data put both dips 5 degrees off and the ratio at 2.24 (2026-10-12).
-So the scaled mode is for exploring; take a dip, ratio or moment from ``exact=True``.
-
-**Changing along strike.** ``breaks`` cut the fault into intervals, each with its
+**Changing along strike.** `breaks` cut the fault into intervals, each with its
 own ratio. The reference block stays uniform. The other block steps at each
 break, across a vertical boundary normal to the trace, which the exact mode
-meshes as part of the interface. ⚠️ The scaled mode cannot represent a step. On
-the Panama synthetic, with the ratio stepping from 2 to 1 at mid-length, its error
-was 112% of the contrast's effect, and a sweep read the two ratios as 1.48 and
-1.29. ⚠️ Where only one block has data, the ratio there cannot be measured. It
-rescales the slip by up to ``(1+r)/2`` and is an assumption, not a result.
+meshes as part of the interface. The scaled mode cannot represent a step: its
+error there can exceed the contrast's whole effect. Where only one block has
+data, the ratio there cannot be measured: it rescales the slip by up to
+`(1+r)/2` and is an assumption, not a result.
 
-**The moment** uses the harmonic-mean rigidity ``2 mu+ mu- / (mu+ + mu-)``. In
+**The moment** uses the harmonic-mean rigidity `2 mu+ mu- / (mu+ + mu-)`. In
 2-D the far field on either side is a homogeneous medium's at that rigidity.
-:meth:`Bimaterial.rigidity_factor` gives it per element over the reference's.
-:meth:`SlipModel.moment <slipsolve.inversion.SlipModel.moment>` applies it.
+`Bimaterial.rigidity_factor` gives it per element over the reference's, and
+`slipsolve.inversion.SlipModel.moment` applies it.
 
-**Changing with depth.** ``depth_breaks`` step the contrast in depth
-(:class:`RigidityContrast`); the exact mode meshes a horizontal boundary at each.
-**Not built yet:** several blocks across strike. Stepped, it fits the exact form
-too, since each region is still a scaled copy of the reference, and its boundaries
-would join the interface as the breaks do. **Outside it:** different Poisson's
-ratios on the two sides, whose moduli are not proportional, and a contrast
-varying smoothly with depth except as steps.
+**Changing with depth.** `depth_breaks` step the contrast in depth
+(`RigidityContrast`); the exact mode meshes a horizontal boundary at each.
+Several blocks across strike are not supported; stepped, they would fit the
+exact form too, since each region is still a scaled copy of the reference, and
+their boundaries would join the interface as the breaks do. Outside the exact
+form: different Poisson's ratios on the two sides, whose moduli are not
+proportional, and a contrast varying smoothly with depth except as steps.
 """
 
 import copy
@@ -89,24 +84,23 @@ from ._tde import tde_disp_hs, tde_disp_hs_unit
 from .greens import HalfSpaceTDE, _as_points
 from .trace import FaultTrace, _arc_length
 
-#: Compass words ``side=`` accepts, as unit (east, north) vectors.
+#: Compass words `side=` accepts, as unit (east, north) vectors.
 COMPASS = {name: (np.sin(np.radians(az)), np.cos(np.radians(az))) for name, az in (
     ("north", 0.0), ("northeast", 45.0), ("east", 90.0), ("southeast", 135.0),
     ("south", 180.0), ("southwest", 225.0), ("west", 270.0), ("northwest", 315.0))}
 
-#: A compass ``side=`` must make at most 60 degrees with the trace's mean normal
+#: A compass `side=` must make at most 60 degrees with the trace's mean normal
 #: (one way or the other), or it does not say which block it means.
 COMPASS_MIN_COSINE = 0.5
 
 #: How far the exact mode's interface reaches beyond the fault, in units of the
-#: fault's depth extent: below its base (``depth``), past each end of the trace
-#: (``strike``), and out from the fault along an across-strike boundary
-#: (``cross``). The discontinuity it carries decays only slowly with depth.
-#: Measured on a 400 km fault dipping 50 degrees, at mid-length, against the 2-D
-#: exact solution: the contrast's effect came out 91% of the 2-D one with the
-#: interface cut 1 depth below the base, 94% at 3 and 95% at 6. Past the end of a
-#: boundary nothing cancels the blocks' different scales, so samples there see the
-#: contrast's whole jump. Keep ``strike`` and ``cross`` reaching past the data.
+#: fault's depth extent: below its base (`depth`), past each end of the trace
+#: (`strike`), and out from the fault along an across-strike boundary
+#: (`cross`). The discontinuity it carries decays only slowly with depth, so
+#: cutting the interface off leaves a small far-field error that falls roughly
+#: as one over the reach. Past the end of a boundary nothing cancels the blocks'
+#: different scales, so samples there see the contrast's whole jump. Keep
+#: `strike` and `cross` reaching past the data.
 EXTEND = {"depth": 3.0, "strike": 4.0, "cross": 4.0}
 
 #: Element growth from one row of the exact mode's extension to the next.
@@ -131,36 +125,36 @@ CROSS_SNAP = 1e-6
 class RigidityContrast:
     """Which block is softer, by how much, and where along strike that changes.
 
-    ``side`` names the block whose rigidity differs from the reference's:
-    ``"left"`` or ``"right"`` of the trace as it runs from its first vertex to
-    its last (the side :meth:`FaultTrace.side` calls +1 is the left), or a
-    compass word (``"north"``, ``"southwest"``, ...) resolved against the
+    `side` names the block whose rigidity differs from the reference's:
+    `"left"` or `"right"` of the trace as it runs from its first vertex to
+    its last (the side `FaultTrace.side` calls +1 is the left), or a
+    compass word (`"north"`, `"southwest"`, ...) resolved against the
     trace's mean left-hand normal. A compass word more than 60 degrees from
     that normal is refused as ambiguous.
 
-    ``ratio`` is ``mu_other / mu_side``: above 1 the named block is softer. One
-    value holds along the whole fault. With ``breaks`` (arc lengths in metres
+    `ratio` is `mu_other / mu_side`: above 1 the named block is softer. One
+    value holds along the whole fault. With `breaks` (arc lengths in metres
     along the trace, increasing) there is one value per interval, so
-    ``ratio=(1.45, 1.0), breaks=(55e3,)`` puts a contrast west of 55 km and none
-    east of it.
+    `ratio=(1.5, 1.0), breaks=(50e3,)` puts a contrast on the first 50 km of
+    the trace and none beyond.
 
-    ``reference`` names the block the rigidity model describes, the velocity
-    model or the flat default: ``"other"`` (the default) or ``"side"``. That
+    `reference` names the block the rigidity model describes, the velocity
+    model or the flat default: `"other"` (the default) or `"side"`. That
     block is uniform along strike, and the other block's rigidity is the
     reference's scaled by each interval's ratio. So with one ratio it changes only
     the moment; with several it also decides which block steps at the breaks.
 
-    Arc lengths are measured along ``trace``. A mesh built from it measures its
-    own (``mesh.params[:, 0]``) on the trace resampled at its edge length, which
+    Arc lengths are measured along `trace`. A mesh built from it measures its
+    own (`mesh.params[:, 0]`) on the trace resampled at its edge length, which
     differs from the trace's by metres. Keep breaks clear of that, or put a
     node column on each.
 
-    ``depth_breaks`` (metres, increasing) cut the stepping block into bands from
-    the surface down, and then ``ratio`` is ``(n_intervals, n_bands)``: a contrast
-    that changes with depth, ``depth_breaks=(5e3,), ratio=[[2.0, 1.0]]`` putting it
+    `depth_breaks` (metres, increasing) cut the stepping block into bands from
+    the surface down, and then `ratio` is `(n_intervals, n_bands)`: a contrast
+    that changes with depth, `depth_breaks=(5e3,), ratio=[[2.0, 1.0]]` putting it
     in the top 5 km only. Each band is still a scaled copy of the reference, so the
     exact form holds; the exact mode meshes a horizontal boundary at each break.
-    ⚠️ A break exactly on a layer interface puts that boundary on a material
+    A depth break exactly on a layer interface puts that boundary on a material
     interface, where the layered remainder is singular -- keep it off one.
     """
 
@@ -199,9 +193,9 @@ class RigidityContrast:
                              f"{ratio.shape}")
         if np.any(~np.isfinite(ratios) | (ratios <= 0)):
             raise ValueError(f"ratios must be positive, got {ratios.tolist()}")
-        #: ``(n_intervals, n_bands)``, always.
+        #: `(n_intervals, n_bands)`, always.
         self.ratios = ratios
-        #: One per interval without depth breaks (as before); the 2-D table with them.
+        #: One per interval without depth breaks; the 2-D table with them.
         self.ratio = ratios[:, 0] if n_band == 1 else ratios
         if reference not in ("other", "side"):
             raise ValueError(f"reference must be 'other' or 'side', got {reference!r}")
@@ -249,23 +243,23 @@ class RigidityContrast:
                                side="right")
 
     def stepping_block(self):
-        """``"side"`` or ``"other"``: the block whose rigidity changes at the breaks."""
+        """`"side"` or `"other"`: the block whose rigidity changes at the breaks."""
         return "side" if self.reference == "other" else "other"
 
     def a(self, block, interval, band=0):
-        """``mu_ref / mu`` of a block (``"side"`` or ``"other"``) in each interval and band."""
+        """`mu_ref / mu` of a block (`"side"` or `"other"`) in each interval and band."""
         r = self.ratios[np.asarray(interval), np.asarray(band)]
         if self.reference == "other":
             return r if block == "side" else np.ones_like(r)
         return np.ones_like(r) if block == "side" else 1.0 / r
 
     def _left_right(self, interval, band=0):
-        """``a`` of the left and right blocks in each interval and band."""
+        """`a` of the left and right blocks in each interval and band."""
         side, other = self.a("side", interval, band), self.a("other", interval, band)
         return (side, other) if self.side == "left" else (other, side)
 
     def observation_factor(self, x, y):
-        """Each surface point's ``a``: its block's ``mu_ref / mu``, by the trace's side.
+        """Each surface point's `a`: its block's `mu_ref / mu`, by the trace's side.
 
         A point is in the block on its side of the trace -- where the fault meets
         the surface -- and in the interval of the closest point on the trace.
@@ -278,7 +272,7 @@ class RigidityContrast:
         return np.where(left, a_left, a_right)
 
     def element_factor(self, mesh):
-        """``1/m`` per element: the two blocks' harmonic-mean rigidity over the reference's.
+        """`1/m` per element: the two blocks' harmonic-mean rigidity over the reference's.
 
         An element takes the band of its centroid's depth.
         """
@@ -287,7 +281,7 @@ class RigidityContrast:
         return 2.0 / (a_left + a_right)
 
     def node_factor(self, mesh):
-        """:meth:`element_factor` averaged over each node's tent, area-weighted."""
+        """`element_factor` averaged over each node's tent, area-weighted."""
         from .basis import NodeBasis
 
         projection = NodeBasis(mesh).projection()
@@ -337,27 +331,27 @@ class RigidityContrast:
 class Bimaterial:
     """An engine whose fault separates blocks of different rigidity.
 
-    Wraps ``engine`` (the closed-form half-space by default) and answers to the
-    same calls, so :class:`~slipsolve.inversion.SlipInversion`, forward fields,
-    :class:`~slipsolve.inversion.SlipModel` and resolution maps take it as they
-    take any engine. ``contrast`` is a :class:`RigidityContrast`.
+    Wraps `engine` (the closed-form half-space by default) and answers to the
+    same calls, so `slipsolve.inversion.SlipInversion`, forward fields,
+    `slipsolve.inversion.SlipModel` and resolution maps take it as they
+    take any engine. `contrast` is a `RigidityContrast`.
 
-    ``exact=False`` is the scaled mode, the first term of the exact solution
+    `exact=False` is the scaled mode, the first term of the exact solution
     (see the module docstring). It costs nothing beyond the wrapped engine. It is
     exact only for strike-slip on a vertical fault in 2-D. On a dipping fault its
     slip is an effective one, and near a change of ratio along strike it is a
     poor approximation.
 
-    ``exact=True`` solves for the discontinuity on the whole interface. That is
-    the fault plus its continuation (``extend``, in units of the fault's depth
-    extent; see :data:`EXTEND`) and the across-strike boundaries at the breaks.
+    `exact=True` solves for the discontinuity on the whole interface. That is
+    the fault plus its continuation (`extend`, in units of the fault's depth
+    extent; see `EXTEND`) and the across-strike boundaries at the breaks.
     It needs the field of each element at depth, with opening as well as slip:
-    the half-space engine, or :class:`~slipsolve.layered_tde.LayeredTDE` for a
-    layered crust. It returns element columns, which :class:`SlipInversion`
+    the half-space engine, or `slipsolve.layered_tde.LayeredTDE` for a
+    layered crust. It returns element columns, which `SlipInversion`
     projects onto a nodal basis as it does for the half-space engine. Cost: an
-    assembly ``(3 N)^2`` on the interface's ``N`` elements and a dense solve. Then
+    assembly `(3 N)^2` on the interface's `N` elements and a dense solve. Then
     each Green's matrix costs one engine matrix over the interface. With
-    :class:`LayeredTDE` both cost about five times the half-space's: elements that
+    `LayeredTDE` both cost about five times the half-space's: elements that
     cross an interface are cut into pieces, and the remainder is integrated on
     top.
     """
@@ -387,7 +381,7 @@ class Bimaterial:
         return basis is not None and getattr(basis, "name", "element") != "element"
 
     def _inner(self, method, mesh, *args, basis=None, **kwargs):
-        """The wrapped engine's matrix in ``basis``, projecting element columns if it must."""
+        """The wrapped engine's matrix in `basis`, projecting element columns if it must."""
         nodal = self._nodal(basis)
         if nodal and getattr(self.engine, "supports_basis", False):
             return getattr(self.engine, method)(mesh, *args, basis=basis, **kwargs)
@@ -401,7 +395,7 @@ class Bimaterial:
 
     # -- the engine interface ---------------------------------------------------
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
-        """Line-of-sight design matrix, ``(npts, 2 * n_params)``."""
+        """Line-of-sight design matrix, `(npts, 2 * n_params)`."""
         rows = self.contrast.observation_factor(x, y)
         if self.exact:
             self._refuse_basis(basis)
@@ -410,7 +404,7 @@ class Bimaterial:
         return rows[:, None] * g * self.contrast.column_factor(mesh, basis)[None, :]
 
     def displacement(self, mesh, x, y, z=None, basis=None):
-        """ENU displacement per unit slip, ``(npts, 3, 2 * n_params)``."""
+        """ENU displacement per unit slip, `(npts, 3, 2 * n_params)`."""
         rows = self.contrast.observation_factor(x, y)
         if self.exact:
             self._refuse_basis(basis)
@@ -419,7 +413,7 @@ class Bimaterial:
         return rows[:, None, None] * g * self.contrast.column_factor(mesh, basis)[None, None, :]
 
     def forward(self, mesh, slip, x, y, look=None, z=None, basis=None):
-        """Displacement from a slip model: scalar LOS with ``look``, else ``(npts, 3)`` ENU."""
+        """Displacement from a slip model: scalar LOS with `look`, else `(npts, 3)` ENU."""
         slip = np.asarray(slip, dtype=float)
         if slip.ndim == 2:
             slip = np.concatenate([slip[:, 0], slip[:, 1]])
@@ -445,7 +439,7 @@ class Bimaterial:
         return self.contrast.element_factor(mesh)
 
     def interface(self, mesh):
-        """The exact mode's :class:`InterfaceSolve` for ``mesh``, built once and kept."""
+        """The exact mode's `InterfaceSolve` for `mesh`, built once and kept."""
         key = mesh.digest()
         if key not in self._interfaces:
             kernel = (self.engine if hasattr(self.engine, "element_field")
@@ -462,7 +456,7 @@ class Bimaterial:
 
     # -- provenance ---------------------------------------------------------------
     def describe(self):
-        """A JSON-able record of the model, for a saved :class:`SlipModel`'s options."""
+        """A JSON-able record of the model, for a saved `SlipModel`'s options."""
         return {"contrast": self.contrast.to_dict(), "exact": self.exact,
                 "engine": self.engine.name, "nu": self.nu, "extend": dict(self.extend),
                 "growth": self.growth, "first": self.first}
@@ -480,7 +474,7 @@ class Bimaterial:
 
 
 class _Curvilinear:
-    """The trace's ``(arc length, cross) -> (x, y)`` map, continued straight past its ends."""
+    """The trace's `(arc length, cross) -> (x, y)` map, continued straight past its ends."""
 
     def __init__(self, trace, frame):
         self.trace, self.frame = trace, frame
@@ -507,14 +501,14 @@ class _Curvilinear:
         return x, y
 
     def normal(self, s):
-        """The unit normal ``point`` offsets along at each ``s``."""
+        """The unit normal `point` offsets along at each `s`."""
         x0, y0 = self.point(s, 0.0)
         x1, y1 = self.point(s, 1.0)
         return np.stack([x1 - x0, y1 - y0], axis=-1)
 
 
 def _graded(start, extent, first, growth):
-    """Stations from ``start`` outward by ``extent`` (either sign), steps growing by ``growth``."""
+    """Stations from `start` outward by `extent` (either sign), steps growing by `growth`."""
     out, step, total = [0.0], float(first), 0.0
     while total + 1e-9 * abs(extent) < abs(extent):
         total = min(total + step, abs(extent))
@@ -524,10 +518,10 @@ def _graded(start, extent, first, growth):
 
 
 def _depth_stations(bottom, total, first, cap, growth):
-    """Depths from the surface down to ``total``: fine at the surface, at most ``cap`` to ``bottom``.
+    """Depths from the surface down to `total`: fine at the surface, at most `cap` to `bottom`.
 
-    Steps start at ``first`` and grow by ``growth``, held at ``cap`` while
-    still above ``bottom`` (the fault's base), then grow freely. The surface is
+    Steps start at `first` and grow by `growth`, held at `cap` while
+    still above `bottom` (the fault's base), then grow freely. The surface is
     where the data are and where the field changes fastest.
     """
     out, depth, step = [0.0], 0.0, float(first)
@@ -549,13 +543,12 @@ def _insert(stations, levels):
 
 
 def _align(stations, levels, snap=0.3):
-    """Stations moved onto any level within ``snap`` of their gap from it.
+    """Stations moved onto any level within `snap` of their gap from it.
 
     Only moved, never added: a level between two distant stations still cuts the
     elements there into pieces, which cost a dislocation each but no unknowns,
-    while an added row of elements costs both. Measured on a 284-element interface
-    with the Venezuela crust, adding rows took it to 450 elements and 20% longer.
-    The first and last stations never move.
+    while an added row of elements costs both. The first and last stations never
+    move.
     """
     out = np.sort(np.asarray(stations, dtype=float))
     for level in np.asarray(levels, dtype=float):
@@ -572,16 +565,16 @@ def _align(stations, levels, snap=0.3):
 
 
 def _grid(us, vs):
-    """Every quad ``(u0, u1, v0, v1)`` of the tensor grid on stations ``us`` x ``vs``."""
+    """Every quad `(u0, u1, v0, v1)` of the tensor grid on stations `us` x `vs`."""
     u0, v0 = np.meshgrid(us[:-1], vs[:-1], indexing="ij")
     u1, v1 = np.meshgrid(us[1:], vs[1:], indexing="ij")
     return np.column_stack([u0.ravel(), u1.ravel(), v0.ravel(), v1.ravel()])
 
 
 def _strips(edges, lo, hi, first, aspect=1.0):
-    """Quads in strips: between consecutive ``edges``, the span ``lo..hi`` cut evenly.
+    """Quads in strips: between consecutive `edges`, the span `lo..hi` cut evenly.
 
-    Each strip is cut at about its own width (never under ``first``), so the
+    Each strip is cut at about its own width (never under `first`), so the
     elements stay roughly square while they grow away from the fault. Strips do
     not share their cross cuts; the quads still tile the patch without gaps.
     """
@@ -595,11 +588,11 @@ def _strips(edges, lo, hi, first, aspect=1.0):
 
 
 class _HalfSpaceKernel:
-    """One triangle's field in the closed-form half-space, in :class:`LayeredTDE`'s calls.
+    """One triangle's field in the closed-form half-space, in `LayeredTDE`'s calls.
 
-    The exact mode asks its kernel for :meth:`element_field` and :meth:`slip_field`;
-    this answers them with :func:`~slipsolve._tde.tde_disp_hs` alone, and
-    :class:`~slipsolve.layered_tde.LayeredTDE` with the layered crust.
+    The exact mode asks its kernel for `element_field` and `slip_field`;
+    this answers them with `slipsolve._tde.tde_disp_hs` alone, and
+    `slipsolve.layered_tde.LayeredTDE` with the layered crust.
     """
 
     def __init__(self, nu=0.25):
@@ -621,7 +614,7 @@ class _HalfSpaceKernel:
 
 
 def _fbar_columns(kernel, vertices, cx, cy, cz, offset, frames):
-    """``fbar``'s columns for the interface elements ``vertices`` ``(k, 3, 3)``: ``(3 N, 3 k)``."""
+    """`fbar`'s columns for the interface elements `vertices` `(k, 3, 3)`: `(3 N, 3 k)`."""
     out = np.empty((3 * cx.size, 3 * len(vertices)))
     for i, v in enumerate(vertices):
         mean = kernel.element_field(v, cx, cy, cz, offset=offset)
@@ -637,7 +630,7 @@ def _fbar_task(vertices, cx, cy, cz, offset, frames):
 
 
 def _response_task(vertices, x, y, z, look):
-    """A worker's block of :meth:`InterfaceSolve.response_matrix` for the elements ``vertices``."""
+    """A worker's block of `InterfaceSolve.response_matrix` for the elements `vertices`."""
     from .layered_tde import worker_engine
 
     kernel = worker_engine()
@@ -655,20 +648,20 @@ def _response_task(vertices, x, y, z, look):
 class InterfaceSolve:
     """The exact bimaterial field of one fault mesh: its interface, and the discontinuity on it.
 
-    ``vertices`` holds the interface's triangles. First come the fault's own, in
+    `vertices` holds the interface's triangles. First come the fault's own, in
     the mesh's order. Then the fault surface continued below its base, past its
     ends and up to the surface over a buried top, and the across-strike
-    boundaries where the ratio changes. ``a_plus`` / ``a_minus`` are the ``a``
-    on each element's two sides, its normal pointing to ``a_plus``.
-    ``kind`` labels each element ``fault``, ``extension`` or ``break``.
+    boundaries where the ratio changes. `a_plus` / `a_minus` are the `a`
+    on each element's two sides, its normal pointing to `a_plus`.
+    `kind` labels each element `fault`, `extension`, `break` or `depth break`.
 
     The unknown is element-constant: three components per element, in each
     triangle's own strike, dip and normal directions. The equation is collocated
     at the centroids, where the reference field is averaged between two points
-    :data:`AVERAGE_OFFSET` of an element's size either side.
+    `AVERAGE_OFFSET` of an element's size either side.
 
-    ``kernel`` gives one triangle's reference field: the closed-form half-space
-    with ``nu`` by default, or a :class:`~slipsolve.layered_tde.LayeredTDE` for a
+    `kernel` gives one triangle's reference field: the closed-form half-space
+    with `nu` by default, or a `slipsolve.layered_tde.LayeredTDE` for a
     layered crust.
     """
 
@@ -676,8 +669,8 @@ class InterfaceSolve:
                  kernel=None, fbar=None, workers=None, factor=True):
         self.mesh, self.contrast, self.nu = mesh, contrast, float(nu)
         self.kernel = kernel if kernel is not None else _HalfSpaceKernel(nu)
-        #: Processes for the assembly and :meth:`response_matrix` with a layered kernel
-        #: (:func:`~slipsolve.layered_tde.engine_pool`); None or 1 runs here.
+        #: Processes for the assembly and `response_matrix` with a layered kernel
+        #: (`slipsolve.layered_tde.engine_pool`); None or 1 runs here.
         self.workers = workers
         self.extend = {**EXTEND, **(extend or {})}
         self.growth = float(growth)
@@ -687,7 +680,7 @@ class InterfaceSolve:
         if fbar is None:
             self._assemble(factor=factor)
         else:
-            # A saved ``fbar`` from the same mesh, kernel and reach: the geometry is
+            # A saved `fbar` from the same mesh, kernel and reach: the geometry is
             # rebuilt (cheap and deterministic) and only its size is checked.
             fbar = np.asarray(fbar, dtype=float)
             if fbar.shape != (3 * self.n_elements,) * 2:
@@ -699,7 +692,7 @@ class InterfaceSolve:
 
     # -- geometry -------------------------------------------------------------------
     def _surface(self):
-        """The fault's ``cross(s, depth)``, and its continuation outside the mesh."""
+        """The fault's `cross(s, depth)`, and its continuation outside the mesh."""
         from matplotlib.tri import LinearTriInterpolator, Triangulation
 
         mesh, contrast = self.mesh, self.contrast
@@ -909,7 +902,7 @@ class InterfaceSolve:
         return int(self.vertices.shape[0])
 
     def _sides(self, contrast):
-        """``a`` on each element's two sides, the normal's side first, for ``contrast``."""
+        """`a` on each element's two sides, the normal's side first, for `contrast`."""
         a_plus = np.empty(self._interval.size)
         a_minus = np.empty(self._interval.size)
         joint = (self._break < 0) & (self._level < 0)
@@ -931,8 +924,8 @@ class InterfaceSolve:
     def with_contrast(self, contrast):
         """This interface with other ratios: the same geometry and reference field, a new solve.
 
-        ``contrast`` must name the same side and breaks; only the ratios may differ.
-        The expensive part of the exact mode, ``Fbar``, does not depend on them, so
+        `contrast` must name the same side and breaks; only the ratios may differ.
+        The expensive part of the exact mode, `Fbar`, does not depend on them, so
         a ratio costs one dense LU of the system.
         """
         if (contrast.side != self.contrast.side or contrast.reference != self.contrast.reference
@@ -959,7 +952,7 @@ class InterfaceSolve:
 
     # -- the system ---------------------------------------------------------------
     def _pool(self):
-        """A worker pool for a layered kernel (``workers`` > 1), else None."""
+        """A worker pool for a layered kernel (`workers` > 1), else None."""
         if not self.workers or int(self.workers) < 2 or not hasattr(self.kernel, "tables"):
             return None
         from .layered_tde import engine_pool
@@ -986,7 +979,7 @@ class InterfaceSolve:
                     c = chunks[k]
                     fbar[:, 3 * c[0]: 3 * (c[-1] + 1)] = cols
         self.fbar = fbar
-        if factor:                  # ``factor=False``: Fbar alone, to be saved and factored elsewhere
+        if factor:                  # `factor=False`: Fbar alone, to be saved and factored elsewhere
             self._factor()
 
     def _factor(self):
@@ -998,7 +991,7 @@ class InterfaceSolve:
         self._lu = sla.lu_factor(system, overwrite_a=True)
 
     def _rhs(self, slip):
-        """The right-hand side for element slip ``(2 n_fault,)`` or ``(2 n_fault, k)``."""
+        """The right-hand side for element slip `(2 n_fault,)` or `(2 n_fault, k)`."""
         slip = np.asarray(slip, dtype=float)
         nf = self.n_fault
         out = np.zeros((3 * self.n_elements,) + slip.shape[1:])
@@ -1007,12 +1000,12 @@ class InterfaceSolve:
         return out
 
     def discontinuity(self, slip):
-        """``D`` on every interface element, ``(N, 3)``, for element slip ``(2 n_fault,)``."""
+        """`D` on every interface element, `(N, 3)`, for element slip `(2 n_fault,)`."""
         return sla.lu_solve(self._lu, self._rhs(slip)).reshape(self.n_elements, 3)
 
     @property
     def solution(self):
-        """``D`` per unit slip on each fault element: ``(3 N, 2 n_fault)``."""
+        """`D` per unit slip on each fault element: `(3 N, 2 n_fault)`."""
         if self._x is None:
             self._x = sla.lu_solve(self._lu, self._rhs(np.eye(2 * self.n_fault)))
         return self._x
@@ -1036,12 +1029,12 @@ class InterfaceSolve:
             yield start, stop, out
 
     def response_matrix(self, x, y, z=None, look=None, block=64, workers=None):
-        """The reference field of unit ``D`` on every element, ``(npts, 3 N)`` with ``look``.
+        """The reference field of unit `D` on every element, `(npts, 3 N)` with `look`.
 
-        Without ``look``, east/north/up: ``(npts, 3, 3 N)``. It does not depend on the
-        ratios, so with :meth:`with_contrast` a Green's matrix for another ratio is
-        ``rows * (response_matrix @ solution)``, the rows being
-        :meth:`RigidityContrast.observation_factor`.
+        Without `look`, east/north/up: `(npts, 3, 3 N)`. It does not depend on the
+        ratios, so with `with_contrast` a Green's matrix for another ratio is
+        `rows * (response_matrix @ solution)`, the rows being
+        `RigidityContrast.observation_factor`.
         """
         if look is not None:
             look = tuple(np.asarray(v, dtype=float).ravel() for v in look)
@@ -1069,7 +1062,7 @@ class InterfaceSolve:
         return out
 
     def los(self, x, y, z=None, look=None, block=64):
-        """The reference-medium LOS of the whole interface per unit fault slip, ``(npts, 2 n_fault)``."""
+        """The reference-medium LOS of the whole interface per unit fault slip, `(npts, 2 n_fault)`."""
         look = tuple(np.asarray(v, dtype=float).ravel() for v in look)
         x_ = np.asarray(x, dtype=float).ravel()
         out = np.zeros((x_.size, 2 * self.n_fault))
@@ -1078,7 +1071,7 @@ class InterfaceSolve:
         return out
 
     def enu(self, x, y, z=None, block=32):
-        """As :meth:`los`, in east, north and up: ``(npts, 3, 2 n_fault)``."""
+        """As `los`, in east, north and up: `(npts, 3, 2 n_fault)`."""
         x_ = np.asarray(x, dtype=float).ravel()
         out = np.zeros((x_.size, 3, 2 * self.n_fault))
         for start, stop, cols in self._responses(x, y, z, None, block):
@@ -1086,7 +1079,7 @@ class InterfaceSolve:
         return out
 
     def field(self, discontinuity, x, y, z=None, look=None):
-        """The reference-medium field of ``D`` (``(N, 3)``): LOS with ``look``, else ENU."""
+        """The reference-medium field of `D` (`(N, 3)`): LOS with `look`, else ENU."""
         x, y, z = _as_points(x, y, z)
         total = np.zeros((x.size, 3))
         d = np.asarray(discontinuity, dtype=float)
@@ -1108,7 +1101,7 @@ class InterfaceSolve:
 
 
 def _orient(triangles, want):
-    """Reverse each triangle whose normal points against ``want``."""
+    """Reverse each triangle whose normal points against `want`."""
     triangles = np.array(triangles, dtype=float)
     normal = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
     flip = np.einsum("ij,ij->i", normal, want) < 0

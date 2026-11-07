@@ -1,4 +1,4 @@
-"""Cells that follow the fault (``slipsolve.fault_cells``): prisms extruded from the fault's triangles."""
+"""Cells that follow the fault (`slipsolve.fault_cells`): prisms extruded from the fault's triangles."""
 
 import numpy as np
 import pytest
@@ -38,8 +38,8 @@ def test_two_prisms_make_the_box(uniform_tables):
     """A box cut on its vertical diagonal plane: the two prisms' fields sum to the box's, outside and inside.
 
     Eshelby's construction is linear and the shared diagonal face cancels; the box's faces are triangulated
-    differently, which a linear Burgers vector does not see. Measured (2026-11-05): displacement 1.7e-5 / 1.1e-6
-    (outside / inside), strain 1.9e-4 / 1.6e-5 of each point's peak.
+    differently, which a linear Burgers vector does not see. They agree to 1.7e-5 / 1.1e-6 of each point's peak in
+    displacement (outside / inside) and 1.9e-4 / 1.6e-5 in strain.
     """
     engine = LayeredTDE(uniform_tables)
     z0, z1 = -3000.0, -2000.0
@@ -150,7 +150,7 @@ def test_fault_cells_across_an_interface_are_refused(coarse_tables):
 def test_beyond_its_longest_side_a_cell_in_pieces_takes_its_whole_volume_rule(uniform_tables):
     """The strain of a 15 km prism in pieces, beyond its longest side: its own volume rule = the sum of its pieces.
 
-    Measured (2026-11-05): 5e-5 of each point's peak (a 3.9 km voxel: 1.5e-4); the pieces are for the near field.
+    They agree to 5e-5 of each point's peak (a 3.9 km voxel: 1.5e-4); the pieces are for the near field.
     """
     engine = LayeredTDE(uniform_tables)
     inner = np.array([[0.0, 0.0, -3000.0], [15000.0, 0.0, -3000.0], [7000.0, 0.0, -4000.0]])
@@ -276,7 +276,7 @@ def test_surface_points_on_a_cell_edge_are_found(coarse_tables):
 
 def test_the_face_guard_sees_the_pieces_of_a_flat_cell(coarse_tables):
     """A surface point inside a flat cell, on the face its midpoint pieces share (from the midpoint of the fault-side
-    surface edge straight across), is refused: the case benchmark 11 hit at 1 km layers. A point beside it is not."""
+    surface edge straight across), is refused, a case thin cell layers produce. A point beside it is not."""
     from slipsolve.fault_cells import _leaf_prisms
 
     tables = coarse_tables
@@ -350,8 +350,8 @@ def test_the_children_of_a_split_cell_sum_to_its_field(uniform_tables):
     """Eshelby's construction is linear and the faces children share cancel: at one moment density their fields sum to
     the parent's, outside it and inside it.
 
-    Measured (2026-11-05): displacement 1.3e-4 / 1.6e-5 (outside / inside), strain 1.7e-4 / 7.3e-5 of each point's peak;
-    the children's far paths start nearer than the parent's.
+    They agree to 1.3e-4 / 1.6e-5 of each point's peak in displacement (outside / inside) and 1.7e-4 / 7.3e-5 in
+    strain; the children's far paths start nearer than the parent's.
     """
     from slipsolve.fault_cells import _split_prisms
 
@@ -401,9 +401,9 @@ def test_a_coarse_mesh_split_once_is_the_mesh_refined_twofold(uniform_tables):
     uniform slip (the same source on either mesh) the zone's effect from a coarse mesh with its cells split once must be
     the fine mesh's, through the full solve.
 
-    Measured (2026-11-05): 3.0e-6 of the effect's peak. On 24 coarse elements and 96 cells it was 2.3e-6, where the
-    unsplit coarse cells were 0.38 off at these near-field points; the reference fields of the two meshes differ by
-    2.6e-3 of it there, which is why each mesh's own reference is subtracted.
+    They agree to about 3e-6 of the effect's peak, where unsplit coarse cells are 0.38 off at these near-field points.
+    The reference fields of the two meshes differ by 2.6e-3 of the effect there, which is why each mesh's own reference
+    is subtracted.
     """
     tables = uniform_tables
     base = LayeredTDE(tables)

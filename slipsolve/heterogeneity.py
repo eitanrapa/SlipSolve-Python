@@ -1,56 +1,58 @@
-"""Fully 3-D elastic heterogeneity: any ``lambda(x)``, ``mu(x)`` on the layered reference.
+"""Fully 3-D elastic heterogeneity: any `lambda(x)`, `mu(x)` on the layered reference.
 
 The crust is the layered reference of a set of remainder tables
-(:class:`~slipsolve.wavenumber.RemainderTables`, the moduli ``C0(z)`` that
-:class:`~slipsolve.layered_tde.LayeredTDE` already solves exactly) plus a departure
-``dC(x)`` held on voxels. The true field is the reference field of the fault plus the
-reference field of an equivalent moment density in the voxels::
+(`slipsolve.wavenumber.RemainderTables`, the moduli `C0(z)` that
+`slipsolve.layered_tde.LayeredTDE` already solves exactly) plus a departure
+`dC(x)` held on voxels. The true field is the reference field of the fault plus the
+reference field of an equivalent moment density in the voxels:
 
     M = -dC : eps,        eps = eps0 + Gamma M,        u = u0 + H M,
 
-with ``eps`` the true strain, ``eps0`` the reference strain of the fault's slip, ``Gamma``
-the reference medium's moment-to-strain operator and ``H`` its moment-to-surface
+with `eps` the true strain, `eps0` the reference strain of the fault's slip, `Gamma`
+the reference medium's moment-to-strain operator and `H` its moment-to-surface
 operator. This is Barbot, Fialko & Sandwell (2009, GJI 179, 500-520)'s decomposition
-with ``C = C0 - C'`` and moment density ``C' : eps``; their equivalent surface traction
+with `C = C0 - C'` and moment density `C' : eps`; their equivalent surface traction
 (their eq. 21) is not a separate term here, because a moment density's field in a
 medium whose own Green's function is traction-free at the surface already carries it
 (integrate the body force and the surface traction by parts: the surface terms cancel).
-Solving ``(I + Gamma dC) eps = eps0`` gives the Green's matrix of the heterogeneous crust,
-``G = G0 - H dC (I + Gamma dC)^-1 E``, with ``E`` the strain of each slip basis function
-at the voxels (:meth:`~slipsolve.layered_tde.LayeredTDE.strain`).
+Solving `(I + Gamma dC) eps = eps0` gives the Green's matrix of the heterogeneous crust,
+`G = G0 - H dC (I + Gamma dC)^-1 E`, with `E` the strain of each slip basis function
+at the voxels (`slipsolve.layered_tde.LayeredTDE.strain`).
 
-**One voxel's field** (:class:`VoxelSource`) is split as ``LayeredTDE`` splits an
+**One voxel's field** (`VoxelSource`) is split as `LayeredTDE` splits an
 element's. The half-space part, with the voxel's own layer's constants, is Eshelby's
-cut and weld: a uniform eigenstrain ``eps* = C0^-1 : M`` in the cuboid has, outside it,
-the field of a dislocation on its faces with Burgers vector ``eps* . (xi - x0)`` (the
+cut and weld: a uniform eigenstrain `eps* = C0^-1 : M` in the cuboid has, outside it,
+the field of a dislocation on its faces with Burgers vector `eps* . (xi - x0)` (the
 outward side minus the inside, the triangular dislocation's convention), and inside it
-also ``eps* . (x - x0)``; a face in the free surface radiates nothing and is dropped. The
+also `eps* . (x - x0)`; a face in the free surface radiates nothing and is dropped. The
 Burgers vector is linear on each face triangle, so it is three vertex tents, each
-integrated exactly by :func:`~slipsolve.layered_tde.tent_levelset`. The remainder is a
+integrated exactly by `slipsolve.layered_tde.tent_levelset`. The remainder is a
 volume rule of the tables' point moment sources -- not face dislocations, which on a
 voxel whose face lies on a layer interface would sit where the remainder is singular.
 Away from the voxel both parts are smooth over it, and its strain is a Gauss-Legendre volume
 rule of whole point moments: Okada (1992) in the voxel's half-space plus the remainder at
-each point (:data:`STRAIN_FAR_VOXEL`, 2026-11-05; 7-28x the faces' speed at 2-40 sizes and
-as accurate, the faces' cancellation costing them ~1e-3 beyond 10 sizes). Surface receivers
-far away take point sources of the whole tabulated surface field (:data:`FAR_VOXEL`).
+each point (`STRAIN_FAR_VOXEL`). That is several times faster than the faces, and free of
+the cancellation that costs the faces about 1e-3 beyond 10 sizes. Surface receivers far
+away take point sources of the whole tabulated surface field (`FAR_VOXEL`).
 
-**Limits, as built (2026-11-04).**
+**Limits.**
 
-- A voxel's strain is collocated at its centre and taken as uniform, so voxels keep at
-  least a voxel clear of the fault (:meth:`VoxelModel.check_clearance`); a contrast across
-  the fault itself is :mod:`slipsolve.bimaterial`'s.
-- The grid is regular: ``Gamma`` is assembled by translation, one source per depth row.
+- A voxel's strain is collocated at its centre and taken as uniform, so by default voxels
+  keep a voxel clear of the fault; with `contact=True` they may end on it but not straddle
+  it (`VoxelModel.check_clearance`). A contrast across the fault itself is
+  `slipsolve.bimaterial`'s.
+- The grid is regular: `Gamma` is assembled by translation, one source per depth row.
 - A receiver exactly on a voxel face is singular (NaN on the face's edges, one side's limit
-  inside it): :func:`los_operator` refuses one, naming it (:meth:`VoxelModel.on_faces`,
-  2026-11-04), and refuses any non-finite field. Receivers within a few percent of a size of
-  a face are resolved by the split level integral (:func:`~slipsolve.layered_tde.tent_levelset`).
-- A voxel longer than :data:`MAX_ASPECT` times its shortest side is summed as near-cubic pieces.
+  inside it): `los_operator` refuses one, naming it (`VoxelModel.on_faces`), and refuses
+  any non-finite field. Receivers within a few percent of a size of a face are resolved by
+  the split level integral (`slipsolve.layered_tde.tent_levelset`).
+- A voxel longer than `MAX_ASPECT` times its shortest side is summed as near-cubic pieces.
 - The layered remainder is table-limited, at second order in the tables' grids (strain is
   more demanding than displacement); the strain-bearing tables want ~200 m in depth.
-- ``Gamma`` and its LU are dense: ~10k voxels on 128 GB, ~5-6k on 64 GB.
+- The dense solver keeps `Gamma` and its LU: about 10k voxels on 128 GB, 5-6k on 64 GB.
+  `HeterogeneousEngine(solver="fft")` keeps neither (`slipsolve.voxel_solve`).
 
-The tests are in ``tests/test_slip_heterogeneous.py``, the strain kernels' in ``tests/test_slip_strain.py``.
+The tests are in `tests/test_slip_heterogeneous.py`, the strain kernels' in `tests/test_slip_strain.py`.
 """
 
 import numpy as np
@@ -63,44 +65,40 @@ from .layered_tde import (STRAIN_TENT_GAIN, STRAIN_TENT_MIN_POINTS, _combine,
                           _gauss01, combine_strain, tensor_packing, tent_levelset)
 
 #: Surface receivers farther than this many voxel sizes (box distance) take point sources of
-#: the whole tabulated surface field, as :data:`~slipsolve.layered_tde.FAR` does for elements.
-#: Was 4 until 2026-11-05: on the Venezuela CRUST1.0 grid (32,577 voxels, 4 km, 17,034
-#: samples) the 1% of pairs inside 4 sizes took 96% of ``H`` (the faces, 2.5 ms a pair against
-#: 0.04 ms for 64 point sources). Measured the same day against a 10-point rule and the faces,
-#: surface and buried cubes and a 2 x 2 x 1.5 km surface voxel: 4 points an axis are 3-4e-4 off
-#: the 10-point rule from 1.5 sizes out and 0.6-1e-3 off the faces at 1.5-4 sizes, as the
-#: 3-point rule already was at 4-6 sizes (the tables' own interpolation, ~1e-4-5e-4, is the
-#: floor of every point rule).
+#: the whole tabulated surface field, as `slipsolve.layered_tde.FAR` does for elements.
+#: The faces cost tens of times more a pair than the point rule, so the far path starts as
+#: close as its accuracy allows: inside 4 sizes it takes four points an axis
+#: (`FAR_ORDER_SIZES`), within about 1e-3 of the faces at 1.5-4 sizes. The tables' own
+#: interpolation (1e-4 to 5e-4) is the floor of every point rule.
 FAR_VOXEL = 2.0
 
-#: Receivers farther than this many voxel sizes (box distance) take the voxel's STRAIN from a
+#: Receivers farther than this many voxel sizes (box distance) take the voxel's strain from a
 #: Gauss-Legendre volume rule of point moments: Okada (1992) point sources in the voxel's own
-#: half-space (:func:`~slipsolve._okada92.point_source_enu`) plus the tabulated remainder, both at
-#: every point (:meth:`VoxelSource._point_moments`). As ``strain_far`` does for elements.
+#: half-space (`slipsolve._okada92.point_source_enu`) plus the tabulated remainder, both at
+#: every point (`VoxelSource._point_moments`), as `LayeredTDE.strain_far` does for elements.
 STRAIN_FAR_VOXEL = 2.0
 
-#: Relative accuracy that volume rule aims for (:data:`~slipsolve.layered_tde.STRAIN_FAR_TOLERANCE`).
+#: Relative accuracy that volume rule aims for (`slipsolve.layered_tde.STRAIN_FAR_TOLERANCE`).
 VOXEL_FAR_TOLERANCE = 1e-3
 
-#: Its error model: ``n`` Gauss-Legendre points a side leave about ``C (a / 2R)**(2 n)`` of the
-#: strain at ``R`` from the centre of a voxel of longest side ``a`` (the 1-D rule's error for a
-#: kernel singular ``R`` away); ``C`` measured (:meth:`VoxelSource._far_orders`).
+#: Its error model: `n` Gauss-Legendre points a side leave about `C (a / 2R)**(2 n)` of the
+#: strain at `R` from the centre of a voxel of longest side `a` (the 1-D rule's error for a
+#: kernel singular `R` away), with `C` empirical (`VoxelSource._far_orders`).
 VOXEL_FAR_CONSTANT = 8.0
 
 #: Most (receiver, point) pairs the volume rule handles at once.
 VOXEL_FAR_BATCH = 16_000
 
-#: Most (receiver, point) pairs the whole-table surface far path handles at once, one order at a time. It is memory
-#: bound: with six copies running, 200,000 far receivers took 2.5-2.7 s all at once with one ``bincount`` per component
-#: and 1.1-1.3 s in chunks of this (alone 1.30 and 0.76 s; bit-identical, 2026-11-05).
+#: Most (receiver, point) pairs the whole-table surface far path handles at once, one order at a time. The path is
+#: memory-bound, so it runs faster in chunks that stay in cache; the result does not depend on the chunk size.
 WHOLE_BATCH = 8_000
 
-#: Voxels in a block of ``H`` when :class:`HeterogeneousEngine` streams it (``solver="fft"``):
-#: 17k samples x 6 x 1000 voxels is 0.8 GB a block.
+#: Voxels in a block of `H` when `HeterogeneousEngine` streams it (`solver="fft"`):
+#: a block of 17,000 samples x 6 x 1000 voxels is 0.8 GB.
 H_CHUNK = 1000
 
 #: Relative accuracy the remainder's volume rule aims for, as
-#: :data:`~slipsolve.layered_tde.REMAINDER_TOLERANCE`.
+#: `slipsolve.layered_tde.REMAINDER_TOLERANCE`.
 VOXEL_TOLERANCE = 3e-3
 
 #: Most Gauss-Legendre points per axis of the remainder's volume rule.
@@ -110,25 +108,23 @@ VOXEL_MAX_ORDER = 12
 #: of near-cubic pieces (an odd number along each long side, so its centre stays a piece's
 #: centre, never on an internal face). Uniform eigenstrain in the pieces sums to the voxel's
 #: exactly; what changes is the quadrature. Its faces are two triangles each and its volume
-#: rule takes the same number of points along every side, so a long thin voxel is
-#: under-resolved near itself: measured (2026-11-04, uniform crust) at the centres of its
-#: neighbours, a 7.84 x 1 x 1 km voxel was 3.8% of the peak off 16 cubes' sum and a
-#: 7.84 x 0.5 x 0.5 km one 9.8%, where 16 and 32 pieces agreed to 7e-4 and 3e-4. A cube, and
-#: anything up to this aspect, is computed as before, bit for bit.
+#: rule takes the same number of points along every side, so a long thin voxel computed whole
+#: is under-resolved near itself: at its neighbours' centres, several percent of the peak for
+#: an aspect of 8 to 16. A voxel within this aspect is computed whole.
 MAX_ASPECT = 2.0
 
 
 def _piece_counts(sides):
-    """Near-cubic pieces along each side of a voxel with these ``sides`` (:data:`MAX_ASPECT`): odd, 1 for a cube."""
+    """Near-cubic pieces along each side of a voxel with these `sides` (`MAX_ASPECT`): odd, 1 for a cube."""
     sides = np.asarray(sides, dtype=float)
     counts = np.ceil(sides / (MAX_ASPECT * sides.min()) - 1e-9).astype(int)
     return np.where(counts % 2 == 0, counts + 1, counts)
 
 
 def _triangle_enters_boxes(tri, lo, hi):
-    """Whether the triangle ``tri`` (3, 3) enters each box's interior, ``(nbox,)``: the separating-axis test.
+    """Whether the triangle `tri` (3, 3) enters each box's interior, `(nbox,)`: the separating-axis test.
 
-    Boxes are ``lo``/``hi`` (nbox, 3), already shrunk by the caller where touching must not count. No separating
+    Boxes are `lo`/`hi` (nbox, 3), already shrunk by the caller where touching must not count. No separating
     axis among the box's three, the triangle's normal and the nine cross products of the two sets of edges means
     the two overlap (Akenine-Moeller 2001).
     """
@@ -148,7 +144,7 @@ def _triangle_enters_boxes(tri, lo, hi):
 
 
 def _cells(v, start, step, n, tol):
-    """The (at most two) grid cells holding each value, edges included within ``tol``: ``(lo, hi, inside)``."""
+    """The (at most two) grid cells holding each value, edges included within `tol`: `(lo, hi, inside)`."""
     lo = np.floor((v - tol - start) / step).astype(int)
     hi = np.floor((v + tol - start) / step).astype(int)
     inside = (v >= start - tol) & (v <= start + n * step + tol)
@@ -157,21 +153,17 @@ def _cells(v, start, step, n, tol):
 #: The far path's points per axis by distance from the voxel's centre, in voxel sizes (the
 #: longest side for a flat or long one): four inside the first, three inside the second, two
 #: inside the third, one beyond. A tensor Gauss-Legendre rule on a cube converges far faster
-#: than the triangle rule the near path borrows. Measured (2026-11-04, whole surface table,
-#: surface and 3-4 km voxels, against 8 points an axis): one point 9e-3-2.1e-2 at 4 sizes,
-#: 3.2-3.6e-3 at 10, 9e-4 at 20; two points 1.2-4.7e-4 at 4-10 sizes; three 8e-5-2e-4. The
-#: triangle rule asked for six an axis at 4 sizes. The four-point band came with
-#: :data:`FAR_VOXEL` 2 (2026-11-05, against 10 points: at a gap of 1.5-2 sizes two points
-#: 5-7e-3, three and four 4e-4; at 2-3 sizes four 3-4e-4).
+#: than the triangle rule the near path borrows. The bands keep the rule within about 1e-3 of
+#: a converged one or better; the four-point band covers the closest receivers `FAR_VOXEL`
+#: admits, where two points are not enough.
 FAR_ORDER_SIZES = (4.0, 6.0, 15.0)
 
 #: The faces' tent rule, displacement and strain alike: the strain tents' (gain 4, at least
-#: 3 points). With the displacement tents' (gain 2, at least 2), a voxel's displacement
-#: 1-2.5 sizes away was 1.3e-3 off exact point moment sources where its strain was 1e-4
-#: (2026-11-04): the two-point floor's ``~0.05 (L/d)^2``. Receivers the rule would give more
-#: than the cap take the split level integral (``tent_levelset(split=True)``): 1% of a size
-#: from a face, displacement 1.4e-2 -> 8e-5 and strain 0.26 -> 4.5e-3 against a 400-point
-#: rule; 3%, 3.7e-3 -> 4e-6 and 5.6e-2 -> 1.4e-4.
+#: 3 points). The displacement tents' rule (gain 2, at least 2) leaves a voxel's displacement
+#: about 1e-3 off at 1-2.5 sizes, the two-point floor's `~0.05 (L/d)^2`. Receivers the rule
+#: would give more than the cap take the split level integral (`tent_levelset(split=True)`),
+#: which keeps the faces' field to about 1e-4 in displacement and a few 1e-3 in strain at 1%
+#: of a size from a face.
 VOXEL_TENT_GAIN = STRAIN_TENT_GAIN
 VOXEL_TENT_MIN_POINTS = STRAIN_TENT_MIN_POINTS
 
@@ -179,11 +171,11 @@ _PAIRS = ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))
 
 
 def unit_moments():
-    """The six unit moment-density tensors, in :data:`~slipsolve._tde.STRAIN_COMPONENTS` order: ``(6, 3, 3)``.
+    """The six unit moment-density tensors, in `slipsolve._tde.STRAIN_COMPONENTS` order: `(6, 3, 3)`.
 
-    ``e_i e_i`` for the three diagonal components and ``e_i e_j + e_j e_i`` for the three
-    shears, so that a symmetric ``M`` is ``sum_k m_k E_k`` with ``m`` its components
-    ``(M_xx, M_yy, M_zz, M_xy, M_xz, M_yz)`` in east/north/up.
+    `e_i e_i` for the three diagonal components and `e_i e_j + e_j e_i` for the three
+    shears, so that a symmetric `M` is `sum_k m_k E_k` with `m` its components
+    `(M_xx, M_yy, M_zz, M_xy, M_xz, M_yz)` in east/north/up.
     """
     out = np.zeros((6, 3, 3))
     for k, (i, j) in enumerate(_PAIRS):
@@ -192,13 +184,13 @@ def unit_moments():
 
 
 def to_voigt(tensor):
-    """``(..., 3, 3)`` symmetric tensors to their six components ``(xx, yy, zz, xy, xz, yz)``."""
+    """`(..., 3, 3)` symmetric tensors to their six components `(xx, yy, zz, xy, xz, yz)`."""
     t = np.asarray(tensor, dtype=float)
     return np.stack([t[..., i, j] for i, j in _PAIRS], axis=-1)
 
 
 def from_voigt(components):
-    """The inverse of :func:`to_voigt`: ``(..., 6)`` to ``(..., 3, 3)``."""
+    """The inverse of `to_voigt`: `(..., 6)` to `(..., 3, 3)`."""
     c = np.asarray(components, dtype=float)
     out = np.empty(c.shape[:-1] + (3, 3))
     for k, (i, j) in enumerate(_PAIRS):
@@ -207,20 +199,20 @@ def from_voigt(components):
 
 
 def compliance(stress, lam, mu):
-    """The strain of a stress (or eigenstrain of a moment density) in an isotropic medium: ``C^-1 : stress``."""
+    """The strain of a stress (or eigenstrain of a moment density) in an isotropic medium: `C^-1 : stress`."""
     s = np.asarray(stress, dtype=float)
     trace = np.trace(s, axis1=-2, axis2=-1)[..., None, None]
     return (s - float(lam) / (3.0 * float(lam) + 2.0 * float(mu)) * trace * np.eye(3)) / (2.0 * float(mu))
 
 
 def moment_sources(lam, mu):
-    """Okada point sources making the six unit moments: ``(sources, coefficients)``.
+    """Okada point sources making the six unit moments: `(sources, coefficients)`.
 
-    ``sources`` is ``[(normal, slips), ...]`` for :func:`~slipsolve._okada92.point_source_enu`:
+    `sources` is `[(normal, slips), ...]` for `slipsolve._okada92.point_source_enu`:
     openings along east, north and up, and the double couples east-north, east-up and
-    north-up, six in all. A source of unit potency with slip ``s`` on normal ``n`` has the
-    moment ``mu (n s + s n) + lam (n . s) I``; ``coefficients`` ``(6, 6)`` combine the six
-    unit-potency fields into the fields of :func:`unit_moments`, ``field_k = sum_s c[k, s] field_s``.
+    north-up, six in all. A source of unit potency with slip `s` on normal `n` has the
+    moment `mu (n s + s n) + lam (n . s) I`; `coefficients` `(6, 6)` combine the six
+    unit-potency fields into the fields of `unit_moments`, `field_k = sum_s c[k, s] field_s`.
     """
     e = np.eye(3)
     sources = [(e[0], e[[0, 1, 2]]), (e[1], e[[1, 2]]), (e[2], e[[2]])]
@@ -230,7 +222,7 @@ def moment_sources(lam, mu):
 
 
 def _faces(lo, hi, free_surface):
-    """The cuboid's face triangles, normals outward: ``(n, 3, 3)``; the top dropped in the free surface."""
+    """The cuboid's face triangles, normals outward: `(n, 3, 3)`; the top dropped in the free surface."""
     x = (lo[0], hi[0])
     y = (lo[1], hi[1])
     z = (lo[2], hi[2])
@@ -258,21 +250,21 @@ def _faces(lo, hi, free_surface):
 
 
 class VoxelSource:
-    """A cuboid of uniform moment density in the layered reference of ``engine``.
+    """A cuboid of uniform moment density in the layered reference of `engine`.
 
-    ``engine`` is a :class:`~slipsolve.layered_tde.LayeredTDE`; its tables need ``strain``
-    for :meth:`strain`. ``x`` and ``y`` are the cuboid's ``(low, high)`` east and north
-    in the :class:`~slipsolve.frame.LocalFrame`, ``depth`` its ``(top, bottom)`` in
+    `engine` is a `slipsolve.layered_tde.LayeredTDE`; the `strain` method needs its
+    tables computed with `strain=True`. `x` and `y` are the cuboid's `(low, high)` east and north
+    in the `slipsolve.frame.LocalFrame`, `depth` its `(top, bottom)` in
     metres, positive down. It must lie in one layer of the tables (faces may lie on an
     interface); its constants are that layer's.
 
-    :meth:`displacement` and :meth:`strain` give the field of a unit moment density in
-    each of the six components of :func:`unit_moments`: ``(npts, 6, 3)`` east/north/up
-    and ``(npts, 6, 6)`` in :data:`~slipsolve._tde.STRAIN_COMPONENTS`. A total moment is
+    `displacement` and `strain` give the field of a unit moment density in
+    each of the six components of `unit_moments`: `(npts, 6, 3)` east/north/up
+    and `(npts, 6, 6)` in `slipsolve._tde.STRAIN_COMPONENTS`. A total moment is
     the density times the volume.
 
-    Receivers more than ``strain_far`` voxel sizes from the cuboid take its strain from
-    :meth:`_point_moments`, and surface receivers more than ``far`` sizes away take its
+    Receivers more than `strain_far` voxel sizes from the cuboid take its strain from
+    `_point_moments`, and surface receivers more than `far` sizes away take its
     displacement from the whole surface table's point sources; None turns either off.
     """
 
@@ -302,7 +294,7 @@ class VoxelSource:
         self.free_surface = top == 0.0
         self.faces = _faces(self.lo, self.hi, self.free_surface)
         counts = _piece_counts(self.hi - self.lo)
-        #: Near-cubic pieces whose fields sum to this voxel's (:data:`MAX_ASPECT`); None for a
+        #: Near-cubic pieces whose fields sum to this voxel's (`MAX_ASPECT`); None for a
         #: voxel computed whole.
         self.pieces = None
         if counts.max() > 1:
@@ -311,24 +303,24 @@ class VoxelSource:
                                        far=far, tolerance=tolerance, max_order=max_order, strain_far=strain_far)
                            for i in range(counts[0]) for j in range(counts[1]) for k in range(counts[2])]
         self.far = None if far is None or not tables.has_surface else float(far)
-        #: Box distance, in voxel sizes, past which strain takes :meth:`_point_moments`; None: never.
+        #: Box distance, in voxel sizes, past which strain takes `_point_moments`; None: never.
         self.strain_far = None if strain_far is None else float(strain_far)
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
-        #: ``eps* = C0^-1 : E_k`` for each unit moment component, ``(6, 3, 3)``.
+        #: `eps* = C0^-1 : E_k` for each unit moment component, `(6, 3, 3)`.
         self.eigenstrain = compliance(unit_moments(), self.lam, self.mu)
-        #: The tables' packing of each unit moment component, ``(6, 6)``.
+        #: The tables' packing of each unit moment component, `(6, 6)`.
         self.packing = tensor_packing(unit_moments(), self.lam, self.mu)
-        #: Okada point sources making the unit moments, and how to combine them (:func:`moment_sources`).
+        #: Okada point sources making the unit moments, and how to combine them (`moment_sources`).
         self.sources = moment_sources(self.lam, self.mu)
 
     # -- the fields -------------------------------------------------------------------
     def displacement(self, x, y, z=None):
-        """East/north/up displacement per unit moment density, ``(npts, 6, 3)``."""
+        """East/north/up displacement per unit moment density, `(npts, 6, 3)`."""
         return self._field(x, y, z, strain=False)
 
     def strain(self, x, y, z=None):
-        """Strain per unit moment density, ``(npts, 6 moment components, 6 strain components)``."""
+        """Strain per unit moment density, `(npts, 6 moment components, 6 strain components)`."""
         if not self.engine.tables.has_strain:
             raise ValueError("strain needs remainder tables computed with strain=True")
         return self._field(x, y, z, strain=True)
@@ -392,13 +384,13 @@ class VoxelSource:
         return self._gap(x, y, z) > reach
 
     def _far_whole_surface(self, x, y, z):
-        """For a cell in pieces: surface receivers beyond the surface far path's reach in its LONGEST side."""
+        """For a cell in pieces: surface receivers beyond the surface far path's reach in its longest side."""
         if self.far is None:
             return np.zeros(x.size, bool)
         return (z == 0.0) & (self._gap(x, y, z) > self.far * float(np.max(self.hi - self.lo)))
 
     def _far_orders(self, x, y, z, tolerance=VOXEL_FAR_TOLERANCE):
-        """Points a side for :meth:`_point_moments`: the least ``n`` with ``C (a / 2R)**(2n)`` within ``tolerance``."""
+        """Points a side for `_point_moments`: the least `n` with `C (a / 2R)**(2n)` within `tolerance`."""
         side = float(np.max(self.hi - self.lo))
         reach = np.sqrt((x - self.centre[0]) ** 2 + (y - self.centre[1]) ** 2 + (z - self.centre[2]) ** 2)
         ratio = np.maximum(2.0 * reach / side, 1.5)
@@ -406,12 +398,12 @@ class VoxelSource:
         return np.clip(n, 1, self.max_order).astype(int)
 
     def _point_moments(self, x, y, z, orders=None):
-        """Strain per unit moment density from a volume rule of point moments, ``(npts, 6, 6)``.
+        """Strain per unit moment density from a volume rule of point moments, `(npts, 6, 6)`.
 
         Each Gauss-Legendre point carries the whole layered field of a point moment: the
         half-space part from Okada (1992) with the voxel's constants, the remainder from the
-        tables. For receivers outside the voxel, where both are smooth over it; ``orders``
-        (points a side, per receiver) defaults to :meth:`_far_orders`.
+        tables. For receivers outside the voxel, where both are smooth over it; `orders`
+        (points a side, per receiver) defaults to `_far_orders`.
         """
         tables = self.engine.tables
         n = x.size
@@ -471,10 +463,10 @@ class VoxelSource:
     def _orders(self, x, y, z, whole):
         """Gauss-Legendre points per axis, from the length the integrand varies over.
 
-        :meth:`LayeredTDE._orders`' rule with the cube root of the volume as the size: the
+        `LayeredTDE._orders`' rule with the cube root of the volume as the size: the
         larger of the distance to the centre and, in the voxel's own layer, the distance
-        to the nearest image across its interfaces. ``whole`` (surface receivers far
-        away) takes :data:`FAR_ORDER_SIZES`.
+        to the nearest image across its interfaces. `whole` (surface receivers far
+        away) takes `FAR_ORDER_SIZES`.
         """
         tables = self.engine.tables
         distance = np.sqrt((x - self.centre[0]) ** 2 + (y - self.centre[1]) ** 2
@@ -507,7 +499,7 @@ class VoxelSource:
         return np.column_stack([px, py, pz]), weight
 
     def _whole_surface(self, x, y, z):
-        """Point sources of the whole tabulated surface field at far surface receivers, ``(npts, 6, 3)``."""
+        """Point sources of the whole tabulated surface field at far surface receivers, `(npts, 6, 3)`."""
         tables = self.engine.tables
         out = np.zeros((x.size, 6, 3))
         orders = self._orders(x, y, z, True)
@@ -524,7 +516,7 @@ class VoxelSource:
         return out
 
     def _remainder(self, x, y, z, strain, whole):
-        """The remainder's volume integral (or with ``whole``, the whole surface field's), ``(npts, 6, width)``."""
+        """The remainder's volume integral (or with `whole`, the whole surface field's), `(npts, 6, width)`."""
         if whole:
             return self._whole_surface(x, y, z)
         tables = self.engine.tables
@@ -577,7 +569,7 @@ class VoxelSource:
 
 
 class Box:
-    """An axis-aligned box: ``x`` and ``y`` ``(low, high)`` in the local frame, ``depth`` ``(top, bottom)``."""
+    """An axis-aligned box: `x` and `y` `(low, high)` in the local frame, `depth` `(top, bottom)`."""
 
     def __init__(self, x, y, depth):
         self.x, self.y, self.depth = (tuple(float(v) for v in r) for r in (x, y, depth))
@@ -588,7 +580,7 @@ class Box:
 
 
 class Prism:
-    """A vertical prism: a polygon in map view (``(n, 2)`` east, north) between two depths."""
+    """A vertical prism: a polygon in map view (`(n, 2)` east, north) between two depths."""
 
     def __init__(self, polygon, depth):
         from matplotlib.path import Path as _Path
@@ -604,11 +596,11 @@ class Prism:
 
 
 def stiffness_block(dlam, dmu):
-    """The ``6 x 6`` map from strain components to moment-density components of ``dC : eps``.
+    """The `6 x 6` map from strain components to moment-density components of `dC : eps`.
 
-    ``dC : eps = dlam tr(eps) I + 2 dmu eps``; in :func:`unit_moments`' basis a shear's
-    moment component is the tensor component itself (``M_xy = m_xy``), so its row is
-    ``2 dmu`` on the tensor strain ``eps_xy``. ``(n, 6, 6)`` for arrays of ``dlam``, ``dmu``.
+    `dC : eps = dlam tr(eps) I + 2 dmu eps`; in `unit_moments`' basis a shear's
+    moment component is the tensor component itself (`M_xy = m_xy`), so its row is
+    `2 dmu` on the tensor strain `eps_xy`. `(n, 6, 6)` for arrays of `dlam`, `dmu`.
     """
     dlam = np.atleast_1d(np.asarray(dlam, dtype=float))
     dmu = np.atleast_1d(np.asarray(dmu, dtype=float))
@@ -620,17 +612,17 @@ def stiffness_block(dlam, dmu):
 
 
 class VoxelModel:
-    """A regular grid of voxels with their own ``lambda`` and ``mu``, against a layered reference.
+    """A regular grid of voxels with their own `lambda` and `mu`, against a layered reference.
 
-    ``tables`` (:class:`~slipsolve.wavenumber.RemainderTables`) define the reference
-    ``C0(z)``. ``x_edges`` and ``y_edges`` (east and north in the
-    :class:`~slipsolve.frame.LocalFrame`, metres, uniform spacing each) and ``z_edges``
-    (depths, metres, increasing from ``>= 0``) bound the voxels; every layer interface
-    strictly inside the depth range is inserted into ``z_edges``, so no voxel crosses one.
-    ``lam`` and ``mu`` (Pa) are arrays ``(nx, ny, nz)`` on the grid as given, or a callable
-    ``f(x, y, depth) -> (lam, mu)`` at the voxel centres (evaluated after the insertion).
-    Voxels whose moduli differ from the reference's by less than ``tol`` times the
-    reference ``mu`` are inactive: they add nothing and cost nothing.
+    `tables` (`slipsolve.wavenumber.RemainderTables`) define the reference
+    `C0(z)`. `x_edges` and `y_edges` (east and north in the
+    `slipsolve.frame.LocalFrame`, metres, uniform spacing each) and `z_edges`
+    (depths, metres, increasing from `>= 0`) bound the voxels; every layer interface
+    strictly inside the depth range is inserted into `z_edges`, so no voxel crosses one.
+    `lam` and `mu` (Pa) are arrays `(nx, ny, nz)` on the grid as given, or a callable
+    `f(x, y, depth) -> (lam, mu)` at the voxel centres (evaluated after the insertion).
+    Voxels whose moduli differ from the reference's by less than `tol` times the
+    reference `mu` are inactive: they add nothing and cost nothing.
     """
 
     def __init__(self, tables, x_edges, y_edges, z_edges, lam, mu=None, tol=1e-9, frame=None):
@@ -667,12 +659,12 @@ class VoxelModel:
         self._refresh()
 
     def _refresh(self):
-        """Departures, the active set, its indices and centres, from :attr:`lam` and :attr:`mu`."""
+        """Departures, the active set, its indices and centres, from `lam` and `mu`."""
         gx, gy, gz = self._grid
         self.dlam = self.lam - self.lam0
         self.dmu = self.mu - self.mu0
         self.active = (np.abs(self.dlam) + np.abs(self.dmu)) > self.tol * self.mu0
-        #: ``(n_active, 3)`` grid indices and east/north/up centres of the active voxels, in
+        #: `(n_active, 3)` grid indices and east/north/up centres of the active voxels, in
         #: the order of the operators' blocks.
         self.index = np.argwhere(self.active)
         self.centres = np.column_stack([gx[self.active], gy[self.active], -gz[self.active]])
@@ -681,10 +673,10 @@ class VoxelModel:
     def from_bodies(cls, tables, x_edges, y_edges, z_edges, bodies, tol=1e-9, frame=None):
         """A model whose voxels take the moduli of the bodies holding their centres.
 
-        ``bodies`` is a list of ``(shape, moduli)``; later bodies override earlier ones, and a
-        voxel in none keeps the reference. A shape is a :class:`Box` or a :class:`Prism`;
-        ``moduli`` is ``(lam, mu)`` in Pa, or a callable ``f(depth) -> (lam, mu)``, or the
-        string ``"scale"`` with a ``(lam factor, mu factor)`` pair as a third element. A body
+        `bodies` is a list of `(shape, moduli)`; later bodies override earlier ones, and a
+        voxel in none keeps the reference. A shape is a `Box` or a `Prism`;
+        `moduli` is `(lam, mu)` in Pa, or a callable `f(depth) -> (lam, mu)`, or the
+        string `"scale"` with a `(lam factor, mu factor)` pair as a third element. A body
         is a staircase of whole voxels: for a sharp boundary, put voxel edges on it.
         """
         bodies = list(bodies)
@@ -713,15 +705,15 @@ class VoxelModel:
 
     @classmethod
     def from_crust1(cls, tables, x_edges, y_edges, z_edges, crust, frame, tol=1e-9):
-        """Voxels with CRUST1.0's moduli (:class:`~slipsolve.crust1.Crust1`) over the tables' reference.
+        """Voxels with CRUST1.0's moduli (`slipsolve.crust1.Crust1`) over the tables' reference.
 
-        Each voxel takes the thickness-weighted mean of ``lambda`` and ``mu`` over its depth range
+        Each voxel takes the thickness-weighted mean of `lambda` and `mu` over its depth range
         (below the rock surface: water and ice dropped) in the 1-degree cell holding its centre;
-        ``frame`` (the :class:`~slipsolve.frame.LocalFrame` of the edges) places the centres.
-        The tables' interfaces are inserted into ``z_edges`` first, as the constructor does. Every
+        `frame` (the `slipsolve.frame.LocalFrame` of the edges) places the centres.
+        The tables' interfaces are inserted into `z_edges` first, as the constructor does. Every
         voxel departs from a 1-D reference somewhere, so the model fills the grid: it is meant for
-        ``HeterogeneousEngine(solver="fft")``. Voxels through the fault must then be returned to the
-        reference (:meth:`keep_clear`).
+        `HeterogeneousEngine(solver="fft")`. Voxels through the fault must then be returned to the
+        reference (`keep_clear`).
         """
         z_edges, _ = _with_interfaces(tables, np.asarray(z_edges, dtype=float))
         cx = 0.5 * (np.asarray(x_edges, dtype=float)[1:] + np.asarray(x_edges, dtype=float)[:-1])
@@ -733,12 +725,12 @@ class VoxelModel:
 
     @classmethod
     def from_grid(cls, tables, x_edges, y_edges, z_edges, lon, lat, depth, vp, vs, rho, frame, samples=8, tol=1e-9):
-        """Voxels from a model on a regular grid (a tomography): ``vp``, ``vs``, ``rho`` (SI) on ``(lon, lat, depth)``.
+        """Voxels from a model on a regular grid (a tomography): `vp`, `vs`, `rho` (SI) on `(lon, lat, depth)`.
 
-        ``lon`` and ``lat`` in degrees and ``depth`` in metres below the surface, each increasing;
-        the three arrays ``(nlon, nlat, ndepth)``. At each voxel's centre (``frame`` places it) the
-        model is trilinear at ``samples`` depths spread evenly over the voxel's range, and
-        ``lambda = rho (vp^2 - 2 vs^2)``, ``mu = rho vs^2`` are averaged over them. Refuses a voxel
+        `lon` and `lat` in degrees and `depth` in metres below the surface, each increasing;
+        the three arrays `(nlon, nlat, ndepth)`. At each voxel's centre (`frame` places it) the
+        model is trilinear at `samples` depths spread evenly over the voxel's range, and
+        `lambda = rho (vp^2 - 2 vs^2)`, `mu = rho vs^2` are averaged over them. Refuses a voxel
         outside the grid.
         """
         from scipy.interpolate import RegularGridInterpolator
@@ -767,13 +759,13 @@ class VoxelModel:
     def from_dataset(cls, tables, x_edges, y_edges, z_edges, ds, frame, vp="vp", vs="vs", rho="rho", lon="longitude",
                      lat="latitude", depth="depth", depth_unit=1e3, speed_unit=1e3, density_unit=1e3, samples=8,
                      tol=1e-9):
-        """:meth:`from_grid` from an ``xarray.Dataset`` (a tomography as distributed, e.g. IRIS EMC's netCDF files).
+        """`from_grid` from an `xarray.Dataset` (a tomography as distributed, e.g. IRIS EMC's netCDF files).
 
-        ``ds`` is opened by the caller, with whatever engine reads the file. The coordinates ``lon`` / ``lat`` are degrees
-        (0-360 longitudes are turned to -180-180 when the voxels lie west of Greenwich) and ``depth`` is in
-        ``depth_unit`` metres (km by default); ``vp``, ``vs`` in ``speed_unit`` m/s (km/s) and ``rho`` in ``density_unit``
-        kg/m^3 (g/cm^3), in any dimension order. ``vs=None`` or ``rho=None`` derive them from Vp by
-        :func:`brocher_vs` / :func:`brocher_density` (Brocher 2005's crustal fits), for models that carry Vp alone.
+        `ds` is opened by the caller, with whatever engine reads the file. The coordinates `lon` / `lat` are degrees
+        (0-360 longitudes are turned to -180-180 when the voxels lie west of Greenwich) and `depth` is in
+        `depth_unit` metres (km by default); `vp`, `vs` in `speed_unit` m/s (km/s) and `rho` in `density_unit`
+        kg/m^3 (g/cm^3), in any dimension order. `vs=None` or `rho=None` derive them from Vp by
+        `brocher_vs` / `brocher_density` (Brocher 2005's crustal fits), for models that carry Vp alone.
         """
         def coord(name):
             return np.asarray(ds[name].values, dtype=float)
@@ -797,11 +789,11 @@ class VoxelModel:
                              grids[0] * 1e3, grids[1] * 1e3, grids[2] * 1e3, frame, samples=samples, tol=tol)
 
     def keep_clear(self, mesh, buffer=None, samples=24):
-        """Return active voxels within ``buffer`` of the fault to the reference; how many, ``int``.
+        """Return active voxels within `buffer` of the fault to the reference; how many, `int`.
 
-        For a model that fills the region (:meth:`from_crust1`, :meth:`from_grid`): the voxels the
-        fault passes through or near cannot carry a departure (:meth:`check_clearance`), so their
-        departure is dropped. ``buffer`` defaults to a voxel size, as there.
+        For a model that fills the region (`from_crust1`, `from_grid`): the voxels the
+        fault passes through or near cannot carry a departure (`check_clearance`), so their
+        departure is dropped. `buffer` defaults to a voxel size, as there.
         """
         hit, _ = self._near_fault(mesh, buffer, samples)
         if hit.size:
@@ -816,27 +808,27 @@ class VoxelModel:
         return int(self.index.shape[0])
 
     def spec(self, i):
-        """Active voxel ``i``'s picklable description, for :func:`_make_source`."""
+        """Active voxel `i`'s picklable description, for `_make_source`."""
         return ("box", self.bounds(i))
 
     def source(self, engine, i):
         return VoxelSource(engine, *self.bounds(i))
 
     def bounds(self, i):
-        """``(x, y, depth)`` ranges of active voxel ``i``."""
+        """`(x, y, depth)` ranges of active voxel `i`."""
         ix, iy, iz = self.index[i]
         return ((self.x_edges[ix], self.x_edges[ix + 1]), (self.y_edges[iy], self.y_edges[iy + 1]),
                 (self.z_edges[iz], self.z_edges[iz + 1]))
 
     def stiffness(self):
-        """``D``, block-diagonal ``(6 n, 6 n)`` sparse: the moment density is ``M = -D eps``."""
+        """`D`, block-diagonal `(6 n, 6 n)` sparse: the moment density is `M = -D eps`."""
         import scipy.sparse as sp
 
         blocks = stiffness_block(self.dlam[self.active], self.dmu[self.active])
         return sp.block_diag(list(blocks), format="csr")
 
     def rigidity_at(self, points):
-        """``mu`` at east/north/up points: a voxel's where one holds them, the reference's elsewhere."""
+        """`mu` at east/north/up points: a voxel's where one holds them, the reference's elsewhere."""
         pts = np.atleast_2d(np.asarray(points, dtype=float))
         depth = -pts[:, 2]
         out = self.tables.mu[self.tables.layer(depth)].astype(float)
@@ -852,9 +844,9 @@ class VoxelModel:
         """Points on a face of an active voxel, where its field is singular: a boolean mask.
 
         Every face counts -- a voxel's own, one shared by two active voxels, and those between
-        the near-cubic pieces a long voxel is summed from (:data:`MAX_ASPECT`) -- except a top
+        the near-cubic pieces a long voxel is summed from (`MAX_ASPECT`) -- except a top
         face in the free surface, which is not modelled: a surface point over a surface voxel is
-        fine. ``tol`` (m) defaults to 1e-6 of the smallest voxel side.
+        fine. `tol` (m) defaults to 1e-6 of the smallest voxel side.
         """
         x = np.asarray(x, dtype=float).ravel()
         y = np.asarray(y, dtype=float).ravel()
@@ -900,22 +892,22 @@ class VoxelModel:
         return out
 
     def check_clearance(self, mesh, buffer=None, samples=24, contact=False):
-        """Refuse an active voxel within ``buffer`` (default: one voxel size) of the fault mesh.
+        """Refuse an active voxel within `buffer` (default: one voxel size) of the fault mesh.
 
-        With ``contact`` (2026-11-04, plan Part IV 1a) a voxel may END on the fault instead: it may
-        touch it, a face on the fault's plane, but the fault must not enter its interior (a
-        separating-axis test of each triangle against each nearby voxel, shrunk by 1e-6 of its
-        size). The strain is collocated at each voxel's centre, on one side of the fault; the
-        equation stays exact with soft material up to the fault (measured: a zone against a planar
-        fault as accurate as one 2 km away for strike-slip, twice the error for dip-slip at 1 km
-        cells, both converging), so cells beside it should be fine. ``buffer`` is then unused.
+        With `contact` a voxel may instead end on the fault: it may touch it, with a face on the
+        fault's plane, but the fault must not enter its interior (a separating-axis test of each
+        triangle against each nearby voxel, shrunk by 1e-6 of its size). The strain is collocated
+        at each voxel's centre, on one side of the fault; the equation stays exact with soft
+        material up to the fault, and the solution converges as the voxels shrink (for strike-slip
+        as accurately as a zone set back from the fault, for dip-slip with about twice its error).
+        `buffer` is then unused.
 
         A voxel's strain is collocated at its centre and taken as uniform; next to the fault
         the strain varies on the scale of the distance to it and is singular on it. A
-        contrast across the fault itself is :mod:`slipsolve.bimaterial`'s. The distance is
-        from each triangle, sampled ``samples`` times along each edge, to each voxel's box,
+        contrast across the fault itself is `slipsolve.bimaterial`'s. The distance is
+        from each triangle, sampled `samples` times along each edge, to each voxel's box,
         so it can read high by up to the sample spacing; voxels whose centre is farther
-        than ``buffer`` plus their half-diagonal are cleared without it.
+        than `buffer` plus their half-diagonal are cleared without it.
         """
         if self.n_active == 0:
             return True
@@ -934,7 +926,7 @@ class VoxelModel:
         return size if buffer is None else float(buffer)
 
     def _near_fault(self, mesh, buffer, samples):
-        """Active voxels within ``buffer`` of the fault mesh and their distances, ``(indices, metres)``."""
+        """Active voxels within `buffer` of the fault mesh and their distances, `(indices, metres)`."""
         from ._tde import distance_to_triangle
 
         if self.n_active == 0:
@@ -964,7 +956,7 @@ class VoxelModel:
         return hit, closest[hit]
 
     def _check_contact(self, mesh):
-        """``check_clearance(contact=True)``: no triangle of the fault may enter an active voxel's interior."""
+        """`check_clearance(contact=True)`: no triangle of the fault may enter an active voxel's interior."""
         from ._tde import distance_to_triangle
 
         dz = np.diff(self.z_edges)[self.index[:, 2]]
@@ -1006,7 +998,7 @@ def brocher_vs(vp_kms):
 
 
 def _with_interfaces(tables, z_edges):
-    """``z_edges`` with every interface of the tables strictly inside them inserted: ``(edges, inserted)``."""
+    """`z_edges` with every interface of the tables strictly inside them inserted: `(edges, inserted)`."""
     added = [t for t in tables.tops[1:] if z_edges[0] + 1e-6 < t < z_edges[-1] - 1e-6
              and not np.any(np.isclose(z_edges, t, rtol=0, atol=1e-6))]
     return (np.unique(np.concatenate([z_edges, added])) if added else z_edges), added
@@ -1017,15 +1009,15 @@ def _steps(voxels):
 
 
 def strain_operator(voxels, engine, log=None, workers=None):
-    """``Gamma``, ``(6 n, 6 n)``: the strain at each active voxel's centre per unit moment density in each.
+    """`Gamma`, `(6 n, 6 n)`: the strain at each active voxel's centre per unit moment density in each.
 
-    Rows are voxel ``r``'s six strain components (:data:`~slipsolve._tde.STRAIN_COMPONENTS`),
-    columns voxel ``s``'s six moment components (:func:`unit_moments`), in
-    :attr:`VoxelModel.index` order. The reference is laterally uniform, so the strain at
-    voxel ``r`` from voxel ``s`` depends only on their depth rows and horizontal offset:
-    one :class:`VoxelSource` per source row, evaluated at every offset that occurs, fills
-    every pair. A voxel's own block is its Eshelby self-strain at its centre. ``workers`` > 1
-    evaluates the pairs of rows in that many processes (:func:`~slipsolve.layered_tde.engine_pool`).
+    Rows are voxel `r`'s six strain components (`slipsolve._tde.STRAIN_COMPONENTS`),
+    columns voxel `s`'s six moment components (`unit_moments`), in
+    `VoxelModel.index` order. The reference is laterally uniform, so the strain at
+    voxel `r` from voxel `s` depends only on their depth rows and horizontal offset:
+    one `VoxelSource` per source row, evaluated at every offset that occurs, fills
+    every pair. A voxel's own block is its Eshelby self-strain at its centre. `workers` > 1
+    evaluates the pairs of rows in that many processes (`slipsolve.layered_tde.engine_pool`).
     """
     from .layered_tde import engine_pool
 
@@ -1078,7 +1070,7 @@ def strain_operator(voxels, engine, log=None, workers=None):
 
 
 def _make_source(engine, spec):
-    """A cell's source from its picklable ``spec``: ``("box", bounds)`` or ``("prism", inner, outer)``."""
+    """A cell's source from its picklable `spec`: `("box", bounds)` or `("prism", inner, outer)`."""
     kind = spec[0]
     if kind == "box":
         return VoxelSource(engine, *spec[1])
@@ -1090,20 +1082,20 @@ def _make_source(engine, spec):
 
 
 def _spec_task(spec, x, y, z, strain):
-    """A pool worker's field of the cell ``spec`` at the points, ``(npts, 6, 3 or 6)``."""
+    """A pool worker's field of the cell `spec` at the points, `(npts, 6, 3 or 6)`."""
     from .layered_tde import worker_engine
 
     return _make_source(worker_engine(), spec)._field(x, y, z, strain)
 
 
 def _voxel_task(bounds, x, y, z, strain):
-    """A pool worker's :class:`VoxelSource` field: the voxel ``bounds`` at the points, ``(npts, 6, 3 or 6)``."""
+    """A pool worker's `VoxelSource` field: the voxel `bounds` at the points, `(npts, 6, 3 or 6)`."""
     from .layered_tde import worker_engine
 
     return VoxelSource(worker_engine(), *bounds)._field(x, y, z, strain)
 
 
-#: Most receivers in one call of a reference voxel's field when :func:`_los_columns` evaluates
+#: Most receivers in one call of a reference voxel's field when `_los_columns` evaluates
 #: translated voxels together (npts x the voxels batched).
 TRANSLATED_RECEIVERS = 200_000
 
@@ -1115,15 +1107,14 @@ def _box_key(bounds):
 
 
 def _los_columns(engine, specs, x, y, z, look):
-    """:func:`los_operator`'s columns for the cells ``specs``, ``(npts, 6 n)`` (or ``(npts, 3, 6 n)`` without ``look``).
+    """`los_operator`'s columns for the cells `specs`, `(npts, 6 n)` (or `(npts, 3, 6 n)` without `look`).
 
-    Boxes that are translates of one another (a regular grid's depth row) are evaluated as ONE
+    Boxes that are translates of one another (a regular grid's depth row) are evaluated as one
     reference voxel at receivers moved by each box's offset, many boxes in one call: the field
     of a voxel in a laterally uniform reference depends only on the receiver's position relative
     to it. The near path's cost is set per call by its closest receivers (the face tents' point
-    groups), not by how many it serves, so one voxel at a time paid it once a voxel: on the
-    Venezuela CRUST1.0 grid a shallow voxel cost 0.33 s with 13 near samples and 0.38 s with 46
-    (2026-11-05). Other cells (prisms) are evaluated one by one.
+    groups), not by how many it serves, so batching pays it once per call instead of once per
+    voxel. Other cells (prisms) are evaluated one by one.
     """
     out = np.zeros((x.size, 6 * len(specs)) if look is not None else (x.size, 3, 6 * len(specs)))
 
@@ -1156,18 +1147,18 @@ def _los_columns(engine, specs, x, y, z, look):
 
 
 def _los_share(specs, x, y, z, look):
-    """A pool worker's columns of :func:`los_operator` for the cells ``specs`` (:func:`_make_source`)."""
+    """A pool worker's columns of `los_operator` for the cells `specs` (`_make_source`)."""
     from .layered_tde import worker_engine
 
     return _los_columns(worker_engine(), specs, x, y, z, look)
 
 
 def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
-    """``H``, ``(npts, 6 n)``: line of sight at surface points per unit moment density in each voxel.
+    """`H`, `(npts, 6 n)`: line of sight at surface points per unit moment density in each voxel.
 
-    ``look`` is ``(look_e, look_n, look_u)``; without it, east/north/up, ``(npts, 3, 6 n)``.
-    ``workers`` > 1 shares the voxels among that many processes. ``subset`` (indices of active
-    voxels, increasing) gives only their columns, ``6 len(subset)`` of them, in that order.
+    `look` is `(look_e, look_n, look_u)`; without it, east/north/up, `(npts, 3, 6 n)`.
+    `workers` > 1 shares the voxels among that many processes. `subset` (indices of active
+    voxels, increasing) gives only their columns, `6 len(subset)` of them, in that order.
     """
     from .layered_tde import engine_pool
 
@@ -1201,7 +1192,7 @@ def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
 
 
 def _refuse_on_faces(voxels, x, y, z):
-    """Raise, naming them, if any points lie on a voxel face (:meth:`VoxelModel.on_faces`)."""
+    """Raise, naming them, if any points lie on a voxel face (`VoxelModel.on_faces`)."""
     bad = voxels.on_faces(x, y, z)
     if bad.any():
         i = np.flatnonzero(bad)
@@ -1222,26 +1213,27 @@ def _digest(*arrays):
 
 
 class HeterogeneousEngine:
-    """Triangular dislocations in a crust with any ``lambda(x)``, ``mu(x)``: the layered reference plus voxels.
+    """Triangular dislocations in a crust with any `lambda(x)`, `mu(x)`: the layered reference plus voxels.
 
-    ``base`` is a :class:`~slipsolve.layered_tde.LayeredTDE` whose tables carry strain;
-    ``voxels`` a :class:`VoxelModel` on the same tables. Satisfies the engine protocol, so
-    :class:`~slipsolve.inversion.SlipInversion` takes it with ``engine=`` and every basis
-    the base takes. Its Green's matrix is::
+    `base` is a `slipsolve.layered_tde.LayeredTDE` whose tables carry strain;
+    `voxels` a `VoxelModel` on the same tables. Satisfies the engine protocol, so
+    `slipsolve.inversion.SlipInversion` takes it with `engine=` and every basis
+    the base takes. Its Green's matrix is:
 
         G = G0 - H D (I + Gamma D)^-1 E          (order="born1": G0 - H D E)
 
-    ``G0`` the base's, ``E`` the strain of each basis function at the voxel centres
-    (:meth:`~slipsolve.layered_tde.LayeredTDE.strain`), ``Gamma`` (:func:`strain_operator`)
-    and its LU depend only on the voxels and are built once; ``H`` (:func:`los_operator`)
-    is kept per sample set, ``E`` per mesh and basis. Voxels must keep clear of the fault
-    (:meth:`VoxelModel.check_clearance`), so the moment's rigidity is the reference's.
+    `G0` the base's, `E` the strain of each basis function at the voxel centres
+    (`slipsolve.layered_tde.LayeredTDE.strain`), `Gamma` (`strain_operator`)
+    and its LU depend only on the voxels and are built once; `H` (`los_operator`)
+    is kept per sample set, `E` per mesh and basis. Voxels must keep clear of the fault
+    (`VoxelModel.check_clearance`), so the moment's rigidity is the reference's.
 
-    ``solver="fft"`` never forms ``Gamma``: it applies it as one lateral convolution per pair
-    of depth rows and solves by GMRES (:mod:`slipsolve.voxel_solve`), in memory ``O(n)`` in the
-    voxels rather than ``O(n^2)``; the dense LU (``"dense"``) is exact and faster while it fits.
-    Nor does it keep ``H`` (samples x 6 voxels, 50 GB at 17k samples and 61k voxels): it applies
-    it to the solved moment density ``h_chunk`` voxels at a time, recomputed per sample set.
+    `solver="fft"` never forms `Gamma`: it applies it as one lateral convolution per pair
+    of depth rows and solves by GMRES (`slipsolve.voxel_solve`), in memory `O(n)` in the
+    voxels rather than `O(n^2)`; the dense LU (`"dense"`) is exact and faster while it fits.
+    Nor does it keep `H` (samples x 6 voxels, e.g. 50 GB for 17,000 samples and 61,000 voxels):
+    it applies it to the solved moment density `h_chunk` voxels at a time, recomputed per
+    sample set.
     """
 
     supports_basis = True
@@ -1258,16 +1250,16 @@ class HeterogeneousEngine:
         if solver == "fft" and not isinstance(voxels, VoxelModel):
             raise ValueError("solver='fft' needs a regular VoxelModel; fault cells are solved densely")
         self.solver = solver
-        #: Voxels a block of ``H`` holds when ``solver="fft"`` streams it.
+        #: Voxels a block of `H` holds when `solver="fft"` streams it.
         self.h_chunk = int(h_chunk)
         self._system = None
         self.base = base
         self.voxels = voxels
         self.order = order
         self.log = log
-        #: Processes for ``H``, ``E`` and ``Gamma`` (:func:`~slipsolve.layered_tde.engine_pool`):
+        #: Processes for `H`, `E` and `Gamma` (`slipsolve.layered_tde.engine_pool`):
         #: each loads the base's tables from their file once, and the one pool serves all three
-        #: until :meth:`close`. None or 1 runs here.
+        #: until `close`. None or 1 runs here.
         self.workers = workers
         self._pool = None
         self.name = f"heterogeneous:{base.name}"
@@ -1313,12 +1305,12 @@ class HeterogeneousEngine:
         return self._gamma
 
     def system(self):
-        """``I + Gamma D``, the strain equation's matrix (dense, Fortran-ordered).
+        """`I + Gamma D`, the strain equation's matrix (dense, Fortran-ordered).
 
-        One dense array beside ``Gamma``: the product's transpose is a Fortran-ordered view,
-        the identity goes onto its diagonal in place, and :func:`scipy.linalg.lu_factor`
-        overwrites it without a copy. Building ``np.eye(n) + Gamma D`` instead held four
-        such arrays at once (77 GB at 49,000 unknowns, 2026-11-04); the values are the same.
+        One dense array beside `Gamma`: the product's transpose is a Fortran-ordered view,
+        the identity goes onto its diagonal in place, and `scipy.linalg.lu_factor`
+        overwrites it without a copy. Building `np.eye(n) + Gamma D` instead holds four
+        such arrays at once, for the same values.
         """
         d = self.voxels.stiffness()
         a = (d.T @ self.gamma.T).T
@@ -1344,7 +1336,7 @@ class HeterogeneousEngine:
         return self._e[key]
 
     def strain_system(self):
-        """The FFT solver's :class:`~slipsolve.voxel_solve.StrainSystem` (built on first use)."""
+        """The FFT solver's `slipsolve.voxel_solve.StrainSystem` (built on first use)."""
         if self._system is None:
             from .voxel_solve import ConvolutionGamma, StrainSystem
 
@@ -1353,7 +1345,7 @@ class HeterogeneousEngine:
         return self._system
 
     def voxel_strain(self, mesh, basis=None):
-        """``eps`` at the voxels per unit slip of each basis function, ``(6 n, cols)``: the solved strain."""
+        """`eps` at the voxels per unit slip of each basis function, `(6 n, cols)`: the solved strain."""
         e = self._strain_at_voxels(mesh, basis)
         if self.order == "born1":
             return e
@@ -1372,7 +1364,7 @@ class HeterogeneousEngine:
         return self._h[key]
 
     def _apply_h(self, x, y, look, m):
-        """``H @ m``: from the kept ``H`` (dense), or streamed ``h_chunk`` voxels at a time (fft)."""
+        """`H @ m`: from the kept `H` (dense), or streamed `h_chunk` voxels at a time (fft)."""
         if self.solver != "fft":
             h = self._surface(x, y, look)
             return h @ m if look is not None else np.einsum("pcv,vk->pck", h, m)
@@ -1415,7 +1407,7 @@ class HeterogeneousEngine:
 
     # -- the engine protocol ----------------------------------------------------------
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
-        """Line-of-sight design matrix, ``(npts, 2 * n_parameters)``; surface points only."""
+        """Line-of-sight design matrix, `(npts, 2 * n_parameters)`; surface points only."""
         if self.voxels.n_active:
             self._surface_only(z)
             _refuse_on_faces(self.voxels, *_as_points(x, y, None))   # before E, Gamma and the solve, not after
@@ -1426,7 +1418,7 @@ class HeterogeneousEngine:
         return g0 - self._apply_h(x, y, (look_e, look_n, look_u), m)
 
     def displacement(self, mesh, x, y, z=None, basis=None):
-        """East/north/up displacement per unit slip, ``(npts, 3, 2 * n_parameters)``; surface points only."""
+        """East/north/up displacement per unit slip, `(npts, 3, 2 * n_parameters)`; surface points only."""
         if self.voxels.n_active:
             self._surface_only(z)
             _refuse_on_faces(self.voxels, *_as_points(x, y, None))   # before E, Gamma and the solve, not after

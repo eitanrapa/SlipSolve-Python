@@ -1,32 +1,30 @@
-"""Where the mesh nodes go in ``(s, z)``, and how they become triangles.
+"""Where the mesh nodes go in `(s, z)`, and how they become triangles.
 
-A :class:`~slipsolve.mesh.FaultMesh` is two separable things: a set of
-points in the ``(arc length, z)`` parameter plane together with a triangulation,
-and an embedding that carries those points into 3-D through a fitted
-``cross(s, z)`` surface. This module owns the first half. Splitting it out is
-what lets the node set be chosen freely -- by hand, by a target element-size
-field, or by an optimizer reading model resolution -- while the embedding stays
-exactly what :mod:`slipsolve.surface` already fits.
+A `slipsolve.mesh.FaultMesh` is two separable things: a set of points in the
+`(arc length, z)` parameter plane together with a triangulation, and an
+embedding that carries those points into 3-D through a fitted `cross(s, z)`
+surface. This module owns the first half. Splitting it out is what lets the
+node set be chosen freely (by hand, by a target element-size field, or by an
+optimizer reading model resolution) while the embedding stays exactly what
+`slipsolve.surface` fits.
 
-**Winding.** :func:`_lattice_triangles` -- the original quad split, still the
-path a uniform layout takes -- produces triangles whose signed area in
-``(s, z)`` is uniformly *negative*, and that is exactly the condition under
-which the 3-D normal lands on the trace's left-hand side (measured, not
-assumed: retriangulating the real Venezuela production mesh's own node set and
-forcing this sign reproduces its normals, dips and areas, and passes
-``FaultMesh._check_winding``). Since ``(s, z) -> (x, y, z)`` is orientation
-preserving wherever the fitted surface does not fold -- which
-``FaultMesh.curved`` already refuses -- fixing the sign in parameter space fixes
-it in 3-D. That is the whole reason Delaunay is safe here where the reference's
-``orientTriFromLeft.m`` (which tests against a hard-coded ``[1 0 0]``) is not.
+**Winding.** `_lattice_triangles`, the quad split a uniform layout takes,
+produces triangles whose signed area in `(s, z)` is uniformly negative, and
+that is exactly the condition under which the 3-D normal lands on the trace's
+left-hand side (`FaultMesh._check_winding` verifies it). Since
+`(s, z) -> (x, y, z)` is orientation preserving wherever the fitted surface
+does not fold (which `FaultMesh.curved` refuses), fixing the sign in parameter
+space fixes it in 3-D. That is why Delaunay is safe here, where
+SlipSolve-Curve's `orientTriFromLeft.m` (which tests against a hard-coded
+`[1 0 0]`) is not.
 
-**Boundaries stay exact.** ``boundary_node_mask`` compares against
-``s.min()``/``s.max()``/``z.min()``/``z.max()`` with ``==``, as the lattice
-always has. Every builder here places boundary nodes on literally shared floats
-so that keeps working; :func:`snap_boundary` is how an arbitrary point cloud
-earns the same guarantee, and :func:`require_boundaries` refuses a layout that
-has not, because a boundary that silently collapses to one node removes the
-zero-slip constraint without raising anything.
+**Boundaries stay exact.** `boundary_node_mask` compares against
+`s.min()`/`s.max()`/`z.min()`/`z.max()` with `==`. Every builder here places
+boundary nodes on literally shared floats so that keeps working;
+`snap_boundary` is how an arbitrary point cloud earns the same guarantee, and
+`require_boundaries` refuses a layout that has not, because a boundary that
+silently collapses to one node removes the zero-slip constraint without
+raising anything.
 """
 
 import warnings
@@ -34,13 +32,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-#: Sign of a triangle's signed area in ``(s, z)`` for the normal to come out on
+#: Sign of a triangle's signed area in `(s, z)` for the normal to come out on
 #: the trace's left-hand side. Negative; see this module's docstring.
 PARAM_ORIENTATION = -1.0
 
 #: Triangles smaller than this fraction of the median are dropped as degenerate.
 #: Delaunay over a rectangle can emit a zero-area sliver from three nearly
-#: collinear boundary points, and ``basis._barycentric_weight`` divides by a
+#: collinear boundary points, and `basis._barycentric_weight` divides by a
 #: quantity that vanishes on one.
 MIN_AREA_FRACTION = 1e-9
 
@@ -54,18 +52,18 @@ EDGE_SIDES = ("top", "bottom", "left", "right")
 
 # -- triangulation ---------------------------------------------------------
 def _lattice_triangles(ns, nz):
-    """Split an ``ns x nz`` node lattice into triangles with one fixed winding.
+    """Split an `ns x nz` node lattice into triangles with one fixed winding.
 
-    Node ``(i, j)`` -- ``i`` along strike, ``j`` down dip -- is index
-    ``j * ns + i``. Each quad becomes ``(a, b, c)`` and ``(a, c, d)`` with
-    ``a = (i, j)``, ``b = (i + 1, j)``, ``c = (i + 1, j + 1)``, ``d = (i, j + 1)``.
-    For a fault extruded downward along an increasing-``s`` trace, both halves'
-    normals come out on the trace's left-hand side.
+    Node `(i, j)` (`i` along strike, `j` down dip) is index `j * ns + i`.
+    Each quad becomes `(a, b, c)` and `(a, c, d)` with `a = (i, j)`,
+    `b = (i + 1, j)`, `c = (i + 1, j + 1)`, `d = (i, j + 1)`. For a fault
+    extruded downward along an increasing-`s` trace, both halves' normals come
+    out on the trace's left-hand side.
 
-    Kept as the path a uniform layout takes even though :func:`triangulate`
+    Kept as the path a uniform layout takes even though `triangulate`
     could do it, because on a regular lattice the four corners of a quad are
     cocircular: Delaunay's choice of diagonal is then arbitrary, and qhull picks
-    a *different* one, which would change ``FaultMesh.digest()`` and invalidate
+    a different one, which would change `FaultMesh.digest()` and invalidate
     every persisted store for no geometric gain.
     """
     i = np.arange(ns - 1)
@@ -81,7 +79,7 @@ def _lattice_triangles(ns, nz):
 
 
 def signed_areas(params, triangles):
-    """Twice the signed area of each triangle in the ``(s, z)`` plane."""
+    """Twice the signed area of each triangle in the `(s, z)` plane."""
     params = np.asarray(params, dtype=float)
     triangles = np.asarray(triangles, dtype=int)
     a, b, c = params[triangles[:, 0]], params[triangles[:, 1]], params[triangles[:, 2]]
@@ -90,10 +88,10 @@ def signed_areas(params, triangles):
 
 
 def orient_triangles(params, triangles):
-    """Reverse any triangle whose ``(s, z)`` winding is the wrong way round.
+    """Reverse any triangle whose `(s, z)` winding is the wrong way round.
 
     One cross product per triangle. This is what makes
-    ``FaultMesh._check_winding`` an assertion rather than a guard: a flipped
+    `FaultMesh._check_winding` an assertion rather than a guard: a flipped
     triangle negates its dip-slip Green's-function column while leaving
     strike-slip alone, so an unpoliced Delaunay would give a plausible model
     with a randomly-signed dip-slip field.
@@ -105,11 +103,11 @@ def orient_triangles(params, triangles):
 
 
 def triangulate(params, structured=None):
-    """Triangles over an ``(s, z)`` point set, wound consistently.
+    """Triangles over an `(s, z)` point set, wound consistently.
 
-    ``structured=(ns, nz)`` takes the exact quad split of a uniform lattice;
-    anything else goes through Delaunay. The parameter domain is a rectangle --
-    convex -- so an unconstrained triangulation covers it exactly and no
+    `structured=(ns, nz)` takes the exact quad split of a uniform lattice;
+    anything else goes through Delaunay. The parameter domain is a convex
+    rectangle, so an unconstrained triangulation covers it exactly and no
     constrained mesher is needed.
     """
     params = np.asarray(params, dtype=float)
@@ -149,13 +147,12 @@ def triangulate(params, structured=None):
 # -- the layout ------------------------------------------------------------
 @dataclass
 class MeshLayout:
-    """An ``(s, z)`` node set with its triangulation, before any embedding.
+    """An `(s, z)` node set with its triangulation, before any embedding.
 
-    ``levels`` and ``counts`` are present only for a row-structured layout (one
+    `levels` and `counts` are present only for a row-structured layout (one
     depth per level, that many nodes spread along strike); a freeform cloud
-    leaves them ``None``. ``uniform_counts`` is what tells
-    :class:`~slipsolve.mesh.FaultMesh` it may take the bit-identical
-    lattice path.
+    leaves them `None`. `uniform_counts` is what tells
+    `slipsolve.mesh.FaultMesh` it may take the bit-identical lattice path.
     """
 
     params: np.ndarray
@@ -188,7 +185,7 @@ class MeshLayout:
 
     @property
     def uniform_counts(self):
-        """``(ns, nz)`` when every level holds the same node count, else ``None``."""
+        """`(ns, nz)` when every level holds the same node count, else `None`."""
         if self.counts is None or self.counts.size == 0:
             return None
         if not np.all(self.counts == self.counts[0]):
@@ -196,7 +193,7 @@ class MeshLayout:
         return int(self.counts[0]), int(self.counts.size)
 
     def level_slices(self):
-        """One ``slice`` per depth level, in the layout's own node order."""
+        """One `slice` per depth level, in the layout's own node order."""
         if self.counts is None:
             raise ValueError("level_slices() needs a row-structured layout")
         stop = np.cumsum(self.counts)
@@ -218,9 +215,8 @@ def layout_quality(params, triangles):
     Parameter space is what the layout controls; the 3-D elements differ from
     these by the embedding's own stretch, which is small while the surface does
     not fold. Reported so a graded layout can be compared against the uniform
-    one it replaces -- the real production mesh already sits at a 11.3 degree
-    minimum angle, from 5 km along strike against 1 km top levels, so a number
-    near that is normal rather than alarming.
+    one it replaces: a uniform lattice of 5 km along strike and 1 km levels
+    already has an 11.3 degree minimum angle, so a number near that is normal.
     """
     params = np.asarray(params, dtype=float)
     v = params[np.asarray(triangles, dtype=int)]
@@ -252,8 +248,8 @@ def node_components(triangles, n_nodes):
 
     Two faults carried in one mesh share a frame and a parameterization but no
     triangles, so "which fault is this node on" is a property of the connectivity
-    and needs nothing stored. A single-fault mesh labels every node ``0``, which
-    is what keeps :func:`boundary_node_mask` bit-identical for one.
+    and needs nothing stored. A single-fault mesh labels every node `0`, which
+    is what keeps `boundary_node_mask` bit-identical for one.
     """
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
@@ -270,16 +266,16 @@ def boundary_node_mask(params, side, labels=None):
     """Nodes on one edge of the parameter rectangle, by exact equality.
 
     Exact, deliberately: every builder in this module puts a level's nodes on a
-    literally shared ``z`` and a level's ends on a literally shared ``s``, so
+    literally shared `z` and a level's ends on a literally shared `s`, so
     there is nothing to round. A tolerance would instead have to be guessed from
     the local spacing, and guessing it too small is silent.
 
-    ⚠️ **``labels`` is what makes this work for more than one fault.** Without
-    it the test is against a *global* extremum, so on a mesh holding two faults
-    only the deeper one has a bottom edge and only the outer ends of the pair are
-    ``left`` and ``right`` -- the second fault's rim silently loses its zero-slip
+    `labels` is what makes this work for more than one fault. Without it the
+    test is against a global extremum, so on a mesh holding two faults only
+    the deeper one has a bottom edge and only the outer ends of the pair are
+    `left` and `right`: the second fault's rim silently loses its zero-slip
     rows and slip runs off it with nothing raised. Pass one integer per node
-    (:func:`node_components`) and each piece is measured against its own extent.
+    (`node_components`) and each piece is measured against its own extent.
     A single label reproduces the global test exactly.
     """
     params = np.asarray(params, dtype=float)
@@ -307,11 +303,11 @@ def boundary_node_mask(params, side, labels=None):
 def require_boundaries(params, sides=EDGE_SIDES, minimum=2, labels=None):
     """Refuse a layout whose edges have collapsed to a node or two.
 
-    The failure this exists to catch is silent: ``zero_slip_boundary`` selects
-    whatever ``boundary_node_mask`` flags, so an edge that resolves to one node
+    The failure this exists to catch is silent: `zero_slip_boundary` selects
+    whatever `boundary_node_mask` flags, so an edge that resolves to one node
     stops constraining the mesh's rim and slip runs off it with nothing raised.
 
-    With ``labels`` the count is per component and the *thinnest* piece is what
+    With `labels` the count is per component and the thinnest piece is what
     is reported, since one unconstrained fault is enough to invalidate the run.
     """
     if labels is None:
@@ -340,9 +336,9 @@ def require_boundaries(params, sides=EDGE_SIDES, minimum=2, labels=None):
 def snap_boundary(params, length=None, z_top=None, z_bottom=None, tol=1.0):
     """Pull near-edge nodes onto exactly the four boundary values.
 
-    How an arbitrary ``(s, z)`` cloud earns the exact-equality guarantee
-    :func:`boundary_node_mask` relies on. ``tol`` is in metres and should be far
-    below the node spacing -- it is meant to absorb the round-off of however the
+    How an arbitrary `(s, z)` cloud earns the exact-equality guarantee
+    `boundary_node_mask` relies on. `tol` is in metres and should be far
+    below the node spacing: it is meant to absorb the round-off of however the
     points were generated, not to move a node that was placed inside on purpose.
     """
     params = np.array(params, dtype=float, copy=True)
@@ -397,7 +393,7 @@ def _balance_counts(counts, balance=MAX_COUNT_RATIO, warn=True):
     long thin triangle. Counts are only ever raised, so a request is honoured
     where it can be and refined where it cannot.
 
-    ``warn`` is off when the counts came from a continuous size field rather than
+    `warn` is off when the counts came from a continuous size field rather than
     from the caller: refining one is then part of the algorithm, not a request
     being overridden, and the budget search rebuilds a dozen times.
     """
@@ -423,14 +419,14 @@ def _balance_counts(counts, balance=MAX_COUNT_RATIO, warn=True):
 
 
 def level_stations(n, length, stations=None):
-    """``n`` along-strike positions spanning ``[0, length]``.
+    """`n` along-strike positions spanning `[0, length]`.
 
-    With ``stations`` given -- the arc lengths of the resampled trace's own
-    vertices -- the level is that sequence resampled uniformly *in index*, which
+    With `stations` given (the arc lengths of the resampled trace's own
+    vertices) the level is that sequence resampled uniformly in index, which
     keeps the trace's parameterisation rather than imposing a fresh uniform one.
-    At ``n == stations.size`` ``np.interp`` returns its input array bit for bit,
+    At `n == stations.size`, `np.interp` returns its input array bit for bit,
     which is what makes a uniform layout reproduce the classic lattice's node
-    coordinates exactly and leave ``FaultMesh.digest()`` unchanged.
+    coordinates exactly and leave `FaultMesh.digest()` unchanged.
     """
     n = int(n)
     if stations is None:
@@ -444,15 +440,15 @@ def graded_layout(length, depths, counts=None, along_spacing=None,
                   stations=None, balance=MAX_COUNT_RATIO):
     """A layout of freely-placed depth levels, each with its own node count.
 
-    ``depths`` is a sequence of depths in metres, positive down, shallowest
-    first -- arbitrary spacing, not just the geometric ``bias_w`` progression.
-    ``counts`` is a scalar, one value per level, or a callable of depth;
-    ``along_spacing`` says the same thing in metres instead. ``stations`` is the
-    optional reference along-strike sampling (see :func:`level_stations`); every
-    level starts at exactly ``0.0`` and ends at exactly ``length`` either way,
-    which is what keeps :func:`boundary_node_mask` working without a tolerance.
+    `depths` is a sequence of depths in metres, positive down, shallowest
+    first, with arbitrary spacing (not just the geometric `bias_w` progression).
+    `counts` is a scalar, one value per level, or a callable of depth;
+    `along_spacing` says the same thing in metres instead. `stations` is the
+    optional reference along-strike sampling (see `level_stations`); every
+    level starts at exactly `0.0` and ends at exactly `length` either way,
+    which is what keeps `boundary_node_mask` working without a tolerance.
 
-    A uniform ``counts`` reproduces the classic lattice exactly, triangles
+    A uniform `counts` reproduces the classic lattice exactly, triangles
     included.
     """
     depths = np.asarray(depths, dtype=float).ravel()
@@ -486,10 +482,10 @@ def graded_layout(length, depths, counts=None, along_spacing=None,
 
 
 def from_points(params, length=None, snap=True, tol=1.0):
-    """A freeform layout from an arbitrary ``(s, z)`` cloud.
+    """A freeform layout from an arbitrary `(s, z)` cloud.
 
     Boundary nodes are snapped onto the exact edge values by default; pass
-    ``snap=False`` only if they already are.
+    `snap=False` only if they already are.
     """
     params = np.asarray(params, dtype=float)
     if snap:
@@ -500,7 +496,7 @@ def from_points(params, length=None, snap=True, tol=1.0):
 
 
 def _size_field(size):
-    """Normalise a target element size into a callable of ``(s, depth)``."""
+    """Normalise a target element size into a callable of `(s, depth)`."""
     if callable(size):
         return lambda s, d: np.asarray(size(s, d), dtype=float)
     value = float(size)
@@ -513,9 +509,9 @@ def _edge_stations(extent, spacing_at):
     """Positions along one edge honouring a varying target spacing.
 
     Marching by the local spacing would leave the far end a ragged fraction of a
-    step short; integrating ``1/h`` and then splitting into a whole number of
+    step short; integrating `1/h` and then splitting into a whole number of
     equal parameter steps lands on both ends exactly, which is what
-    :func:`boundary_node_mask` needs.
+    `boundary_node_mask` needs.
     """
     dense = np.linspace(0.0, extent, 512)
     density = 1.0 / np.maximum(spacing_at(dense), 1e-9)
@@ -528,31 +524,30 @@ def _edge_stations(extent, spacing_at):
 
 
 def lloyd_layout(length, max_depth, size, top_depth=0.0, iterations=25, seed=0):
-    """A genuinely unstructured layout relaxed toward a target element size.
+    """An unstructured layout relaxed toward a target element size.
 
-    ``size`` is a scalar or a callable ``h(s, depth) -> metres``. Boundary nodes
+    `size` is a scalar or a callable `h(s, depth) -> metres`. Boundary nodes
     are placed first, at the local target spacing along each of the four edges,
     and are then held fixed; interior nodes are rejection-sampled against
-    ``1/h**2`` and relaxed toward the **density-weighted** centroid of their
-    incident triangles -- the cheap approximation to a centroidal Voronoi
-    tessellation with density ``1/h**2``, and stable because the domain is a
-    rectangle. The weighting is what makes the result honour ``size``; see the
-    loop for the measurement.
+    `1/h**2` and relaxed toward the density-weighted centroid of their
+    incident triangles, the cheap approximation to a centroidal Voronoi
+    tessellation with density `1/h**2`, stable because the domain is a
+    rectangle. The weighting is what makes the result honour `size`.
 
-    **There are no depth levels here at all.** Element size follows ``h`` in two
+    There are no depth levels here. Element size follows `h` in two
     dimensions, so a fine patch can sit at one along-strike position and a coarse
-    one beside it at the same depth -- which a row-structured layout cannot
+    one beside it at the same depth, which a row-structured layout cannot
     express, since a level is one depth for the whole fault. That is what
-    :func:`~slipsolve.resolution.adapt_layout`'s
-    ``structure="unstructured"`` drives from model resolution.
+    `slipsolve.resolution.adapt_layout`'s `structure="unstructured"` drives
+    from model resolution.
 
-    The *outline* stays a rectangle in ``(s, z)``: the four edges are straight,
-    because ``boundary_node_mask`` identifies them by exact equality and the
+    The outline stays a rectangle in `(s, z)`: the four edges are straight,
+    because `boundary_node_mask` identifies them by exact equality and the
     zero-slip constraint depends on it. Freeform means the discretisation, not
     the fault's extent.
 
-    Slower and harder to reason about than :func:`graded_layout`, and it gives
-    up the row structure that ``adapt_layout``'s ``"rows"`` mode uses; reach for
+    Slower and harder to reason about than `graded_layout`, and it gives
+    up the row structure that `adapt_layout`'s `"rows"` mode uses; reach for
     it when the target size really does vary along strike as much as it does
     with depth.
     """
@@ -597,17 +592,12 @@ def lloyd_layout(length, max_depth, size, top_depth=0.0, iterations=25, seed=0):
     for _ in range(int(iterations)):
         triangles = triangulate(params)
         centroid = params[triangles].mean(axis=1)
-        # Area *and* density: a plain area-weighted centroid is the centroidal
-        # Voronoi iteration for a UNIFORM density, so it relaxes toward equal
+        # Area and density: a plain area-weighted centroid is the centroidal
+        # Voronoi iteration for a uniform density, so it relaxes toward equal
         # element sizes and undoes the grading the rejection sampling just put
-        # in. Weighting by 1/h**2 -- the node density the size field asks for --
-        # is the density-weighted CVT, whose equilibrium spacing is proportional
-        # to h. Measured on a field varying 4x down dip, the achieved size ratio
-        # between the shallow and deep thirds is 2.95 against a wanted 2.85 with
-        # the weight and only 2.16 without it; on a field that varies along
-        # strike instead, the correlation between achieved size and target rises
-        # from +0.72 to +0.83. Element quality improves too (min angle 21.8 ->
-        # 26.6 degrees), so there is nothing traded away here.
+        # in. Weighting by 1/h**2, the node density the size field asks for,
+        # gives the density-weighted CVT, whose equilibrium spacing is
+        # proportional to h. It also improves element quality.
         weight = (np.abs(signed_areas(params, triangles)) / 2.0
                   / np.maximum(h(centroid[:, 0], -centroid[:, 1]), 1e-9) ** 2)
         total = np.zeros(params.shape[0])

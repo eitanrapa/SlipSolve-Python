@@ -4,21 +4,18 @@ Two things have to hold, and they pull in opposite directions:
 
 * **The estimator must recover a covariance it did not generate.** So the fields
   here are synthesised *from* a covariance by circulant embedding
-  (``slip_synthetic.correlated_noise``) and the fit is asked for the parameters
+  (`slip_synthetic.correlated_noise`) and the fit is asked for the parameters
   back. Fitting the same expression the code composes would prove nothing.
-* **Nothing may move when no covariance is supplied.** Every run before this
-  weighted by ``1/sqrt(n)`` per track, and `covariance=None` has to stay
-  bit-for-bit that -- which is what makes this safe to land ahead of the
-  experiments that depend on it.
+* **Nothing may move when no covariance is supplied.** The weighting is then
+  `1/sqrt(n)` per track, and `covariance=None` has to stay bit-for-bit that.
 
-The one that caught a real design flaw is
-``test_the_variogram_cannot_see_the_nugget_but_the_blocks_can``. A block
-variogram carries no lag shorter than one block, so its shortest bin already sits
-a sixth of the way up a 12 km exponential and a free three-parameter fit has
-nothing left to separate the nugget from a slightly shorter range -- it drives the
-nugget to zero. The first version of this module read the nugget straight off
-that fit, which would have handed every quadtree cell a wildly over-confident
-weight. It is measured from within-block scatter instead.
+The subtle one is `test_the_variogram_cannot_see_the_nugget_but_the_blocks_can`.
+A block variogram carries no lag shorter than one block, so its shortest bin
+already sits a sixth of the way up a 12 km exponential and a free three-parameter
+fit has nothing left to separate the nugget from a slightly shorter range -- it
+drives the nugget to zero. Read straight off that fit, the nugget would hand every
+quadtree cell a wildly over-confident weight, so it is estimated from within-block
+scatter instead.
 """
 
 import warnings
@@ -213,9 +210,8 @@ def test_an_unplateaued_variogram_says_so(geometry):
     That is the loud, checkable signature of a trend the detrend did not remove,
     and it matters because the resulting model is *not* obviously broken
     downstream -- it whitens, it factorises, and it quietly tells the inversion
-    the noise is coherent across the entire scene. Measured on the four real
-    NISAR scenes, which are stored un-deramped: removing only a plane gives
-    ranges of 363-816 km against a 108 km maximum lag.
+    the noise is coherent across the entire scene. Scenes stored without a
+    deramp show exactly this when only a plane is removed.
     """
     trace, frame, _ = geometry
     stack = _noise_stack(frame, seed=13, ramp=1e-6)
@@ -236,9 +232,8 @@ def test_an_unplateaued_variogram_says_so(geometry):
 def test_the_detrend_degree_must_match_the_ramp_the_inversion_solves(geometry):
     """A plane cannot remove a quadratic, and the failure is total, not gradual.
 
-    This is why `DEFAULT_DETREND_DEGREE` is 2 rather than 1: the scenes this
-    package inverts carry an unremoved ramp and the inversion solves a quadratic
-    one per track.
+    This is why `DEFAULT_DETREND_DEGREE` is 2 rather than 1: interferograms
+    often carry an unremoved curved ramp, which the inversion solves per track.
     """
     trace, frame, _ = geometry
     x, y = ss._grid(frame, 32619, 110e3, 70e3, 1000.0)
@@ -442,9 +437,9 @@ def test_the_whitened_design_is_what_the_solver_uses(signal_setup):
 
 
 def test_whitening_rescales_what_the_smoothing_weight_means(signal_setup):
-    """⚠️ Existing lambda values do not transfer to a whitened run.
+    """Lambda values do not transfer between a plain and a whitened run.
 
-    The diagonal weights were ``1/sqrt(n)`` -- about 0.02 here. Whitening divides
+    The diagonal weights are `1/sqrt(n)` -- about 0.02 here. Whitening divides
     by sigma instead, about 0.022 m, so the data block grows by ~30x relative to
     the smoothing block and the same nominal lambda leaves the problem far less
     damped. Any L-curve has to be re-run; a weight carried over from an
@@ -468,27 +463,25 @@ def test_whitening_rescales_what_the_smoothing_weight_means(signal_setup):
 
 
 def test_whitening_does_not_by_itself_improve_the_slip_estimate(signal_setup):
-    """⚠️ **A measured negative result, pinned so it is not "fixed" later.**
+    """A negative result, pinned so it is not "fixed" later.
 
     The intuition for a covariance model is that correlated noise looks like a
     shallow slip patch and gets fitted as one unless the inversion is told
-    otherwise. That intuition does not survive contact with this problem: swept
-    over 24 smoothing weights and compared at each arm's own optimum, the
-    whitened solve recovers the planted slip *worse* than the plain one -- 0.147
-    against 0.069 m rms, on 5 of 5 seeds, and it stays worse at SNR 2.0 / 0.4 /
-    0.1, at matched effective rank up to 20, and at cells both 0.83x and 0.31x
-    the correlation length.
+    otherwise. That intuition does not survive contact with this problem:
+    compared at each arm's own optimum smoothing, the whitened solve recovers the
+    planted slip *worse* than the plain one, across seeds, signal-to-noise
+    ratios, matched effective rank and sampling densities.
 
     The reason is that GLS is the minimum-variance estimator only among
-    **unbiased** ones. This estimator is nothing of the sort: it is bound
+    unbiased ones. This estimator is nothing of the sort: it is bound
     constrained and damped hard enough to resolve tens of parameters out of
     hundreds, so the regulariser, not the data weighting, sets the error. And an
-    exponential ``Cd`` has least variance at short wavelengths, so whitening
+    exponential `Cd` has least variance at short wavelengths, so whitening
     up-weights exactly the components the smoothing exists to suppress. The two
     pull against each other.
 
-    So the case for ``Cd`` is **not** a better point estimate. It is that
-    ``chi_square`` becomes meaningful, that the resolution and data-importance
+    So the case for `Cd` is not a better point estimate. It is that
+    `chi_square` becomes meaningful, that the resolution and data-importance
     numbers describe the system actually solved, and that the noise is stated
     rather than assumed. Those are the tests above; this one records what a
     covariance does not buy.
@@ -529,9 +522,7 @@ def test_chi_square_is_absent_without_a_noise_model(signal_setup):
 
     Without a covariance the whitening is a multiply by `1/sqrt(n)`, so the sum of
     squares lands around 1e-4 times the residual norm -- it looks like a
-    chi-square, it reads as a spectacular fit, and it means nothing. Caught on the
-    real six-scene L-curve, where the plain arm printed `chi2/n 0.000` at every
-    weight.
+    chi-square, it reads as a spectacular fit, and it means nothing.
     """
     _, _, mesh, _, parts = signal_setup
     obs = Observations.concat(parts)
@@ -581,13 +572,12 @@ def test_a_track_with_no_model_is_named(two_track_obs):
 # -- uncertainty, and how much of it is the prior ---------------------------
 
 def test_the_propagated_sigma_matches_repeated_bounded_solves(signal_setup):
-    """⚠️ The forward-model check, and it is what set the default.
+    """The forward-model check, and it is what set the default.
 
-    Draw noise from the SAME Cd the covariance is built from, re-solve through the
+    Draw noise from the same Cd the covariance is built from, re-solve through the
     real bound-constrained solver, and compare the scatter with the prediction.
-    Measured over 60 draws on the synthetic: `"propagated"` gives ratio **1.01**
-    and per-parameter correlation **0.950**, while `"posterior"` is **11x too
-    wide**.
+    Over 60 draws on this synthetic `"propagated"` gives a ratio of 1.01 and a
+    per-parameter correlation of 0.95, while `"posterior"` is 11x too wide.
 
     Both are right for their own question -- repeated observation varies only the
     data, which is what `"propagated"` predicts, while `M^-1` also carries a prior
@@ -631,12 +621,12 @@ def test_the_propagated_sigma_matches_repeated_bounded_solves(signal_setup):
 
 
 def test_a_bound_pressed_solution_is_refused(signal_setup):
-    """The linear covariance describes the UNBOUNDED problem.
+    """The linear covariance describes the unbounded problem.
 
-    `resolution.py` warns about exactly this. Real runs sit at 5.8-18.6% on a
-    bound, which straddles `MAX_BOUND_FRACTION`, so the gate is live rather than
-    theoretical. Tight bounds must raise rather than return a plausible-looking
-    sigma for a problem nobody solved.
+    `resolution.py` warns about exactly this. Real inversions can put around a
+    tenth of their parameters on a bound, the size of `MAX_BOUND_FRACTION`, so the
+    gate is live rather than theoretical. Tight bounds must raise rather than
+    return a plausible-looking sigma for a problem nobody solved.
     """
     _, _, mesh, _, parts = signal_setup
     obs = Observations.concat(parts, normalize="none")
@@ -654,10 +644,10 @@ def test_the_bias_grows_with_lambda_against_a_FIXED_reference(signal_setup):
 
     More damping buys variance down and bias up, and that trade is why a single
     error bar is the wrong presentation. But the pull must be measured against a
-    **fixed** reference model, or it moves the wrong way:
+    fixed reference model, or it moves the wrong way:
 
     1. the *absolute* pull is taken at the recovered model, which shrinks with the
-       damping, so it shrinks too (0.317 -> 0.098 m measured);
+       damping, so it shrinks too (0.317 -> 0.098 m here);
     2. even the *relative* pull is non-monotone when the model moves with lambda
        (0.203 -> 0.431 -> 0.290), because `m` rotates toward the smooth directions
        `R` preserves best -- the recovered model is already the smoothed one.
@@ -676,11 +666,11 @@ def test_the_bias_grows_with_lambda_against_a_FIXED_reference(signal_setup):
         fixed.append(R.resolution_bias(matrix, reference)["relative"])
         moving.append(R.resolution_bias(
             matrix, inversion.solve(smoothing=lam, max_iter=400, **bounds))["relative"])
-        # ⚠️ Mean, not median. At light damping the sigma distribution spans four
-        # orders of magnitude and the median describes only the bulk -- measured,
-        # it *rises* 0.059 -> 0.207 over lambda 0.01 -> 100 while the mean falls
-        # 128 -> 0.40, because damping pulls the tail in faster than it lifts the
-        # bulk. Reading the median would say more smoothing means less certainty.
+        # Mean, not median. At light damping the sigma distribution spans four
+        # orders of magnitude and the median describes only the bulk: it rises
+        # with lambda while the mean falls, because damping pulls the tail in
+        # faster than it lifts the bulk. Reading the median would say more
+        # smoothing means less certainty.
         sigma.append(float(np.mean(R.posterior_covariance(inversion, lam)[:n])))
 
     assert fixed == sorted(fixed), f"against a fixed model the bias must grow: {fixed}"
@@ -695,19 +685,18 @@ def test_the_bias_grows_with_lambda_against_a_FIXED_reference(signal_setup):
 
 
 def test_the_sandwich_matches_a_monte_carlo_of_the_PLAIN_solve(signal_setup):
-    """⚠️ The formula for the estimator this package actually ships.
+    """The sandwich formula, for the plain (unwhitened) estimator.
 
-    The production model is solved with the diagonal weights, because whitening
-    measurably worsens the point estimate -- so the `"propagated"` form does not
-    describe it: the solver's weighting `w` and the true noise `Cd` disagree. The
-    sandwich puts the solver's own normal matrix outside and the true noise in the
-    middle, and on the real six-scene model it reproduces a 40-draw Monte Carlo at
-    **ratio 0.99, correlation 0.980, in under a second against forty minutes**.
+    A plain solve uses the diagonal weights, because whitening worsens the point
+    estimate (see above) -- so the `"propagated"` form does not describe it: the
+    solver's weighting `w` and the true noise `Cd` disagree. The sandwich puts the
+    solver's own normal matrix outside and the true noise in the middle, and
+    reproduces a Monte Carlo of repeated solves at a small fraction of its cost.
 
-    ⚠️ `w` appears **twice** on each side of the middle term, not once. The normal
+    `w` appears twice on each side of the middle term, not once. The normal
     equations are `(wA)'(wA) m = (wA)'(w d)`, so the right-hand side carries `w^2`.
-    Getting that wrong gave a sigma 29x too large on the real model -- with the
-    correlation still at 0.978, which is what identified it as a scale error.
+    With a single `w` the sigma comes out many times too large while its
+    correlation with the Monte Carlo stays high -- the signature of a scale error.
     """
     _, _, mesh, _, parts = signal_setup
     obs = Observations.concat(parts)                    # plain: normalize stays on
@@ -754,7 +743,7 @@ def test_a_plain_inversion_still_refuses_without_a_noise_model(signal_setup):
 # -- REML on the samples ---------------------------------------------------------
 def _point_samples(n=350, seed=0, sill=1e-4, range_m=15e3, nugget=4e-6, kind="exponential",
                    track="a"):
-    """Samples with a KNOWN covariance plus a plane the ramp projection must ignore."""
+    """Samples with a known covariance plus a plane the ramp projection must ignore."""
     import xarray as xr
     rng = np.random.default_rng(seed)
     x = rng.uniform(-75e3, 75e3, n)
@@ -793,7 +782,7 @@ def test_reml_recovers_the_covariance_that_made_the_samples():
     """A planar trend rides on the noise and the linear ramp projection must hide it.
 
     One realisation of a 15 km field over 150 km scatters by up to 2x in range
-    (measured over ten seeds), so the median of four is what is pinned.
+    (over ten seeds), so the median of four is what is pinned.
     """
     sill, range_m = [], []
     for seed in range(11, 15):

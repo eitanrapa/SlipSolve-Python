@@ -1,6 +1,6 @@
 """The layered engine: point-source superposition against the half-space answer.
 
-The acceptance test is :func:`test_reproduces_the_half_space_engine`. A layered
+The acceptance test is `test_reproduces_the_half_space_engine`. A layered
 code handed a uniform medium has to give back the homogeneous half-space answer,
 and EDCMP is built around exactly that identity -- its input file carries a
 "layered (1) or homogeneous (0)" switch and it ships Okada's routines for the
@@ -105,9 +105,9 @@ def test_quadrature_weights_and_centroid():
 
 
 def test_sub_triangles_are_the_quadrature_lattice():
-    """``_sub_triangles`` is ``_triangle_quadrature`` with the pieces' extents kept.
+    """`_sub_triangles` is `_triangle_quadrature` with the pieces' extents kept.
 
-    Same lattice, same order: its centroids ARE the quadrature points, and the
+    Same lattice, same order: its centroids are the quadrature points, and the
     pieces tile the parent in equal areas.
     """
     from slipsolve.layered import _sub_triangles
@@ -126,10 +126,10 @@ def test_sub_triangles_are_the_quadrature_lattice():
 def test_quadrature_uses_both_sub_triangle_orientations():
     """Taking only the upright sub-triangles is a biased sample, not a rule.
 
-    Subdividing a triangle ``k`` ways gives ``k(k+1)/2`` upright sub-triangles and
-    ``k(k-1)/2`` inverted ones. Sampling only the upright set with equal weights
+    Subdividing a triangle `k` ways gives `k(k+1)/2` upright sub-triangles and
+    `k(k-1)/2` inverted ones. Sampling only the upright set with equal weights
     -- which a plain barycentric lattice does -- has an error that stops falling
-    however many points are added; measured, it plateaus near 5e-3 relative.
+    however many points are added; it plateaus near 5e-3 relative.
     """
     p1, p2, p3 = np.array([0.0, 0, 0]), np.array([1.0, 0, 0]), np.array([0.0, 1, 0])
     for order in (2, 3, 4):
@@ -169,8 +169,8 @@ def test_error_falls_as_the_table_is_refined(scene):
     """Confirms the residual is table resolution, not a mistake in the algebra.
 
     A wrong convention would leave an error that refinement cannot touch.
-    Measured, halving the cell size takes the worst-case relative error from
-    7.6e-3 to 3.7e-3.
+    Halving the cell size takes the worst-case relative error from 7.6e-3 to
+    3.7e-3.
     """
     _, _, mesh, ox, oy = scene
     exact = HalfSpaceTDE(0.25).displacement(mesh, ox, oy)
@@ -315,7 +315,7 @@ def test_tent_assembly_satisfies_partition_of_unity(uniform_tables, scene):
     The nodal basis functions sum to 1 everywhere on the fault, so summing every
     node column has to equal summing every element column -- the same total slip,
     described two ways. Nothing about the tent weighting, the incidence lists or
-    the quadrature can be wrong and still satisfy this: measured residual 2e-16.
+    the quadrature can be wrong and still satisfy this: the residual is 2e-16.
     """
     from slipsolve.basis import ElementBasis, NodeBasis
 
@@ -338,8 +338,8 @@ def test_tent_assembly_differs_from_the_lumped_projection(uniform_tables, scene)
 
     Replacing a tent by its mean over each triangle preserves the moment, so the
     far field is untouched, but it flattens the field within one element of a node.
-    Measured on this scene: up to **23%** on individual columns, 0.6% rms. If these
-    agreed there would be no point doing the harder integral.
+    On this scene: up to 23% on individual columns, 0.6% rms. If these agreed
+    there would be no point doing the harder integral.
     """
     from slipsolve.basis import ElementBasis, NodeBasis
 
@@ -413,11 +413,9 @@ def test_tent_assembly_costs_about_three_element_assemblies(uniform_tables, scen
 
 # -- the error model behind the adaptive rule --------------------------------
 #
-# `_QUADRATURE_CONSTANT`, `_QUADRATURE_SAFETY`, `MAX_QUADRATURE_POINTS` and
-# `DEFAULT_TOLERANCE` were imported by no test at all, so the 2026-08-18
-# recalibration -- which moved the exponent from -1 to -2 and changed what the
-# tolerance knob *means* -- could have been reverted without anything failing.
-# These pin it.
+# These pin `_QUADRATURE_CONSTANT`, `_QUADRATURE_SAFETY`, `MAX_QUADRATURE_POINTS`
+# and `DEFAULT_TOLERANCE`. The error model's exponent and constant set what the
+# tolerance knob *means*, and a wrong value breaks nothing else visibly.
 
 def _order_error(tables, mesh, element, order, x, y, truth_order=40):
     """Relative error of an order-``k`` rule on one element, against a fine rule."""
@@ -439,11 +437,11 @@ def _order_error(tables, mesh, element, order, x, y, truth_order=40):
 def test_the_quadrature_error_model_is_the_one_that_is_shipped(uniform_tables, scene):
     """`err = C * (k*r/L)**-2`, with the exponent and constant both pinned.
 
-    ⚠️ **The exponent is 2, not 1**, because a triangle's first moment vanishes
-    about its own centroid so the centroid rule's leading term is second order.
+    The exponent is 2, not 1, because a triangle's first moment vanishes about
+    its own centroid so the centroid rule's leading term is second order.
     Getting this wrong does not break anything visibly -- it makes the delivered
     error scale as `tolerance**2`, so the knob silently stops meaning what it
-    says (asking 1e-2 delivered 5e-3; asking 3e-3 delivered 1e-5).
+    says (with exponent 1, asking for 1e-2 delivers 5e-3 and 3e-3 delivers 1e-5).
     """
     _, _, mesh, ox, oy = scene
     element = int(np.argmin(mesh.centroids[:, 2]))     # shallowest, widest r/L range
@@ -475,7 +473,7 @@ def test_the_safety_factor_keeps_most_pairs_inside_their_tolerance(uniform_table
     """Fit scatter is ~1.9x at one sigma, so a median-centred model leaves half
     the pairs over. The 4x safety factor is what takes that to a few percent.
 
-    ⚠️ Judged **only on uncapped pairs**: a capped pair never asked for its order
+    Judged only on uncapped pairs: a capped pair never asked for its order
     and `max |err|` over a whole array saturates on the cap, reading the same
     value at every tolerance and so telling you nothing.
     """
@@ -505,8 +503,8 @@ def test_an_assembly_reports_what_quadrature_it_spent(uniform_tables, scene):
     """Provenance, and the only place an unmet tolerance is visible.
 
     The guarantee the adaptive rule offers is "never coarser than the fixed rule
-    it replaces", not the tolerance -- the cap binds within about `2 * L`. That
-    distinction was previously invisible to a caller.
+    it replaces", not the tolerance -- the cap binds within about `2 * L`. Without
+    the report a caller cannot see that distinction.
     """
     _, _, mesh, ox, oy = scene
     engine = LayeredPointSource(uniform_tables, tolerance=3e-3)
@@ -587,19 +585,17 @@ def test_the_orders_the_cap_refused_are_still_recoverable(uniform_tables, scene)
 
 # -- no point is ever counted twice ------------------------------------------
 #
-# The reference's `interpolate_triangle2` takes points "strictly INSIDE" the
+# The reference's `interpolate_triangle2` takes only points strictly inside the
 # triangle, dropping every edge and vertex. That is not arbitrary: a barycentric
-# lattice's NODES are shared between the sub-triangles of that lattice -- an
+# lattice's nodes are shared between the sub-triangles of that lattice -- an
 # interior node by up to six, an edge node by up to three -- so equal weights
 # over-weight the boundary relative to the area it represents. It is the
 # composite-rule endpoint problem, the same one that makes the trapezoid rule
-# halve its endpoints. Excluding the boundary avoids having to assign reduced
-# weights there -- and does not work: measured, restoring the boundary leaves the
-# rule first order (n**-1.03 vs n**-1.04), while weighting the nodes 6:3:1 by the
-# area they own restores second order (n**-1.99). See
-# `scripts/bench_quadrature_rule.py`.
+# halve its endpoints. Excluding the boundary avoids assigning reduced weights
+# there, but the rule stays first order with the boundary dropped or restored;
+# weighting the nodes 6:3:1 by the area they own restores second order.
 #
-# Sub-triangle CENTROIDS sidestep it instead of paying for it: a centroid is
+# Sub-triangle centroids sidestep it instead of paying for it: a centroid is
 # interior to exactly one sub-cell, so it belongs to one cell and represents
 # exactly area/k**2. These three tests pin that there is nothing to double count,
 # within a triangle and across the mesh.

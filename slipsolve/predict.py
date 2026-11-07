@@ -1,39 +1,36 @@
 """Model-based downsampling: let the model decide where the data are worth having.
 
 A quadtree run on observed interferograms splits wherever the phase is rough, and
-atmosphere is rough. Measured on the Venezuela scenes, the median within-cell
-scatter was **11.8 mm** against an ``rms_min`` of 6 mm, leaving **47% of cells**
-above threshold -- and because that scatter is a *pixel* statistic it does not
-shrink as the cell shrinks, so the recursion could not stop on information and
-simply ran down to ``width_min``. The result was 18 631 samples of mostly
-atmosphere, densest exactly where the interferogram was worst.
+atmosphere is rough. Within-cell scatter is a *pixel* statistic, so it does not
+shrink as the cell shrinks: once `rms_min` is below the noise the recursion
+cannot stop on information and runs down to `width_min`, giving many samples of
+mostly atmosphere, densest where the interferogram is worst.
 
 Wang & Fialko (2015, §2) break the loop by quadtreeing a **synthetic**
 interferogram computed from a preliminary slip model, then filling the resulting
 cells from the observed data:
 
-    An initial slip model was estimated from inversion of coarsely sampled LOS
-    displacement maps. Synthetic interferograms were computed using the slip
-    model, and down-sampled using the quad-tree curvature-based algorithm. The
-    bounding coordinates of each resolution cell (bin) were then used to compute
-    the average LOS displacements from the observed interferograms. A new slip
-    model was then derived from the updated dataset. Usually, a few iterations
-    are sufficient to achieve a solution that stops changing with subsequent
-    iterations. To avoid spurious shallow slip, a relatively dense sampling
-    around the fault trace was retained through all iterations.
+> An initial slip model was estimated from inversion of coarsely sampled LOS
+> displacement maps. Synthetic interferograms were computed using the slip
+> model, and down-sampled using the quad-tree curvature-based algorithm. The
+> bounding coordinates of each resolution cell (bin) were then used to compute
+> the average LOS displacements from the observed interferograms. A new slip
+> model was then derived from the updated dataset. Usually, a few iterations
+> are sufficient to achieve a solution that stops changing with subsequent
+> iterations. To avoid spurious shallow slip, a relatively dense sampling
+> around the fault trace was retained through all iterations.
 
 Both halves of that last sentence are load-bearing. It is a **loop**, not one
 pass; and the near-fault density has to be *held*, because an initial model with
 little shallow slip predicts a smooth near field, the quadtree then coarsens
 precisely where shallow slip needs constraining, and the next round is free to
-invent it. That is :func:`~slipsolve.sampling.Observations.from_los`'s
-``refine_within``.
+invent it. That is the `refine_within` of
+`slipsolve.sampling.Observations.from_los`.
 
 The prediction is evaluated on a coarse grid and interpolated up, never on the
-raster directly. Timed on the real trace, forward-modelling all 1.58 M pixels of
-one ALOS scene takes **8.6 min at 124 elements and 80 min at 1148**; a 2 km grid
-is ~90 s, and the predicted field's shortest wavelength is set by the element
-size, so nothing is lost.
+raster directly: forward-modelling every pixel of a scene costs minutes to hours,
+and the predicted field's shortest wavelength is set by the element size, so
+nothing is lost.
 """
 
 import numpy as np
@@ -44,8 +41,8 @@ from .sampling import Observations, _to_frame, stack_epsg
 #: Coarse grid on which the elastic forward model is evaluated, in metres.
 DEFAULT_SPACING = 2000.0
 
-#: Near-fault band held at ``width_min`` through every round, as a multiple of
-#: ``exclude_within`` -- which is itself half a terminal cell, so this reaches a
+#: Near-fault band held at `width_min` through every round, as a multiple of
+#: `exclude_within` -- which is itself half a terminal cell, so this reaches a
 #: couple of cells either side of the trace.
 REFINE_MULTIPLE = 4.0
 
@@ -55,19 +52,19 @@ DEFAULT_TOL = 0.01
 
 def predicted_los(model, los_stack, frame=None, spacing=DEFAULT_SPACING,
                   block=4096, exclude_within=None):
-    """The LOS field ``model`` predicts on ``los_stack``'s own grid.
+    """The LOS field `model` predicts on `los_stack`'s own grid.
 
-    Returns an ``(ny, nx)`` float array in the package's positive-toward-sensor
+    Returns an `(ny, nx)` float array in the package's positive-toward-sensor
     convention, ready to hand to
-    :meth:`~slipsolve.sampling.Observations.from_los` as ``field``.
+    `slipsolve.sampling.Observations.from_los` as `field`.
 
-    Evaluated on a ``spacing``-metre grid via
-    :meth:`~slipsolve.inversion.SlipModel.surface_displacement` and
+    Evaluated on a `spacing`-metre grid via
+    `slipsolve.inversion.SlipModel.surface_displacement` and
     interpolated up. The three ENU components are interpolated, **not** the scalar
     LOS: the look vectors already sit on the raster at full resolution, so
     projecting after interpolation keeps whatever across-swath variation the
-    geometry has -- which for the wide-swath ALOS scenes here is an incidence
-    angle running 25.7 to 49.1 degrees.
+    geometry has -- on a wide swath, an incidence angle that varies by tens of
+    degrees.
     """
     from scipy.interpolate import RegularGridInterpolator
 
@@ -120,70 +117,63 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
                      sampling_field="model", verbose=True):
     """Run the Wang & Fialko loop: sample, invert, re-sample from the model.
 
-    ``scenes`` is a ``{name: LOSStack}`` mapping -- put them on one lattice first
-    with :func:`slipsolve.resample.resample_all`, or their cell-size
-    ladders are not comparable. ``sample_kwargs`` is ``{name: kwargs}`` for
-    :meth:`~slipsolve.sampling.Observations.from_los`, normally built from
-    :func:`~slipsolve.diagnostics.scene_report`.
+    `scenes` is a `{name: stack}` mapping of gridded LOS products -- put them on
+    one lattice first with `slipsolve.resample.resample_all`, or their cell-size
+    ladders are not comparable. `sample_kwargs` is `{name: kwargs}` for
+    `slipsolve.sampling.Observations.from_los`, normally built from
+    `slipsolve.diagnostics.scene_report`.
 
     Round 0 is deliberately coarse and data-driven -- the paper's "coarsely
-    sampled LOS displacement maps" -- and ``coarse_kwargs`` overrides
-    ``sample_kwargs`` for it alone (default: ``width_min`` tripled, which costs
+    sampled LOS displacement maps" -- and `coarse_kwargs` overrides
+    `sample_kwargs` for it alone (default: `width_min` tripled, which costs
     roughly an order of magnitude in samples and is plenty for a first geometry).
     Every later round predicts each scene's LOS from the current model, re-samples
     on that, and re-solves.
 
-    Stops when the slip field moves by no more than ``tol`` between rounds, or at
-    ``max_rounds``. Returns ``(observations, model, history)``; ``history`` is a
-    list of per-round dicts carrying ``n``, ``variance_reduction`` and
-    ``max_change``, so that the "stops changing" criterion can be checked rather
+    Stops when the slip field moves by no more than `tol` between rounds, or at
+    `max_rounds`. Returns `(observations, model, history)`; `history` is a
+    list of per-round dicts carrying `n`, `variance_reduction` and
+    `max_change`, so that the "stops changing" criterion can be checked rather
     than assumed.
 
-    **Two-way optimization.** ``mesh_adapt`` turns the loop from
+    **Two-way optimization.** `mesh_adapt` turns the loop from
     sample-invert-sample into sample-**remesh**-invert: each round re-sizes the
     elements from the model resolution the current data supports
-    (:func:`~slipsolve.resolution.target_element_size`) and rebuilds the
-    mesh on the new layout. It is a dict, and it must carry ``geometry`` --
-    keyword arguments for :meth:`~slipsolve.mesh.FaultMesh.from_layout`
-    naming what the fault *is* (``bottom_trace=``, ``uniform_dip=``, ...), since a
+    (`slipsolve.resolution.target_element_size`) and rebuilds the
+    mesh on the new layout. It is a dict, and it must carry `geometry` --
+    keyword arguments for `slipsolve.mesh.FaultMesh.from_layout`
+    naming what the fault *is* (`bottom_trace=`, `uniform_dip=`, ...), since a
     layout says only where the nodes go. Everything else in the dict is passed to
-    ``target_element_size``, ``structure`` (``"rows"``, the default, or
-    ``"unstructured"`` for a layout with no depth levels at all -- see
-    :func:`~slipsolve.resolution.adapt_layout`), plus ``rounds`` to stop
+    `target_element_size`, `structure` (`"rows"`, the default, or
+    `"unstructured"` for a layout with no depth levels at all -- see
+    `slipsolve.resolution.adapt_layout`), plus `rounds` to stop
     adapting after N rounds and
-    ``smoothing`` to evaluate resolution at a weight other than ``solve_kwargs``'.
+    `smoothing` to evaluate resolution at a weight other than `solve_kwargs`'.
 
-    ``sampling_field`` chooses what the quadtree splits on: ``"model"`` (the
-    default, Wang & Fialko's predicted displacement), ``"resolution"`` (Lohman &
-    Simons -- where a sample would most improve model resolution), or ``"both"``,
+    `sampling_field` chooses what the quadtree splits on: `"model"` (the
+    default, Wang & Fialko's predicted displacement), `"resolution"` (Lohman &
+    Simons -- where a sample would most improve model resolution), or `"both"`,
     the sum of the two standardised fields. The two answer different questions:
     the first avoids spending samples on atmosphere, the second spends them where
-    the model is unconstrained. It **moves** samples rather than adding them --
-    measured on the two-scene fixture, ``"model"`` put 1974 samples with 33.5%
-    inside 20 km of the trace and ``"resolution"`` put 890 with **74.4%**.
+    the model is unconstrained. It moves samples rather than adding them.
 
-    ⚠️ ``"both"`` is not "at least as many samples as either", and cannot be:
-    ``rms_min`` is a fraction of the field's *own global* scatter, so a field that
+    `"both"` is not "at least as many samples as either", and cannot be:
+    `rms_min` is a fraction of the field's *own global* scatter, so a field that
     is large but smooth raises the split threshold everywhere without raising any
     cell's local scatter.
 
-    ⚠️ **A changing mesh invalidates the obvious convergence test.** ``max_change``
-    was ``max |element_slip - previous|``, and two rounds on different meshes give
-    different-length vectors. It is measured on a fixed ``(s, z)`` probe lattice
-    instead whenever the mesh moves, which is mesh- and basis-independent; with
-    the mesh held fixed the element-space number is kept verbatim, so existing runs
-    print exactly what they printed before.
+    On a fixed mesh `max_change` is `max |element_slip - previous|`. When the
+    mesh moves, two rounds give vectors of different length, so it is measured
+    on a fixed `(s, z)` probe lattice instead.
 
-    ⚠️ **That probe number has an irreducible floor, which is why ``mesh_adapt``
-    stops before the last round.** Resampling a piecewise-constant field onto a
-    fixed lattice differs by roughly the element-boundary contrast however little
-    the model moved: measured, two models fitting the *same* data on 240 and 232
-    elements agree to a **2 mm median** and still differ by **0.97 m** at the worst
-    probe point. So ``tol`` cannot be met while the mesh is moving, and
-    ``mesh_adapt["rounds"]`` defaults to ``max_rounds - 1`` so the run finishes on a
-    fixed mesh and converges on the exact criterion. Set it to ``max_rounds`` to
-    keep adapting throughout, and expect the loop to run out of rounds rather than
-    converge.
+    That probe number has a floor, which is why `mesh_adapt` stops before the
+    last round: resampling a piecewise-constant field onto a fixed lattice
+    differs by about the slip contrast across element boundaries however little
+    the model moved. So `tol` cannot be met while the mesh is moving, and
+    `mesh_adapt["rounds"]` defaults to `max_rounds - 1`, so the run finishes on
+    a fixed mesh and converges on the exact criterion. Set it to `max_rounds` to
+    keep adapting throughout, and expect the loop to run out of rounds rather
+    than converge.
     """
     from .inversion import SlipInversion
 
@@ -282,24 +272,23 @@ def _entry(round_index, obs, model, mesh, field, change):
 
 
 def _adapt_spec(mesh_adapt, max_rounds, mesh=None):
-    """Validate the mesh-adaptation request, or ``None`` when there is none."""
+    """Validate the mesh-adaptation request, or `None` when there is none."""
     if mesh_adapt is None:
         return None
     spec = dict(mesh_adapt)
-    # ⚠️ Pin "conserve" to the STARTING mesh, once. `adapt_layout` resolves it
+    # Pin "conserve" to the starting mesh, once. `adapt_layout` resolves it
     # against whatever mesh it is handed, and `_fit_budget` accepts any build
-    # within 5% of the target without bisecting -- so round N's target was round
-    # N-1's *result*, and the count did a +/-5% random walk with no restoring
-    # force. Measured over 8 rounds: 1696 -> 1759 -> ... -> 1893, every step
-    # inside tolerance, **+11.6% compounded**. Three rounds hides it. Resolved
-    # here, every round aims at the same integer.
+    # within 5% of the target without bisecting -- so resolved each round, round
+    # N's target would be round N-1's result and the element count would drift
+    # in a random walk with no restoring force. Resolved here, every round aims
+    # at the same integer.
     if spec.get("budget", "conserve") == "conserve" and mesh is not None:
         spec["budget"] = int(mesh.n_elements)
     # Same trap one level down: `target_element_size` and `kernel_element_size`
     # default their clamps to `current.min()/max_ratio` and `current.max()*ratio`,
-    # recomputed from this round's mesh, so the clamp follows the drift and the
-    # size spread widens without bound (6.5x after 3 rounds, 30x after 8). Pin
-    # them to the starting mesh too, unless the caller was explicit.
+    # recomputed from this round's mesh, so the clamp would follow the drift and
+    # the size spread would widen without bound. Pin them to the starting mesh
+    # too, unless the caller was explicit.
     if mesh is not None:
         from .resolution import element_size
         current = element_size(mesh)
@@ -315,17 +304,14 @@ def _adapt_spec(mesh_adapt, max_rounds, mesh=None):
         )
     # Adapt for all but the last round by default, so the loop ends on a fixed
     # mesh where `max |element_slip - previous|` is exact. Re-meshing perturbs a
-    # piecewise-constant slip field by ~0.1-1 m at element boundaries whatever
-    # the model does -- measured, two models fitting the *same* data on 240 and
-    # 232 elements agree to a 2 mm median and still differ by 0.97 m at the
-    # worst probe point -- so a centimetre tolerance is unreachable while the
-    # mesh is still moving, and a loop that adapts every round can only ever
-    # stop on `max_rounds`.
+    # piecewise-constant slip field at element boundaries whatever the model
+    # does, so a centimetre tolerance is unreachable while the mesh is still
+    # moving, and a loop that adapts every round can only stop on `max_rounds`.
     spec.setdefault("rounds", max(1, int(max_rounds) - 1))
     spec.setdefault("smoothing", None)
     # Checked here rather than at the first re-mesh: that happens after round
     # zero's sampling and solve, which on a real run is minutes in, and a typo
-    # in an environment variable should not cost that.
+    # should not cost that.
     if spec.get("size_from", "diagonal") not in ("diagonal", "kernel"):
         raise ValueError(
             f"mesh_adapt['size_from'] must be 'diagonal' or 'kernel', got "
@@ -342,11 +328,9 @@ def _adapt_spec(mesh_adapt, max_rounds, mesh=None):
 def _adapt_smoothing(adapt, solve_kwargs):
     """The weight resolution is evaluated at.
 
-    ⚠️ ``mesh_adapt["smoothing"]`` overrides, otherwise the weight the run
-    actually solves at. This used to be read in two places with **different**
-    fallbacks -- 0.3 for the sampling field and 1.0 for the kernel-driven mesh --
-    so a caller who omitted ``smoothing`` from ``solve_kwargs`` sized the mesh and
-    chose the samples at two different dampings without being told.
+    `mesh_adapt["smoothing"]` if given, otherwise the weight the run solves at.
+    Both the sampling field and the remesh read it here, so they always use the
+    same damping.
     """
     smoothing = adapt.get("smoothing") if adapt else None
     if smoothing is None:
@@ -355,15 +339,11 @@ def _adapt_smoothing(adapt, solve_kwargs):
 
 
 def _round_report(inversion, adapt, solve_kwargs):
-    """One ``resolution_report`` for the whole round.
+    """One `resolution_report` for the whole round.
 
-    ⚠️ **This used to be one factorization per scene, plus one more for the
-    remesh.** ``_split_field`` is called inside the loop over scenes and each call
-    re-derived the resolution from scratch, so a six-scene run with
-    ``sampling_field="both"`` and ``mesh_adapt`` factorized a ~1870-square matrix
-    **seven times a round** to produce seven identical answers. The report carries
-    the diagonal (as ``resolution``), the kernels and ``diag(N)`` from a single
-    factorization, which is everything both callers need.
+    One factorization serves every scene's sampling field and the remesh: the
+    report carries the diagonal (as `resolution`), the kernels and `diag(N)`,
+    which is everything both callers need.
     """
     from .resolution import resolution_report
 
@@ -377,8 +357,8 @@ def _split_field(model, inversion, stack, frame, spacing, sampling_field, adapt,
                  solve_kwargs, report=None):
     """What the quadtree splits on this round.
 
-    ``report`` is the round's shared :func:`resolution_report`; it is required
-    whenever ``sampling_field`` is not ``"model"``, so that the factorization is
+    `report` is the round's shared `resolution_report`; it is required
+    whenever `sampling_field` is not `"model"`, so that the factorization is
     not repeated per scene.
     """
     from .resolution import resolution_gain
@@ -399,10 +379,8 @@ def _split_field(model, inversion, stack, frame, spacing, sampling_field, adapt,
     # Added, not maximised. A pointwise max reads like "split where either field
     # would", and it is not: the quadtree splits on a cell's *scatter*, and the
     # max of two fields can be flatter than both where one of them clips the
-    # other's variation. Measured on the two-scene fixture, `fmax` gave 1432
-    # samples against 1974 for the predicted field alone. A sum's within-cell
-    # variance is var(a) + var(b) + 2cov(a, b), so it loses only to a strong
-    # anticorrelation.
+    # other's variation. A sum's within-cell variance is
+    # var(a) + var(b) + 2cov(a, b), so it loses only to a strong anticorrelation.
     predicted = predicted_los(model, stack, frame, spacing=spacing)
     finite = np.isfinite(predicted)
     scale = predicted[finite].std() if finite.any() else 0.0
@@ -424,7 +402,7 @@ def _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs, report=None)
     if adapt.get("size_from", "diagonal") == "kernel":
         # The averaging-kernel width: a lambda-stable length that never
         # degenerates, unlike (target / r) on the diagonal. See
-        # `kernel_element_size` for the measurement behind that choice.
+        # `kernel_element_size`.
         sizes = kernel_element_size(
             inversion, smoothing, report=report,
             **{k: v for k, v in adapt.items()
@@ -446,13 +424,12 @@ def _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs, report=None)
 
 
 def _probe_lattice(mesh, n_along=200, n_down=40):
-    """A fixed ``(s, z)`` grid to compare two slip fields on.
+    """A fixed `(s, z)` grid to compare two slip fields on.
 
-    The loop's convergence test used to difference ``element_slip`` directly,
-    which only works while the mesh is the same one. Sampling both fields on a
-    lattice that belongs to neither makes the number mean the same thing across
-    a re-mesh -- and it stays in metres of slip, so ``tol`` does not change
-    meaning either.
+    Differencing `element_slip` directly only works while the mesh is the same
+    one. Sampling both fields on a lattice that belongs to neither makes the
+    number mean the same thing across a re-mesh -- and it stays in metres of
+    slip, so `tol` keeps its meaning.
     """
     params = mesh.params
     s = np.linspace(params[:, 0].min(), params[:, 0].max(), int(n_along))
@@ -462,26 +439,26 @@ def _probe_lattice(mesh, n_along=200, n_down=40):
 
 
 def _probe_slip(mesh, model, probe):
-    """``model``'s slip at fixed ``(s, z)`` points, ``(n_probe, 2)``.
+    """`model`'s slip at fixed `(s, z)` points, `(n_probe, 2)`.
 
-    Both components, because ``element_slip`` carries both -- which keeps this
-    the same quantity the fixed-mesh path differences, so ``tol`` means "no
+    Both components, because `element_slip` carries both -- which keeps this
+    the same quantity the fixed-mesh path differences, so `tol` means "no
     component moved more than this" in either mode rather than two different
     things.
 
-    Nearest centroid rather than a barycentric lookup. Under ``basis="element"``
+    Nearest centroid rather than a barycentric lookup. Under `basis="element"`
     the slip is piecewise constant per element, so this *is* the field; the
     convergence metric compares like with like either way, which is what this
     function exists for.
 
-    ⚠️ **Under ``basis="node"`` it is NOT the field.** The parameters are a
-    continuous tent function over the triangulation and ``element_slip`` is its
+    Under `basis="node"` it is not the field. The parameters are a
+    continuous tent function over the triangulation and `element_slip` is its
     per-triangle mean, so a centroid lookup returns a Voronoi mosaic of those
     means. Harmless for a convergence check and wrong for anything drawn or
     differenced: it manufactures element-scale facets that neither model has.
-    Use :func:`sample_slip` for that -- it expands each basis the way that basis
-    is defined. This one is kept as it is on purpose: it is the statistic every
-    recorded ``max_change`` was measured with.
+    Use `sample_slip` for that -- it expands each basis the way that basis
+    is defined. This one is left as it is on purpose, so that `max_change`
+    keeps its meaning.
     """
     from scipy.spatial import cKDTree
 
@@ -490,37 +467,35 @@ def _probe_slip(mesh, model, probe):
 
 
 def sample_slip(model, s, z, component="magnitude"):
-    """``model``'s slip at arbitrary ``(s, z)`` points, as its basis defines it.
+    """`model`'s slip at arbitrary `(s, z)` points, as its basis defines it.
 
-    The counterpart of :func:`_probe_slip` for anything a person looks at: a
-    figure, or the difference between two models that do not share a mesh. Both
-    coordinates are **metres**, and ``z`` is *elevation* -- negative downwards --
-    because that is what :attr:`~slipsolve.mesh.FaultMesh.params` holds.
-    Points outside the mesh come back ``nan``.
+    For anything a person looks at: a figure, or the difference between two
+    models that do not share a mesh. Both coordinates are **metres**, and `z` is
+    *elevation* -- negative downwards -- because that is what
+    `slipsolve.mesh.FaultMesh.params` holds. Points outside the mesh come back
+    `nan`.
 
     Each basis is expanded the way it is actually defined, which is the whole
     point of the function:
 
-    * ``basis="node"`` -- linear interpolation over ``mesh.triangles`` in
-      ``mesh.params``. A tent basis *is* P1 on that triangulation, so this is
+    * `basis="node"` -- linear interpolation over `mesh.triangles` in
+      `mesh.params`. A tent basis *is* P1 on that triangulation, so this is
       the field itself and not an approximation of it. The two components are
-      interpolated separately and combined afterwards, because ``magnitude`` is
+      interpolated separately and combined afterwards, because `magnitude` is
       a hypot of two linear functions and is not itself linear.
-    * ``basis="element"`` -- the value of the triangle *containing* the point.
+    * `basis="element"` -- the value of the triangle *containing* the point.
       Note that is not the nearest centroid: where a large element abuts a small
       one the two disagree, and only the containing triangle is the field.
 
-    ⚠️ **The unit mismatch this exists to make visible is silent.** A kilometre
-    lattice against a metre mesh either misses the mesh altogether or collapses
-    onto a sliver of it at the origin, and matplotlib's
-    ``LinearTriInterpolator`` reports the miss as a *masked* array whose
-    ``np.asarray`` is the fill value rather than ``nan`` -- so a model difference
-    once came back as exactly 0.000 m everywhere and read as agreement. Every
-    path here fills with ``nan``, so a point off the mesh is visible rather than
-    quietly zero.
+    A unit mismatch is otherwise silent: a kilometre lattice against a metre
+    mesh misses the mesh or collapses onto a sliver of it at the origin, and
+    matplotlib's `LinearTriInterpolator` reports a miss as a *masked* array
+    whose `np.asarray` is the fill value rather than `nan`, which reads as
+    agreement. Every path here fills with `nan`, so a point off the mesh is
+    visible rather than quietly zero.
 
-    ``component`` takes the same three names as
-    :func:`~slipsolve.plot.plot_slip`, so a sampled field and a drawn one mean
+    `component` takes the same three names as
+    `slipsolve.plot.plot_slip`, so a sampled field and a drawn one mean
     the same thing.
     """
     from matplotlib.tri import LinearTriInterpolator, Triangulation
@@ -567,12 +542,12 @@ def sample_slip(model, s, z, component="magnitude"):
 def model_rms_min(field, fraction=0.02):
     """A split threshold for a *predicted* field, as a fraction of its own scatter.
 
-    ``rms_min`` means something different once
-    :meth:`~slipsolve.sampling.Observations.from_los` is splitting on a
+    `rms_min` means something different once
+    `slipsolve.sampling.Observations.from_los` is splitting on a
     model: it is no longer a noise level -- there is no noise -- but a statement
-    about how finely the predicted shape should be resolved. So
-    :func:`~slipsolve.diagnostics.scene_report`'s value, which is measured
-    from the data's noise floor, is the wrong number and must not be reused.
+    about how finely the predicted shape should be resolved. So the value from
+    `slipsolve.diagnostics.scene_report`, which is measured from the data's
+    noise floor, is the wrong number and must not be reused.
     """
     values = np.asarray(field, dtype=float)
     finite = values[np.isfinite(values)]
@@ -588,13 +563,12 @@ _DEGENERATE_SLIP = 1e-3
 def _warn_if_degenerate(model, round_index):
     """Warn when the model about to steer the sampling is essentially zero.
 
-    A flat model predicts a flat field, ``model_rms_min`` then returns roughly
+    A flat model predicts a flat field, `model_rms_min` then returns roughly
     zero, and the quadtree splits on floating-point noise -- so the loop *appears*
     to converge (nothing changes between rounds, because nothing is there) on a
-    model that explains none of the data. It is the smoothing weight almost every
-    time: measured on the real D134 scene, anything above about 30 flattened the
-    answer to a peak of 0.004 m while variance reduction sat at a
-    respectable-looking 22%.
+    model that explains none of the data. The usual cause is too large a
+    smoothing weight, which can flatten the model while the variance reduction
+    still looks respectable.
     """
     import warnings
 
@@ -615,7 +589,7 @@ def _fill_nearest(values):
     The forward model returns NaN in a narrow band along the outcrop, where a
     dislocation solution is singular. Left alone, that band would be interpolated
     into a much wider hole on the fine raster, invalidating exactly the near-fault
-    pixels ``refine_within`` exists to keep.
+    pixels `refine_within` exists to keep.
     """
     from scipy.ndimage import distance_transform_edt
 
@@ -632,8 +606,8 @@ def _report(entry):
     change = entry["max_change"]
     change = "     -- " if not np.isfinite(change) else f"{change:7.4f} m"
     flag = "" if entry["converged"] else "   (solver did not converge)"
-    # The mesh is in the line because it can now move between rounds, and a
-    # sample count read beside a silently changed element count means nothing.
+    # The mesh is in the line because it can move between rounds, and a sample
+    # count read beside a silently changed element count means nothing.
     mesh = (f"  mesh={entry['n_elements']}el/{entry['n_nodes']}n"
             if "n_elements" in entry else "")
     print(f"  round {entry['round']}  {entry['field']:>10}  "
