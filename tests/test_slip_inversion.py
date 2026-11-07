@@ -401,6 +401,33 @@ def _bvls(inversion, smoothing):
     return ref.x
 
 
+def test_box_qp_escapes_a_cycling_active_set():
+    """Kernels with most variables on a bound make primal-dual active set cycle; the answer stays exact."""
+    from scipy.optimize import lsq_linear
+
+    from slipsolve.inversion import box_qp
+
+    rng = np.random.default_rng(1)
+    escaped = 0
+    while escaped < 4:
+        n = int(rng.integers(6, 20))
+        m = int(rng.integers(n, 3 * n))
+        scale = rng.uniform(0.5, 6.0) * n / 10
+        design = 1.0 / (1.0 + ((rng.uniform(0, n, m)[:, None] - np.arange(n)[None, :]) / scale) ** 2)
+        weight = 10.0 ** rng.uniform(-4, 0)
+        smooth = np.diff(np.eye(n), 2, axis=0)
+        data = design @ (rng.normal(size=n) * 2.0) + rng.normal(size=m) * 0.3
+        lo, hi = np.zeros(n), np.ones(n)
+        qp = box_qp(design.T @ design + weight * smooth.T @ smooth, design.T @ data, lo, hi, max_iter=2000)
+        if not qp.escaped:
+            continue
+        escaped += 1
+        referee = lsq_linear(np.vstack([design, np.sqrt(weight) * smooth]), np.r_[data, np.zeros(smooth.shape[0])],
+                             bounds=(lo, hi), method="bvls", tol=1e-14, max_iter=20000)
+        assert np.abs(qp.x - referee.x).max() < 1e-9
+        assert qp.kkt < 1e-10
+
+
 def test_box_qp_is_the_bounded_minimiser():
     """Against BVLS on the Cholesky factor, an independent exact method."""
     from scipy.linalg import cholesky

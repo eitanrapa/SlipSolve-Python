@@ -123,6 +123,53 @@ def _boundary_rows(basis, sides, ratio):
     )
 
 
+def _projected_newton(N, g, lo, hi, x, max_iter):
+    """``(at_lo, at_hi, steps)``: the active set of the box QP, by Newton steps projected onto the box (Bertsekas 1982).
+
+    Slower per set than primal-dual active set and duller near an easy answer, but the
+    objective falls at every step, so it cannot cycle, and a step can move many variables onto
+    their bounds at once. From ``x``, clipped into the box. The caller solves on the final set.
+    """
+    def objective(v):
+        return 0.5 * v @ (N @ v) - g @ v
+
+    x = np.clip(x, lo, hi)
+    width = np.minimum(hi - lo, 1.0)
+    width[~np.isfinite(width)] = 1.0
+    near = _SNAP_TO_BOUND * width
+    value = objective(x)
+    exact_sets = None
+    for step in range(1, int(max_iter) + 1):
+        mu = N @ x - g
+        # A variable a hair off its bound, and pushed onto it, goes there. Otherwise it would take
+        # a step of its own and cut every other variable's short.
+        snap_lo, snap_hi = (x <= lo + near) & (mu > 0.0), (x >= hi - near) & (mu < 0.0)
+        if snap_lo.any() or snap_hi.any():
+            x = np.where(snap_lo, lo, np.where(snap_hi, hi, x))
+            mu = N @ x - g
+            value = objective(x)
+        at_lo = (x <= lo) & (mu > 0.0)
+        at_hi = (x >= hi) & (mu < 0.0)
+        key = (at_lo.tobytes(), at_hi.tobytes())
+        if key == exact_sets:
+            return at_lo, at_hi, step
+        free = ~(at_lo | at_hi)
+        direction = np.zeros(g.size)
+        if free.any():
+            direction[free] = cho_solve(cho_factor(N[np.ix_(free, free)], lower=True), -mu[free])
+        alpha = 1.0
+        while True:
+            trial = np.clip(x + alpha * direction, lo, hi)
+            new = objective(trial)
+            if new <= value + _ARMIJO * float(mu @ (trial - x)) or alpha < _SMALLEST_STEP:
+                break
+            alpha *= 0.5
+        unclipped = float(np.abs(trial - (x + direction)).max(initial=0.0)) <= _SNAP_TO_BOUND
+        exact_sets = key if alpha == 1.0 and unclipped else None
+        x, value = trial, new
+    raise RuntimeError(f"the active set did not settle in {int(max_iter)} projected Newton steps")
+
+
 def box_qp(N, g, lo, hi, x0=None, max_iter=100):
     """Minimise ``x'Nx/2 - g'x`` under ``lo <= x <= hi``, exactly, by primal-dual active set.
 
@@ -137,15 +184,19 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
     within 0.1 mm of a bound starts on it), and the set then settles in a few
     steps. Without it every variable starts free.
 
+    Primal-dual active set can cycle when ``N`` is not an M-matrix, and on a kernel with
+    most variables on a bound it does. If the set comes back to a guess already tried, or has not
+    settled in ``max_iter`` steps, the set is found by :func:`_projected_newton` instead, and
+    ``escaped`` says so. The answer depends only on the final set, so a solve that never
+    escapes takes the steps it always did.
+
     Returns a namespace: ``x``; ``nit``, the steps taken; ``at_lo``/``at_hi``, the
     final active set; ``kkt``, the largest gradient left on a free variable
-    relative to ``max|g|``; and ``rcond``, LAPACK's 1-norm estimate of the
-    reciprocal condition number of the free block (1 when nothing is free).
+    relative to ``max|g|``; ``rcond``, LAPACK's 1-norm estimate of the
+    reciprocal condition number of the free block (1 when nothing is free); and ``escaped``.
 
-    Raises ``RuntimeError`` if the active set comes back to a guess it has
-    already tried (primal-dual active set can cycle when ``N`` is not an
-    M-matrix) or has not settled in ``max_iter`` steps, and
-    :class:`numpy.linalg.LinAlgError` if a free block is not positive definite.
+    Raises ``RuntimeError`` if neither settles, and :class:`numpy.linalg.LinAlgError` if
+    a free block is not positive definite.
     """
     g = np.asarray(g, dtype=float)
     lo = np.asarray(lo, dtype=float)
@@ -157,8 +208,9 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
     else:
         at_lo = has_lo & (x0 <= lo + 1e-4)
         at_hi = has_hi & (x0 >= hi - 1e-4)
-    tried = set()
-    for step in range(1, int(max_iter) + 1):
+
+    def solved(at_lo, at_hi):
+        """The solution on an active set, and what is needed to read it."""
         held = at_lo | at_hi
         free = ~held
         x = np.where(at_lo, lo, np.where(at_hi, hi, 0.0))
@@ -168,17 +220,33 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
             block = N[np.ix_(free, free)]
             factor = cho_factor(block, lower=True)
             x[free] = cho_solve(factor, rhs)
-        mu = N @ x - g
+        return x, free, block, factor, N @ x - g
+
+    tried = set()
+    escaped = False
+    limit = int(max_iter)
+    for step in range(1, limit + 1):
+        x, free, block, factor, mu = solved(at_lo, at_hi)
         new_lo = has_lo & ((free & (x < lo)) | (at_lo & (mu > 0)))
         new_hi = has_hi & ((free & (x > hi)) | (at_hi & (mu < 0)))
         if np.array_equal(new_lo, at_lo) and np.array_equal(new_hi, at_hi):
             break
         tried.add(np.packbits(at_lo).tobytes() + np.packbits(at_hi).tobytes())
         if np.packbits(new_lo).tobytes() + np.packbits(new_hi).tobytes() in tried:
-            raise RuntimeError(f"the active set cycled after {step} steps")
+            escaped = True
+            break
         at_lo, at_hi = new_lo, new_hi
     else:
-        raise RuntimeError(f"the active set did not settle in {int(max_iter)} steps")
+        escaped = True
+    if escaped:
+        start = np.clip(x, lo, hi)
+        if x0 is not None:
+            warm = np.clip(np.asarray(x0, dtype=float), lo, hi)
+            if 0.5 * warm @ (N @ warm) - g @ warm < 0.5 * start @ (N @ start) - g @ start:
+                start = warm
+        at_lo, at_hi, more = _projected_newton(N, g, lo, hi, start, limit)
+        step += more
+        x, free, block, factor, mu = solved(at_lo, at_hi)
 
     rcond = 1.0
     if factor is not None:
@@ -186,7 +254,14 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
         rcond = float(rcond) if info == 0 else 0.0
     scale = max(float(np.abs(g).max(initial=0.0)), np.finfo(float).tiny)
     kkt = float(np.abs(mu[free]).max(initial=0.0)) / scale
-    return SimpleNamespace(x=x, nit=step, at_lo=at_lo, at_hi=at_hi, kkt=kkt, rcond=rcond)
+    return SimpleNamespace(x=x, nit=step, at_lo=at_lo, at_hi=at_hi, kkt=kkt, rcond=rcond, escaped=escaped)
+
+
+#: :func:`_projected_newton`: a variable this close to a bound (as a share of its range, at most 1) and
+#: pushed onto it goes there; the sufficient decrease; and the shortest step along the projection arc.
+_SNAP_TO_BOUND = 1e-12
+_ARMIJO = 1e-4
+_SMALLEST_STEP = 1e-10
 
 #: Crustal shear modulus used for moment when no velocity model is supplied.
 DEFAULT_SHEAR_MODULUS = 30e9
@@ -277,8 +352,9 @@ DEFAULT_LSMR_TOL = "auto"
 #: Normal equations square the condition number, so an active-set answer is
 #: refused, with a warning, if its free block is worse conditioned than
 #: :data:`ACTIVE_SET_MAX_COND`, if its KKT residual exceeds
-#: :data:`ACTIVE_SET_MAX_KKT`, if a free block is not positive definite, or if the
-#: active set cycles or does not settle. The fallback is ``"lsq_linear_dense"`` on
+#: :data:`ACTIVE_SET_MAX_KKT`, if a free block is not positive definite, or if
+#: :func:`box_qp` does not settle even by projected Newton steps, after its active set
+#: cycles or runs out. The fallback is ``"lsq_linear_dense"`` on
 #: problems up to :data:`EXACT_FALLBACK_MAX_PARAMS` parameters and
 #: ``"lsq_linear"`` above.
 METHODS = ("lsq_linear", "active_set", "lsq_linear_dense")

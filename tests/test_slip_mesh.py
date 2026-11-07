@@ -91,6 +91,20 @@ def test_normals_are_left_handed(trace, frame):
     np.testing.assert_array_less(0.0, tx * ny - ty * nx)
 
 
+def test_side_past_a_sharp_kink():
+    """A far point whose nearest position is the tip of a kink: one segment alone gets its side wrong."""
+    lon = np.array([-120.0, -119.5, -119.501, -119.0])
+    lat = np.array([36.0, 36.0, 36.02, 36.0])
+    trace = FaultTrace(lon, lat)
+    frame = trace.local_frame()
+    x, y = trace.to_local(frame)
+    above = (x[2] - 200.0, y[2] + 30e3)          # north of the tip, so on the left of a trace running east
+    below = (x[1] - 200.0, y[1] - 30e3)
+    assert trace.side(*above, frame)[0] == 1
+    assert trace.side(*below, frame)[0] == -1
+    assert np.sign(trace.to_curvilinear(*above, frame)[1][0]) == 1
+
+
 def test_side_classification(trace, frame):
     x, y = trace.to_local(frame)
     nx, ny = trace.normals(frame)

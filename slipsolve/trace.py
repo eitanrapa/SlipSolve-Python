@@ -289,6 +289,11 @@ class FaultTrace:
         offset rather than the raw vertex offset, so points near a concave corner
         are classified by the geometry that actually is nearest to them instead of
         by whichever segment's infinite extension happens to win.
+
+        Where the nearest point is a vertex, the side is that of the two segments
+        together (their unit directions added, a pseudo-normal). One segment alone can
+        answer wrongly past a bend sharper than 90 degrees, even for a point tens of km
+        away. Below 90 degrees the two always agree, so nothing else changes.
         """
         px, py = self.to_local(frame)
         x = np.atleast_1d(np.asarray(x, dtype=float)).ravel()
@@ -309,7 +314,17 @@ class FaultTrace:
         nearest = np.argmin(d2, axis=1)
         rows = np.arange(x.size)
         cross = vx[nearest] * wy[rows, nearest] - vy[nearest] * wx[rows, nearest]
-        return d2[rows, nearest], cross, nearest, t[rows, nearest]
+        position = t[rows, nearest]
+        vertex = np.where(position <= 0.0, nearest, np.where(position >= 1.0, nearest + 1, -1))
+        corner = (vertex > 0) & (vertex < px.size - 1)
+        if corner.any():
+            k = vertex[corner]
+            length = np.sqrt(vv)
+            ux, uy = vx / length, vy / length
+            ox, oy = x[corner] - px[k], y[corner] - py[k]
+            both = (ux[k - 1] + ux[k]) * oy - (uy[k - 1] + uy[k]) * ox
+            cross[corner] = np.where(both * cross[corner] < 0.0, -cross[corner], cross[corner])
+        return d2[rows, nearest], cross, nearest, position
 
     def __len__(self):
         return self.lon.size
