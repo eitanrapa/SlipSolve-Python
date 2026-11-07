@@ -39,9 +39,13 @@ layered = ["pygrnwang"]
 # Nikkhoo & Walter triangular dislocation that slipsolve._tde ports, used to
 # cross-check it. tests/test_slip_tde.py skips when it is absent.
 dev = ["pytest", "pytest-xdist", "cutde"]
+# Building the documentation site (mkdocs.yml).
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
 
 [project.urls]
 Homepage = "https://github.com/eitanrapa/SlipSolve-Python"
+Documentation = "https://eitanrapa.github.io/SlipSolve-Python/"
+Repository = "https://github.com/eitanrapa/SlipSolve-Python"
 "Original (MATLAB)" = "https://github.com/x3zou/SlipSolve-Curve"
 
 [tool.setuptools.packages.find]
