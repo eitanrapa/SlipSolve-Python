@@ -229,7 +229,13 @@ result.moment()                                      # the moment deficit rate, 
   (`InterseismicModel.load`).
 - **`nuisance_prior={"asc:d*": 0.002}`** puts a Gaussian prior on matching nuisance terms,
   which ties a track's plane to GNSS instead of leaving it free. It means what it says only
-  with rows weighted by one over their noise (`normalize="none"`).
+  with rows weighted by one over their noise (`normalize="none"`). A pair `(mean, sigma)` gives
+  the prior a mean, which ties a coefficient to a value known from elsewhere:
+  - a block's rotation from a regional block model, through its three coefficients
+    `"block:{name}:ve"`, `":vn"` and `":spin"` (m/yr: the velocity at the block's centre, and
+    the spin's velocity 1000 km from it);
+  - or a pattern's amplitude held at 1 (`{"pattern:far": (1.0, 1e-4)}`), for a signal computed
+    elsewhere, such as the velocity of faults the model leaves out.
 
 **Read with care:**
 

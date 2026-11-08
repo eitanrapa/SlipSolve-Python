@@ -361,6 +361,49 @@ def test_nuisance_prior(problem):
         InterseismicInversion(problem["mesh"], obs, nuisance_prior={"asc:d*": 0.0}, **kwargs)
 
 
+def test_a_pattern_held_at_one_is_its_field_removed(problem):
+    """A far-field signal held at amplitude 1 by a prior with a mean: the same solve as on data without it."""
+    from slipsolve import Pattern
+
+    obs = problem["obs"]
+
+    def far_field(x, y):         # 2 mm/yr of east shear across the area, and some uplift: no block or fault makes it
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        return 2.0 * _MM * y / 100e3, np.zeros_like(x), 0.5 * _MM * (x / 150e3) ** 2
+
+    pattern = Pattern.from_enu("far", far_field)
+    kwargs = dict(blocks=problem["labels"], faults=("north", "south"), ramp={"gnss": "none", "*": "linear"})
+    probe = InterseismicInversion(problem["mesh"], obs, patterns=[pattern], **kwargs)
+    column = probe.ramp[:, probe.ramp_labels.index("pattern:far")]
+    added = Observations(obs.ds.assign(los=("obs", obs.ds["los"].values + column)))
+    held = InterseismicInversion(problem["mesh"], added, patterns=[pattern], nuisance_prior={"pattern:far": (1.0, 1e-6)},
+                                 **kwargs)
+    model = held.solve(smoothing=_LAMBDA, rate=problem["long_term"])
+    assert model.pattern_amplitudes["far"] == pytest.approx(1.0, abs=1e-6)
+    plain = problem["inv"].solve(smoothing=_LAMBDA, rate=problem["long_term"])
+    keep = [held.ramp_labels.index(label) for label in problem["inv"].ramp_labels]
+    assert np.allclose(model.x[:held.n_slip], plain.x[:held.n_slip], atol=1e-6)
+    assert np.allclose(model.ramp[keep], plain.ramp, atol=1e-6)
+    free = InterseismicInversion(problem["mesh"], added, patterns=[pattern], **kwargs).solve(smoothing=_LAMBDA,
+                                                                                          rate=problem["long_term"])
+    assert abs(free.pattern_amplitudes["far"] - 1.0) > 1e-3, "free, the amplitude is the data's"
+
+
+def test_a_rotation_prior_with_a_mean(problem):
+    """A block's three coefficients tied to a pole from elsewhere: the solve and the rigid pre-fit both keep it."""
+    kwargs = dict(blocks=problem["labels"], faults=("north", "south"), ramp={"gnss": "none", "*": "linear"})
+    centres = problem["inv"].block_centres
+    target = EulerPole(problem["poles"]["north"].omega + _axes_at(centres["north"])[2] * 3.0 * _MM)    # 3 mm/yr of spin off
+    axes = _axes_at(centres["north"])
+    coefficients = [float(target.omega @ axis / (axis @ axis)) for axis in axes]
+    prior = {f"block:north:{c}": (value, 1e-7) for c, value in zip(("ve", "vn", "spin"), coefficients)}
+    tied = InterseismicInversion(problem["mesh"], problem["obs"], nuisance_prior=prior, **kwargs)
+    for name, pole in (("solve", tied.solve(smoothing=_LAMBDA).poles["north"]), ("rigid", tied.rigid_poles()["north"])):
+        assert np.abs(pole.omega - target.omega).max() < 1e-6 * np.abs(target.omega).max(), name
+    untied = problem["inv"].rigid_poles()["north"]
+    assert np.abs(untied.omega - target.omega).max() > 1e-3 * np.abs(target.omega).max()
+
+
 def test_every_solver_respects_a_bound_per_node(problem):
     """The three solvers on a plain inversion (no rotations): per-node limits are limits."""
     obs = problem["obs"]

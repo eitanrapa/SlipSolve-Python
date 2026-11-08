@@ -16,8 +16,9 @@ shape changes with time, as viscoelastic flow's does, is several `(g_j, p_j)` sh
 amplitude (`separate_history`).
 
 An amplitude is an unbounded nuisance term, in `SlipInversion.ramp_labels`
-as `"pattern:{name}"`, so `nuisance_prior={"pattern:*": 1.0}` limits one, and blocked
-cross-validation, resolution and saving treat it as they treat a ramp.
+as `"pattern:{name}"`, so `nuisance_prior={"pattern:*": 1.0}` limits one,
+`{"pattern:far": (1.0, 1e-4)}` holds one at 1, and blocked cross-validation, resolution and
+saving treat it as they treat a ramp.
 
 A pattern trades off with slip wherever the two shapes and the two time functions look alike, and
 its amplitude can be pulled by anything else with that shape, so read it beside the fit it buys

@@ -785,6 +785,8 @@ def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.
     """
     from scipy.linalg import cho_solve
 
+    from .inversion import prior_target, regularization_blocks
+
     data, chol = _factorized(inversion, smoothing, ss_ratio, ds_ratio,
                              boundary_ratio, sides, smooth_weighting)
     design = weighted_design(inversion)
@@ -793,10 +795,13 @@ def generalized_cross_validation(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.
     # different space from `weighted_design`, which whitens once. This is
     # exactly what `solve` passes.
     observed = inversion.whiten(inversion.d)
+    # A prior with a mean adds its target to the right-hand side, as `solve` does.
+    _, boundary = regularization_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio, sides, smooth_weighting)
+    target = prior_target(inversion, boundary)
 
     # The linear damped solution and its residual, from the factorization that
     # is already paid for.
-    estimate = cho_solve(chol, design.T @ observed)
+    estimate = cho_solve(chol, design.T @ observed + boundary.T @ target)
     residual = observed - design @ estimate
     rss = float(residual @ residual)
 

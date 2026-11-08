@@ -170,6 +170,37 @@ def regularization_blocks(inversion, ss_ratio=1.0, ds_ratio=3.0, boundary_ratio=
     return smooth, boundary
 
 
+def _prior_entry(pattern, value):
+    """A `nuisance_prior` value checked: a sigma for a zero mean, or `(mean, sigma)`."""
+    if np.ndim(value) == 0:
+        mean, sigma = 0.0, float(value)
+    else:
+        if len(value) != 2:
+            raise ValueError(f"nuisance_prior[{pattern!r}] = {value!r}: give a sigma or (mean, sigma)")
+        mean, sigma = float(value[0]), float(value[1])
+    if not sigma > 0:
+        raise ValueError(f"nuisance_prior[{pattern!r}] = {value!r}: a sigma must be positive")
+    if not np.isfinite(mean) or not np.isfinite(sigma):
+        raise ValueError(f"nuisance_prior[{pattern!r}] = {value!r}: the mean and sigma must be finite")
+    return sigma if mean == 0.0 else (mean, sigma)
+
+
+def _mean_sigma(value):
+    """`(mean, sigma)` of a checked `nuisance_prior` value."""
+    return (0.0, float(value)) if np.ndim(value) == 0 else (float(value[0]), float(value[1]))
+
+
+def prior_target(inversion, boundary):
+    """The right-hand side of the rows no weight touches (`regularization_blocks`' `boundary`).
+
+    `boundary @ prior_mean`: the prior rows' `mean / sigma`, and zero on every other row.
+    """
+    mean = inversion.prior_mean() if hasattr(inversion, "prior_mean") else None
+    if mean is None or not np.any(mean):
+        return np.zeros(boundary.shape[0])
+    return np.asarray(boundary @ mean, dtype=float).ravel()
+
+
 #: The zero-slip rows' weight relative to the median data row in the postseismic and
 #: interseismic modes, inside the 20-500 that coseismic solves typically use.
 EDGE_PIN = 100.0
@@ -557,14 +588,18 @@ class SlipInversion:
         (`slipsolve.interseismic.rotation_columns`), and so is anything with a
         known pattern and an unknown amplitude. A saved model carries the matrix.
 
-        `nuisance_prior` is `{label pattern: sigma}`: a zero-mean Gaussian prior on
-        the nuisance coefficients whose `ramp_labels` match the pattern
-        (`fnmatch.fnmatch`), as rows `coefficient / sigma` beside the data. So it
+        `nuisance_prior` is `{label pattern: sigma}` or `{label pattern: (mean, sigma)}`: a
+        Gaussian prior on the nuisance coefficients whose `ramp_labels` match the pattern
+        (`fnmatch.fnmatch`; the first pattern that matches a label sets it), as rows
+        `(coefficient - mean) / sigma` beside the data. A bare sigma means a zero mean. So it
         means what it says only when the data rows are weighted by one over their noise
         (`Observations.concat(normalize="none")`). A ramp column is a monomial in the
         track's centred span-scaled coordinates, so `"asc:dx": 0.003` lets that
         gradient move about 3 mm (or mm/yr) across the track: how InSAR is tied to GNSS
-        without giving the plane a free hand.
+        without giving the plane a free hand. A mean ties a coefficient to a value known from
+        elsewhere: a block's rotation from a regional model, or a pattern's amplitude held at 1
+        (`{"pattern:far_field": (1.0, 1e-4)}`). Every solve, blocked cross-validation, GCV and
+        the re-solves of `slipsolve.uncertainty` use the mean.
 
         `g` is the Green's matrix when the caller has already built it,
         `(n_obs, basis.n_param)`; the engine is then used only to forward-model.
@@ -614,10 +649,8 @@ class SlipInversion:
 
         self.nuisance_prior = None
         if nuisance_prior:
-            self.nuisance_prior = {str(k): float(v) for k, v in nuisance_prior.items()}
-            for pattern, sigma in self.nuisance_prior.items():
-                if not sigma > 0:
-                    raise ValueError(f"nuisance_prior[{pattern!r}] = {sigma}: a sigma must be positive")
+            self.nuisance_prior = {str(k): _prior_entry(k, v) for k, v in nuisance_prior.items()}
+            for pattern in self.nuisance_prior:
                 if not any(fnmatch(label, pattern) for label in self.ramp_labels):
                     raise ValueError(f"nuisance_prior pattern {pattern!r} matches no nuisance "
                                      f"column; they are {self.ramp_labels}")
@@ -736,14 +769,33 @@ class SlipInversion:
         if not self.nuisance_prior:
             return None
         columns, weights = [], []
-        for i, label in enumerate(self.ramp_labels):
-            for pattern, sigma in self.nuisance_prior.items():
-                if fnmatch(label, pattern):
-                    columns.append(self.n_slip + i)
-                    weights.append(1.0 / sigma)
-                    break
+        for i, (_, sigma) in self._matched_priors():
+            columns.append(self.n_slip + i)
+            weights.append(1.0 / sigma)
         return sp.csr_matrix((weights, (np.arange(len(columns)), columns)),
                              shape=(len(columns), self.n_param))
+
+    def _matched_priors(self):
+        """`[(nuisance index, (mean, sigma)), ...]`: each nuisance column's prior, by its first matching pattern."""
+        out = []
+        for i, label in enumerate(self.ramp_labels):
+            for pattern, value in (self.nuisance_prior or {}).items():
+                if fnmatch(label, pattern):
+                    out.append((i, _mean_sigma(value)))
+                    break
+        return out
+
+    def prior_mean(self):
+        """`(n_param,)`: each parameter's prior mean, zero but where `nuisance_prior` gives one.
+
+        The target of the regularisation rows is these rows times this vector (`prior_target`),
+        so the zero-slip edges and the `temporal` ties, which touch no nuisance column, keep a
+        zero target whatever the means.
+        """
+        mean = np.zeros(self.n_param)
+        for i, (value, _) in self._matched_priors():
+            mean[self.n_slip + i] = value
+        return mean
 
     def with_ramp(self, kind):
         """The same inversion with a different nuisance ramp, **sharing** `G`.
@@ -866,7 +918,7 @@ class SlipInversion:
         rhs = np.concatenate([
             self.whiten(self.d),
             np.zeros(smooth.shape[0]),
-            np.zeros(boundary.shape[0]),
+            prior_target(self, boundary),
         ])
 
         weighted, smooth, boundary, rhs, lo, hi, expand = _free_system(weighted, smooth, boundary, rhs, lo, hi)
@@ -888,7 +940,7 @@ class SlipInversion:
         rhs = np.concatenate([
             self.whiten(self.d),
             np.zeros(smooth.shape[0]),
-            np.zeros(boundary.shape[0]),
+            prior_target(self, boundary),
         ])
         weighted, smooth, boundary, rhs, lo, hi, expand = _free_system(self.whiten(design), smooth, boundary,
                                                                        rhs, lo, hi)
@@ -931,9 +983,11 @@ class SlipInversion:
         """
         block = self._data_block()
         total = block.normal + (smooth.T @ smooth + boundary.T @ boundary).toarray()
+        target = prior_target(self, boundary)
+        rhs = block.rhs + boundary.T @ target if np.any(target) else block.rhs
         problem = None
         try:
-            qp = box_qp(total, block.rhs, lo, hi, x0=block.last, max_iter=max_iter)
+            qp = box_qp(total, rhs, lo, hi, x0=block.last, max_iter=max_iter)
         except (RuntimeError, np.linalg.LinAlgError) as err:
             problem = str(err)
         else:
@@ -950,7 +1004,7 @@ class SlipInversion:
         n = self.n_slip
         prediction = self.g @ x[:n] + (self.ramp @ x[n:] if self.n_ramp else 0.0)
         misfit = self.whiten(self.d - prediction)
-        rough, edge = smooth @ x, boundary @ x
+        rough, edge = smooth @ x, boundary @ x - target
         free = ~(qp.at_lo | qp.at_hi)
         if verbose:
             print(f"active set: {qp.nit} steps, {int(free.sum())} of {x.size} "
@@ -958,7 +1012,7 @@ class SlipInversion:
         return SimpleNamespace(
             x=x, status=1, nit=qp.nit, success=True, method="active_set",
             cost=0.5 * float(misfit @ misfit + rough @ rough + edge @ edge),
-            optimality=float(np.abs((total @ x - block.rhs)[free]).max(initial=0.0)),
+            optimality=float(np.abs((total @ x - rhs)[free]).max(initial=0.0)),
             kkt=qp.kkt, condition=1.0 / qp.rcond,
             active_mask=np.where(qp.at_lo, -1, np.where(qp.at_hi, 1, 0)),
             message=f"active set settled in {qp.nit} steps; KKT residual {qp.kkt:.1e}",

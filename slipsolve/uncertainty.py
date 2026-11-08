@@ -40,7 +40,7 @@ import numpy as np
 
 from .calibrate import recovery_score
 from .covariance import whitening_factors
-from .inversion import ACTIVE_SET_MAX_KKT, box_qp, regularization_blocks
+from .inversion import ACTIVE_SET_MAX_KKT, box_qp, prior_target, regularization_blocks
 from .regularize import scale_smoothing, slip_bounds
 from .resolution import weighted_design
 
@@ -73,6 +73,7 @@ class _Repeat:
         scaled = scale_smoothing(smooth, model.smoothing if smoothing is None else smoothing)
         block = inversion._data_block()
         self.total = block.normal + (scaled.T @ scaled + boundary.T @ boundary).toarray()
+        self.prior_rhs = boundary.T @ prior_target(inversion, boundary)     # a prior's mean, as `solve` has it
         self.weighted = weighted_design(inversion)
         lo, hi = slip_bounds(inversion.basis.n_basis, options["strike"], options["dip"], options["polarity"])
         self.lo = np.concatenate([lo, np.full(inversion.n_ramp, -np.inf)])
@@ -91,7 +92,7 @@ class _Repeat:
 
     def solve(self, d, x0, resettle=True, rounds=4, tolerance=1e-5):
         """`(x, extra)`: the bounded solution for data `d`; `extra` is what the model class needs beside it."""
-        rhs = self.weighted.T @ self.inversion.whiten(d)
+        rhs = self.weighted.T @ self.inversion.whiten(d) + self.prior_rhs
         if not (resettle and self.resettles):
             return self._bounded(rhs, self.lo, self.hi, x0), None
         lo, hi, long_term = self.limits_for(x0, self.coupling)

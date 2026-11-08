@@ -525,6 +525,12 @@ class InterseismicInversion(SlipInversion):
             keep = np.ones_like(keep)
         design = self.whiten(self.ramp)[keep]
         data = self.whiten(self.d)[keep]
+        prior = self.prior_rows()
+        if prior is not None and prior.shape[0]:
+            # The nuisance priors hold here too: a rotation tied to a regional model, a pattern held at 1.
+            rows = prior[:, self.n_slip:].toarray()
+            design = np.vstack([design, rows])
+            data = np.concatenate([data, rows @ self.prior_mean()[self.n_slip:]])
         coefficients = np.linalg.lstsq(design, data, rcond=None)[0]
         return (poles_from_coefficients(self.ramp_labels, coefficients, self.block_centres),
                 strain_from_coefficients(self.ramp_labels, coefficients))
