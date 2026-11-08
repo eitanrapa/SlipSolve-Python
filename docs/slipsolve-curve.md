@@ -5,8 +5,8 @@ slipsolve is a Python translation of, and extension to,
 package for slip inversion on curved faults, which descends from
 [SlipSolve](https://github.com/ZeyuJin/geodetic_inversion) by Zeyu Jin. It is
 neither of those: the `-python` in the distribution name says which one you are
-installing. Both are MIT licensed, and this package's licence retains the original
-copyright notice.
+installing. SlipSolve-Curve is MIT licensed, and so is this package, whose licence
+keeps SlipSolve-Curve's copyright notice.
 
 ## What carries over
 

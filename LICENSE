@@ -3,11 +3,6 @@ MIT License
 Copyright (c) 2026 Eitan Rapaport
 Copyright (c) 2026 Xiaoyu Zou
 
-This package is a Python translation of, and extension to, SlipSolve-Curve
-(https://github.com/x3zou/SlipSolve-Curve) by Xiaoyu Zou, which is itself
-descended from SlipSolve by ZeyuJin. Both are MIT licensed, and the original
-copyright notice is retained above as that license requires.
-
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
@@ -25,10 +20,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE ON THE NAME. This package is named for its lineage, not to claim it. The
-original SlipSolve is ZeyuJin's MATLAB code; SlipSolve-Curve is Xiaoyu Zou's
-MATLAB extension of it. This is a Python translation of the latter, and the
-"-python" in the distribution name is there to distinguish it from both.
