@@ -24,6 +24,7 @@ import warnings
 
 import numpy as np
 import scipy.sparse as sp
+from scipy.interpolate import RegularGridInterpolator
 from scipy.sparse.linalg import lsqr
 
 from .trace import VERTICAL_TOL_DEG, FaultTrace, dip_offset  # noqa: F401  (re-exported)
@@ -230,6 +231,16 @@ class FaultSurface:
         self.attrs = dict(attrs or {})
 
     # -- construction ------------------------------------------------------
+    def on_lattice(self, s_nodes, z_nodes):
+        """This field on another lattice, bilinear and linear just past its edges: the same fault for another mesh's layout.
+
+        The arc lengths must be measured the same way, so along a trace resampled at the same spacing. It has no centre grid.
+        """
+        s_nodes, z_nodes = np.asarray(s_nodes, dtype=float), np.asarray(z_nodes, dtype=float)
+        field = RegularGridInterpolator((self.z_nodes, self.s_nodes), self.cross_nodes, bounds_error=False, fill_value=None)
+        zz, ss = np.meshgrid(z_nodes, s_nodes, indexing="ij")
+        return FaultSurface(s_nodes, z_nodes, field((zz, ss)), attrs=self.attrs)
+
     @classmethod
     def from_control_points(cls, s, z, cross, s_nodes, z_nodes,
                             smoothness=DEFAULT_SMOOTHNESS, weights=None, **kwargs):

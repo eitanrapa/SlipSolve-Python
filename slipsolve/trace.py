@@ -466,3 +466,27 @@ def _arc_length(x, y):
     """Cumulative distance along a polyline, starting at 0."""
     step = np.hypot(np.diff(x), np.diff(y))
     return np.concatenate([[0.0], np.cumsum(step)])
+
+
+class TraceSet:
+    """Several traces read as one by what only asks how far away a fault is: the sampling of observations.
+
+    `Observations.from_los`'s `exclude_within` and `refine_within` then measure from
+    the nearest of them. The frame it offers is the first trace's.
+    """
+
+    def __init__(self, traces):
+        self.traces = list(traces)
+        if not self.traces:
+            raise ValueError("a TraceSet needs a trace")
+
+    def distance(self, x, y, frame):
+        """The distance to the nearest trace, metres."""
+        return np.min([trace.distance(x, y, frame) for trace in self.traces], axis=0)
+
+    def local_frame(self):
+        """The first trace's `local_frame()`."""
+        return self.traces[0].local_frame()
+
+    def __repr__(self):
+        return f"<TraceSet of {len(self.traces)}>"

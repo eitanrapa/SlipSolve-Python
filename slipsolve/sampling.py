@@ -402,6 +402,12 @@ class Observations:
         """Boolean mask of the samples from track `name`."""
         return self.ds["track"].values == name
 
+    def frame_looks(self):
+        """`(look_x, look_y, look_u)`: each row's look vector in the local frame's own axes."""
+        ds = self.ds
+        return frame_looks(self.frame, ds["x"].values, ds["y"].values,
+                           ds["look_e"].values, ds["look_n"].values, ds["look_u"].values)
+
     # -- persistence -------------------------------------------------------
     def persist(self, workspace, name=None, overwrite=False, **params):
         """Write to a Zarr stage and return the reopened set.
@@ -432,6 +438,32 @@ class Observations:
 
     def __repr__(self):
         return f"<Observations n={self.n} tracks={self.tracks}>"
+
+
+def frame_looks(frame, x, y, look_e, look_n, look_u):
+    """Geographic east/north/up look vectors rotated into a `LocalFrame`'s axes.
+
+    A look vector is measured against true east and north, but the Green's functions
+    return displacement along the frame's x and y, and a transverse Mercator's grid
+    north turns away from true north with distance from its central meridian (by about
+    `d_lon * sin(lat)`). A plain coseismic run ignores this: over its few hundred km,
+    near a low-latitude meridian, the turn is a fraction of a degree. It is 3 degrees at
+    500 km from the meridian at 36 N, which on 20 mm/yr of elastic signal is 1 mm/yr, so
+    the postseismic and interseismic modes rotate by default.
+
+    The frame's projection is conformal, so true east and north stay perpendicular; each
+    is read off the projection by a small step. The vertical is untouched.
+    """
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    look_e, look_n = np.asarray(look_e, dtype=float), np.asarray(look_n, dtype=float)
+    lon, lat = frame.to_lonlat(x, y)
+    step = 1e-3                                     # degrees: about 100 m
+    east = np.array(frame.to_local(lon + step, lat)) - np.array([x, y])
+    north = np.array(frame.to_local(lon, lat + step)) - np.array([x, y])
+    east = east / np.hypot(*east)
+    north = north / np.hypot(*north)
+    return (look_e * east[0] + look_n * north[0], look_e * east[1] + look_n * north[1],
+            np.asarray(look_u, dtype=float))
 
 
 def stack_epsg(ds):

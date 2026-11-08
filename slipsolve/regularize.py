@@ -340,11 +340,15 @@ def slip_bounds(n_elements, strike=(-10.0, 10.0), dip=(-10.0, 10.0), polarity=No
     cheapest real constraint available: it halves the search space and removes
     the physically absurd alternating-sense solutions that smoothing alone still
     permits.
+
+    Each limit is a scalar or one value per parameter, as a coupling bound needs (the
+    long-term slip rate differs from node to node; see `slipsolve.interseismic`).
     """
-    lo = np.concatenate([np.full(n_elements, float(strike[0])),
-                        np.full(n_elements, float(dip[0]))])
-    hi = np.concatenate([np.full(n_elements, float(strike[1])),
-                        np.full(n_elements, float(dip[1]))])
+    def limit(value):
+        return np.broadcast_to(np.asarray(value, dtype=float), (n_elements,))
+
+    lo = np.concatenate([limit(strike[0]), limit(dip[0])])
+    hi = np.concatenate([limit(strike[1]), limit(dip[1])])
 
     if polarity is not None:
         for block, flag in enumerate(list(polarity)[:2]):

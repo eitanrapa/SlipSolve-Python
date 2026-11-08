@@ -81,6 +81,7 @@ nav:
       - Dip sweeps: guide/dip-sweeps.md
       - Bimaterial faults: guide/bimaterial.md
       - 3-D heterogeneity: guide/heterogeneity.md
+      - Postseismic and interseismic: guide/time-dependent.md
   - API reference:
       - api/index.md
       - Geometry: api/geometry.md
@@ -91,5 +92,6 @@ nav:
       - Resolution and calibration: api/resolution.md
       - Geometry search: api/geometry-search.md
       - Plotting: api/plotting.md
+      - Postseismic and interseismic: api/time-dependent.md
   - Relation to SlipSolve-Curve: slipsolve-curve.md
   - Development: development.md

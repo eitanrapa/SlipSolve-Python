@@ -29,6 +29,10 @@ print(model.moment_magnitude)
 model.save("model.slip.zip")
 ```
 
+Two more modes rest on the same machinery: slip that changes with time from dated series
+(`slipsolve.temporal.TimeDependentInversion`, postseismic), and rigid blocks plus
+back-slip from velocities (`slipsolve.interseismic.InterseismicInversion`).
+
 Main entry points:
 
 - Geometry: `FaultTrace`, `LocalFrame` and `FaultMesh` (`vertical`, `curved`
@@ -88,14 +92,20 @@ from .diagnostics import (
 from .edgrn import EdgrnTables, VelocityModel, run_edgrn, write_edgrn_input
 from .evidence import GeometryEvidence, smoothing_precision
 from .frame import LocalFrame
+from .gnss import (StationSeries, common_mode, fit_trajectory, gnss_observations, gnss_series, noise_levels,
+                   prepare_stations, read_midas, read_steps, read_tenv3, screen_velocities, trajectory_design,
+                   velocity_observations)
 from .greens import HalfSpaceTDE
 from .heterogeneity import HeterogeneousEngine, VoxelModel
+from .interseismic import (EulerPole, InterseismicInversion, InterseismicModel, block_labels,
+                           coupling_bounds, rotation_columns, side_labels, strain_from_coefficients)
 from .inversion import SlipInversion, SlipModel
 from .layered import LayeredPointSource
 from .layered_tde import LayeredTDE
 from .layout import MeshLayout, graded_layout, lloyd_layout, triangulate
 from .mesh import FaultMesh
 from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
+from .patterns import Pattern, poroelastic_pattern, separate_history
 from .predict import (iterate_sampling, model_rms_min, predicted_los,
                       sample_slip)
 from .resolution import (
@@ -110,6 +120,7 @@ from .resolution import (
     blocked_cross_validation,
     blocked_cv_curve,
     blocked_folds,
+    cell_folds,
     gcv_curve,
     generalized_cross_validation,
     resolution_bias,
@@ -124,7 +135,10 @@ from .sampling import Observations
 from .surface import FaultSurface, gridfit
 from .sweep import (BootstrapResult, DipSweep, SweepResult, dip_profile_offsets,
                     geometry_key, segment_breaks)
-from .trace import FaultSegment, FaultTrace
+from .temporal import SlipSnapshot, TimeBasis, TimeDependentInversion, TimeDependentModel, TrackSeries
+from .trace import FaultSegment, FaultTrace, TraceSet
+from .tsurf import TSurf, read_tsurf
+from .uncertainty import Ensemble, checkerboard, monte_carlo, recovery, with_solution
 from .wavenumber import RemainderTables
 
 __all__ = [
@@ -135,13 +149,18 @@ __all__ = [
     "DipSweep",
     "EdgrnTables",
     "ElementBasis",
+    "Ensemble",
+    "EulerPole",
     "FaultMesh",
     "FaultSegment",
     "FaultSurface",
     "FaultTrace",
+    "TraceSet",
     "GeometryEvidence",
     "HalfSpaceTDE",
     "HeterogeneousEngine",
+    "InterseismicInversion",
+    "InterseismicModel",
     "LayeredPointSource",
     "LayeredTDE",
     "LocalFrame",
@@ -149,18 +168,31 @@ __all__ = [
     "MeshLayout",
     "NodeBasis",
     "Observations",
+    "Pattern",
     "RemainderTables",
     "RigidityContrast",
     "SlipInversion",
     "SlipModel",
+    "SlipSnapshot",
+    "StationSeries",
     "SweepResult",
+    "TSurf",
+    "TimeBasis",
+    "TimeDependentInversion",
+    "TimeDependentModel",
+    "TrackSeries",
     "VelocityModel",
     "VoxelModel",
     "adapt_layout",
+    "block_labels",
     "bound_fraction",
     "calibrate",
+    "cell_folds",
     "cell_size_ladder",
+    "checkerboard",
+    "common_mode",
     "correlated_field",
+    "coupling_bounds",
     "data_importance",
     "dip_profile_offsets",
     "element_resolution",
@@ -171,23 +203,35 @@ __all__ = [
     "epic_prior",
     "fit_covariance",
     "fit_reml",
+    "fit_trajectory",
     "frame_lattice",
     "geometry_key",
     "gcv_curve",
     "generalized_cross_validation",
+    "gnss_observations",
+    "gnss_series",
     "graded_layout",
     "gridfit",
     "iterate_sampling",
     "lloyd_layout",
     "model_rms_min",
+    "monte_carlo",
     "noise_floor",
+    "noise_levels",
     "observation_covariance",
     "posterior_covariance",
+    "poroelastic_pattern",
     "predicted_los",
+    "prepare_stations",
     "ramp_content",
     "ramp_leakage",
     "ramp_sweep",
     "read_grd",
+    "read_midas",
+    "read_steps",
+    "read_tenv3",
+    "read_tsurf",
+    "recovery",
     "resample_all",
     "resample_to_frame",
     "resolution_bias",
@@ -196,16 +240,24 @@ __all__ = [
     "resolution_kernels",
     "resolution_matrix",
     "resolution_report",
+    "rotation_columns",
     "run_edgrn",
     "sample_slip",
     "scene_covariance",
     "scene_report",
+    "screen_velocities",
     "segment_breaks",
+    "separate_history",
+    "side_labels",
+    "strain_from_coefficients",
     "size_field",
     "smoothing_precision",
     "target_element_size",
+    "trajectory_design",
     "triangulate",
+    "velocity_observations",
     "weighted_design",
     "whitening_factors",
+    "with_solution",
     "write_edgrn_input",
 ]

@@ -115,7 +115,7 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
                      inversion_kwargs=None, solve_kwargs=None, max_rounds=5,
                      tol=DEFAULT_TOL, spacing=DEFAULT_SPACING, refine_within=None,
                      rms_fraction=0.02, normalize="sqrt_count", mesh_adapt=None,
-                     sampling_field="model", verbose=True):
+                     sampling_field="model", verbose=True, make_inversion=None, fixed=()):
     """Run the Wang & Fialko loop: sample, invert, re-sample from the model.
 
     `scenes` is a `{name: stack}` mapping of gridded LOS products -- put them on
@@ -175,9 +175,26 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
     a fixed mesh and converges on the exact criterion. Set it to `max_rounds` to
     keep adapting throughout, and expect the loop to run out of rounds rather
     than converge.
+
+    **The other modes.** `make_inversion(mesh, obs)` builds each round's inversion in place of
+    `SlipInversion(mesh, obs, **inversion_kwargs)`, which is how an
+    `slipsolve.interseismic.InterseismicInversion` with its blocks comes in: its labels
+    follow the round's samples. Its back-slip's field is what is split on, so samples go to where
+    coupling changes, and not to where blocks rotate. `fixed` is observations to keep every round as they are, such as GNSS.
+    `tol` is in the model's own unit, and its default means metres: in m/yr, give `tol=1e-4` or the loop stops at once.
+    `trace` may be a `slipsolve.trace.TraceSet`, and `mesh_adapt["sheets"]` remeshes a
+    joined mesh sheet by sheet. A series is sampled from the last round's fields, which are in
+    `history[-1]["fields"]`, by `TrackSeries.from_los(..., field=)`.
     """
     from .inversion import SlipInversion
 
+    if make_inversion is not None and inversion_kwargs:
+        raise ValueError("give make_inversion or inversion_kwargs, not both")
+
+    def build(mesh, obs):
+        return make_inversion(mesh, obs) if make_inversion is not None else SlipInversion(mesh, obs, **inversion_kwargs)
+
+    fixed = list(fixed)
     scenes = dict(scenes)
     if not scenes:
         raise ValueError("Need at least one scene to sample")
@@ -215,8 +232,8 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
         }
         parts.append(sample(name, stack, **extra))
 
-    obs = Observations.concat(parts, normalize=normalize)
-    inversion = SlipInversion(mesh, obs, **inversion_kwargs)
+    obs = Observations.concat(parts + fixed, normalize=normalize)
+    inversion = build(mesh, obs)
     model = inversion.solve(**solve_kwargs)
     history = [_entry(0, obs, model, mesh, "data", float("nan"))]
     if verbose:
@@ -244,8 +261,8 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
             mesh = _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs,
                                report=report)
 
-        obs = Observations.concat(parts, normalize=normalize)
-        inversion = SlipInversion(mesh, obs, **inversion_kwargs)
+        obs = Observations.concat(parts + fixed, normalize=normalize)
+        inversion = build(mesh, obs)
         model = inversion.solve(**solve_kwargs)
 
         if previous_probe is not None and model.element_slip.size != previous.size:
@@ -256,6 +273,9 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
         history.append(_entry(round_index, obs, model, mesh,
                               sampling_field if sampling_field != "model" else "model",
                               change))
+        history[-1]["fields"] = fields
+        if len(history) > 2:
+            history[-2].pop("fields", None)
         if verbose:
             _report(history[-1])
         if change <= tol:
@@ -284,7 +304,7 @@ def _adapt_spec(mesh_adapt, max_rounds, mesh=None):
     # in a random walk with no restoring force. Resolved here, every round aims
     # at the same integer.
     if spec.get("budget", "conserve") == "conserve" and mesh is not None:
-        spec["budget"] = int(mesh.n_elements)
+        spec["budget"] = [int(sheet.n_elements) for sheet in mesh.sheets()] if "sheets" in spec else int(mesh.n_elements)
     # Same trap one level down: `target_element_size` and `kernel_element_size`
     # default their clamps to `current.min()/max_ratio` and `current.max()*ratio`,
     # recomputed from this round's mesh, so the clamp would follow the drift and
@@ -296,7 +316,11 @@ def _adapt_spec(mesh_adapt, max_rounds, mesh=None):
         ratio = float(spec.get("max_ratio", 3.0))
         spec.setdefault("size_min", float(current.min()) / ratio)
         spec.setdefault("size_max", float(current.max()) * ratio)
-    if "geometry" not in spec:
+    if "sheets" in spec:
+        count = len(mesh.sheets()) if mesh is not None else len(spec["sheets"])
+        if len(spec["sheets"]) != count or not all("trace" in sheet for sheet in spec["sheets"]):
+            raise ValueError(f"mesh_adapt['sheets'] needs one dict with a 'trace' (and 'geometry' if it has one) for each of the mesh's {count} sheets")
+    elif "geometry" not in spec:
         raise ValueError(
             "mesh_adapt needs a 'geometry' entry: a layout says where the nodes "
             "go, not what the fault is, so rebuilding the mesh needs the same "
@@ -415,12 +439,17 @@ def _adapt_mesh(mesh, inversion, trace, frame, adapt, solve_kwargs, report=None)
             **{k: v for k, v in adapt.items()
                if k in ("target", "gain", "max_ratio", "size_min", "size_max")}
         )
-    layout = adapt_layout(
-        mesh, sizes, budget=adapt.get("budget", "conserve"),
-        balance=adapt.get("balance", MAX_COUNT_RATIO),
-        **{k: v for k, v in adapt.items()
-           if k in ("structure", "iterations", "seed")},
-    )
+    options = dict(balance=adapt.get("balance", MAX_COUNT_RATIO),
+                   **{k: v for k, v in adapt.items() if k in ("structure", "iterations", "seed")})
+    if "sheets" in adapt:
+        sheets = mesh.sheets()
+        parts = np.split(np.asarray(sizes), np.cumsum([sheet.n_elements for sheet in sheets])[:-1])
+        budgets = adapt.get("budget", "conserve")
+        budgets = budgets if isinstance(budgets, (list, tuple)) else [budgets] * len(sheets)
+        return FaultMesh.join([
+            FaultMesh.from_layout(adapt_layout(sheet, part, budget=budget, **options), spec["trace"], frame, **spec.get("geometry", {}))
+            for sheet, part, budget, spec in zip(sheets, parts, budgets, adapt["sheets"])])
+    layout = adapt_layout(mesh, sizes, budget=adapt.get("budget", "conserve"), **options)
     return FaultMesh.from_layout(layout, trace, frame, **adapt["geometry"])
 
 
@@ -432,7 +461,7 @@ def _probe_lattice(mesh, n_along=200, n_down=40):
     number mean the same thing across a re-mesh -- and it stays in metres of
     slip, so `tol` keeps its meaning.
     """
-    params = mesh.params
+    params = _laid_end_to_end(mesh, mesh.params, "joined_nodes")
     s = np.linspace(params[:, 0].min(), params[:, 0].max(), int(n_along))
     z = np.linspace(params[:, 1].min(), params[:, 1].max(), int(n_down))
     ss, zz = np.meshgrid(s, z)
@@ -463,8 +492,22 @@ def _probe_slip(mesh, model, probe):
     """
     from scipy.spatial import cKDTree
 
-    index = cKDTree(mesh.element_params).query(probe)[1]
+    index = cKDTree(_laid_end_to_end(mesh, mesh.element_params, "joined_elements")).query(probe)[1]
     return model.element_slip[index]
+
+
+def _laid_end_to_end(mesh, params, counts):
+    """`(s, z)` with a joined mesh's sheets one after another, since each one's `s` starts near zero: for a probe."""
+    if counts not in mesh.attrs:
+        return params
+    edges = np.cumsum([0, *mesh.attrs["joined_nodes"]])
+    lengths = [np.ptp(mesh.params[a:b, 0]) for a, b in zip(edges[:-1], edges[1:])]
+    out = np.array(params, dtype=float)
+    start = 0
+    for count, offset in zip(mesh.attrs[counts], np.cumsum([0.0, *lengths[:-1]])):
+        out[start:start + count, 0] += offset
+        start += count
+    return out
 
 
 def sample_slip(model, s, z, component="magnitude"):

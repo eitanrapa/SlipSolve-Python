@@ -32,6 +32,7 @@ plausible-looking model with a meaningless variance reduction -- so
 """
 
 import warnings
+from fnmatch import fnmatch
 from types import SimpleNamespace
 
 import numpy as np
@@ -142,7 +143,64 @@ def _boundary_rows(basis, sides, ratio):
     )
 
 
-def _projected_newton(N, g, lo, hi, x, max_iter):
+def regularization_blocks(inversion, ss_ratio=1.0, ds_ratio=3.0, boundary_ratio=1.0,
+                          sides=("bottom", "left", "right"), smooth_weighting="uniform"):
+    """`(smooth, boundary)`: every regularisation row of a solve, padded for the nuisance columns.
+
+    The one place these rows are assembled, so `SlipInversion.solve` and
+    `slipsolve.resolution` cannot drift apart. `smooth` is unscaled
+    (`slipsolve.regularize.scale_smoothing` applies the weight). `boundary` holds
+    the rows no weight touches: the zero-slip edges and `SlipInversion.prior_rows`.
+    """
+    if inversion.basis.name == "element":
+        smooth = neighbor_smoothing(inversion.mesh.neighbors, ss_ratio, ds_ratio,
+                                    weighting=smooth_weighting, mesh=inversion.mesh)
+    else:
+        # A continuous field lives on the nodes, so neighbouring *elements* is
+        # the wrong thing to difference; the surface Laplacian is the right one.
+        smooth = laplace_beltrami(inversion.mesh, ss_ratio, ds_ratio)
+    boundary = _boundary_rows(inversion.basis, sides, boundary_ratio * inversion.boundary_scale)
+    n_ramp = inversion.n_ramp
+    if n_ramp:
+        smooth = sp.hstack([smooth, sp.csr_matrix((smooth.shape[0], n_ramp))], format="csr")
+        boundary = sp.hstack([boundary, sp.csr_matrix((boundary.shape[0], n_ramp))], format="csr")
+    prior = inversion.prior_rows()
+    if prior is not None and prior.shape[0]:
+        boundary = sp.vstack([boundary, prior], format="csr")
+    return smooth, boundary
+
+
+#: The zero-slip rows' weight relative to the median data row in the postseismic and
+#: interseismic modes, inside the 20-500 that coseismic solves typically use.
+EDGE_PIN = 100.0
+
+
+def pinned_edges(weights):
+    """A `boundary_scale` that pins the edges whatever the units: `boundary_ratio=1` is `EDGE_PIN` median rows.
+
+    With rows weighted by one over their noise, an edge value then costs as much as
+    `EDGE_PIN` times itself in misfit, in metres or in m/yr. On a fault locked at 30 mm/yr
+    with the plain ratio of 1 the bottom edge simply follows the smoothing.
+    """
+    return EDGE_PIN * float(np.median(weights))
+
+
+def assemble_design(engine, mesh, basis, points):
+    """The Green's matrix of `mesh` in `basis` at `points` (`x, y, look_e, look_n, look_u`).
+
+    An engine that can integrate a basis function directly is given the basis, so a
+    nodal column is the integral of the tent itself. One that cannot -- the closed-form
+    triangular dislocation, which is defined on a patch of *constant* slip -- assembles
+    per element and has the basis projected on afterwards. Both preserve the moment
+    exactly; only the first gets the near-field shape of a linearly varying slip patch right.
+    """
+    if getattr(engine, "supports_basis", False):
+        return engine.los_matrix(mesh, *points, basis=basis)
+    element_g = engine.los_matrix(mesh, *points)
+    return element_g if basis.name == "element" else element_g @ _blocked(basis.projection())
+
+
+def _projected_newton(N, g, lo, hi, fixed, x, max_iter):
     """`(at_lo, at_hi, steps)`: the active set of the box QP, by Newton steps projected onto the box (Bertsekas 1982).
 
     Slower per set than primal-dual active set and duller near an easy answer, but the
@@ -153,6 +211,7 @@ def _projected_newton(N, g, lo, hi, x, max_iter):
         return 0.5 * v @ (N @ v) - g @ v
 
     x = np.clip(x, lo, hi)
+    x[fixed] = lo[fixed]
     width = np.minimum(hi - lo, 1.0)
     width[~np.isfinite(width)] = 1.0
     near = _SNAP_TO_BOUND * width
@@ -162,13 +221,13 @@ def _projected_newton(N, g, lo, hi, x, max_iter):
         mu = N @ x - g
         # A variable a hair off its bound, and pushed onto it, goes there. Otherwise it would take
         # a step of its own and cut every other variable's short.
-        snap_lo, snap_hi = (x <= lo + near) & (mu > 0.0), (x >= hi - near) & (mu < 0.0)
+        snap_lo, snap_hi = (x <= lo + near) & (mu > 0.0) & ~fixed, (x >= hi - near) & (mu < 0.0) & ~fixed
         if snap_lo.any() or snap_hi.any():
             x = np.where(snap_lo, lo, np.where(snap_hi, hi, x))
             mu = N @ x - g
             value = objective(x)
-        at_lo = (x <= lo) & (mu > 0.0)
-        at_hi = (x >= hi) & (mu < 0.0)
+        at_lo = fixed | ((x <= lo) & (mu > 0.0))
+        at_hi = (x >= hi) & (mu < 0.0) & ~fixed
         key = (at_lo.tobytes(), at_hi.tobytes())
         if key == exact_sets:
             return at_lo, at_hi, step
@@ -203,6 +262,9 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
     within 0.1 mm of a bound starts on it), and the set then settles in a few
     steps. Without it every variable starts free.
 
+    A variable whose limits coincide (within `FIXED_WIDTH`) is held there
+    throughout, whatever its gradient: it was never free.
+
     Primal-dual active set can cycle when `N` is not an M-matrix, and on a kernel with
     most variables on a bound it does. If the set comes back to a guess already tried, or has not
     settled in `max_iter` steps, the set is found by `_projected_newton` instead, and
@@ -221,12 +283,13 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
     lo = np.asarray(lo, dtype=float)
     hi = np.asarray(hi, dtype=float)
     has_lo, has_hi = np.isfinite(lo), np.isfinite(hi)
+    fixed = has_lo & has_hi & (hi - lo <= FIXED_WIDTH)
     if x0 is None:
-        at_lo = np.zeros(g.size, dtype=bool)
+        at_lo = fixed.copy()
         at_hi = np.zeros(g.size, dtype=bool)
     else:
-        at_lo = has_lo & (x0 <= lo + 1e-4)
-        at_hi = has_hi & (x0 >= hi - 1e-4)
+        at_lo = (has_lo & (x0 <= lo + 1e-4) & ~fixed) | fixed
+        at_hi = has_hi & (x0 >= hi - 1e-4) & ~fixed
 
     def solved(at_lo, at_hi):
         """The solution on an active set, and what is needed to read it."""
@@ -246,8 +309,8 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
     limit = int(max_iter)
     for step in range(1, limit + 1):
         x, free, block, factor, mu = solved(at_lo, at_hi)
-        new_lo = has_lo & ((free & (x < lo)) | (at_lo & (mu > 0)))
-        new_hi = has_hi & ((free & (x > hi)) | (at_hi & (mu < 0)))
+        new_lo = (has_lo & ((free & (x < lo)) | (at_lo & (mu > 0)))) | fixed
+        new_hi = has_hi & ((free & (x > hi)) | (at_hi & (mu < 0))) & ~fixed
         if np.array_equal(new_lo, at_lo) and np.array_equal(new_hi, at_hi):
             break
         tried.add(np.packbits(at_lo).tobytes() + np.packbits(at_hi).tobytes())
@@ -263,7 +326,7 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
             warm = np.clip(np.asarray(x0, dtype=float), lo, hi)
             if 0.5 * warm @ (N @ warm) - g @ warm < 0.5 * start @ (N @ start) - g @ start:
                 start = warm
-        at_lo, at_hi, more = _projected_newton(N, g, lo, hi, start, limit)
+        at_lo, at_hi, more = _projected_newton(N, g, lo, hi, fixed, start, limit)
         step += more
         x, free, block, factor, mu = solved(at_lo, at_hi)
 
@@ -281,6 +344,33 @@ def box_qp(N, g, lo, hi, x0=None, max_iter=100):
 _SNAP_TO_BOUND = 1e-12
 _ARMIJO = 1e-4
 _SMALLEST_STEP = 1e-10
+
+#: Limits this close together fix a variable: `box_qp` holds it, and the scipy
+#: solvers, which refuse equal limits and crawl on nearly equal ones, never see it
+#: (`_free_system`). In the solve's own units: m, or m/yr.
+FIXED_WIDTH = 1e-9
+
+
+def _free_system(weighted, smooth, boundary, rhs, lo, hi):
+    """The stacked system without its fixed variables: `(weighted, smooth, boundary, rhs, lo, hi, expand)`.
+
+    A fixed variable's value moves to the right-hand side; `expand` puts it back in the
+    solver's result. With none fixed everything passes through untouched.
+    """
+    free = hi - lo > FIXED_WIDTH
+    if free.all():
+        return weighted, smooth, boundary, rhs, lo, hi, lambda result: result
+    value = lo[~free]
+    moved = np.concatenate([weighted[:, ~free] @ value, smooth[:, ~free] @ value, boundary[:, ~free] @ value])
+
+    def expand(result):
+        x = lo.copy()
+        x[free] = result.x
+        result.x = x
+        return result
+
+    return weighted[:, free], smooth[:, free], boundary[:, free], rhs - moved, lo[free], hi[free], expand
+
 
 #: Crustal shear modulus used for moment when no velocity model is supplied.
 DEFAULT_SHEAR_MODULUS = 30e9
@@ -406,8 +496,16 @@ class SlipInversion:
         Number of ramp columns.
     """
 
+    #: What `boundary_ratio` is multiplied by. A zero-slip row is `ratio * slip` beside
+    #: data rows `weight * (misfit)`, so what it means depends on the weights and the units
+    #: of the slip. A coseismic solve sets the ratio by hand, typically to 20-500 times the
+    #: median row weight (about 1 on `sqrt_count` weights, a few thousand on one over sigma);
+    #: the postseismic and interseismic modes set this instead: see `pinned_edges`.
+    boundary_scale = 1.0
+
     def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
-                 velocity_model=None, covariance=None, sees=None):
+                 velocity_model=None, covariance=None, sees=None, extra_columns=None,
+                 nuisance_prior=None, g=None):
         """`engine` and `basis` choose the physics and the parameterization.
 
         `ramp` adds unbounded per-track nuisance columns -- `"none"`,
@@ -452,6 +550,24 @@ class SlipInversion:
         rows see the sum. That is exact when no fault slipped in more than one
         event; slip a fault took between two events (afterslip in the hours
         between) is assigned to whichever track sees it.
+
+        `extra_columns` is `(matrix, labels)`: more nuisance columns, `(n_obs, m)`,
+        beside the ramps and treated like them (unbounded, solved jointly, kept out of the
+        fault's prediction). Block rotations are built this way
+        (`slipsolve.interseismic.rotation_columns`), and so is anything with a
+        known pattern and an unknown amplitude. A saved model carries the matrix.
+
+        `nuisance_prior` is `{label pattern: sigma}`: a zero-mean Gaussian prior on
+        the nuisance coefficients whose `ramp_labels` match the pattern
+        (`fnmatch.fnmatch`), as rows `coefficient / sigma` beside the data. So it
+        means what it says only when the data rows are weighted by one over their noise
+        (`Observations.concat(normalize="none")`). A ramp column is a monomial in the
+        track's centred span-scaled coordinates, so `"asc:dx": 0.003` lets that
+        gradient move about 3 mm (or mm/yr) across the track: how InSAR is tied to GNSS
+        without giving the plane a free hand.
+
+        `g` is the Green's matrix when the caller has already built it,
+        `(n_obs, basis.n_param)`; the engine is then used only to forward-model.
         """
         self.mesh = mesh
         self.obs = obs
@@ -465,31 +581,46 @@ class SlipInversion:
         ds = obs.ds
         self.d = np.asarray(ds["los"].values, dtype=float)
         self.w = np.asarray(ds["weight"].values, dtype=float)
-        # An engine that can integrate a basis function directly is given the
-        # basis, so a nodal column is the integral of the tent itself. One that
-        # cannot -- the closed-form triangular dislocation, which is defined on a
-        # patch of *constant* slip -- assembles per element and has the basis
-        # projected on afterwards. Both preserve the moment exactly; only the
-        # first gets the near-field shape of a linearly varying slip patch right.
-        points = (ds["x"].values, ds["y"].values,
-                  ds["look_e"].values, ds["look_n"].values, ds["look_u"].values)
         self.exact_basis = bool(getattr(self.engine, "supports_basis", False))
-        if self.exact_basis:
-            self.g = self.engine.los_matrix(mesh, *points, basis=self.basis)
+        if g is None:
+            points = (ds["x"].values, ds["y"].values,
+                      ds["look_e"].values, ds["look_n"].values, ds["look_u"].values)
+            self.g = assemble_design(self.engine, mesh, self.basis, points)
         else:
-            element_g = self.engine.los_matrix(mesh, *points)
-            self.g = (element_g if self.basis.name == "element"
-                      else element_g @ _blocked(self.basis.projection()))
+            self.g = np.asarray(g, dtype=float)
+            if self.g.shape != (obs.n, self.basis.n_param):
+                raise ValueError(f"g has shape {self.g.shape}; this problem needs "
+                                 f"{(obs.n, self.basis.n_param)}")
 
         self.sees = None
         if sees:
             self._restrict_views(sees)
 
+        self.extra_columns = None
+        if extra_columns is not None:
+            matrix, labels = extra_columns
+            matrix = np.asarray(matrix, dtype=float)
+            labels = [str(label) for label in labels]
+            if matrix.ndim != 2 or matrix.shape != (obs.n, len(labels)):
+                raise ValueError(f"extra_columns has shape {matrix.shape} with {len(labels)} "
+                                 f"labels; expected ({obs.n}, {len(labels)})")
+            self.extra_columns = (matrix, labels)
+
         self.ramp_kind = ramp_spec(ramp)
         check_ramp_tracks(self.ramp_kind, obs.tracks)
-        self.ramp, self.ramp_labels = ramp_columns(obs, self.ramp_kind)
+        self.ramp, self.ramp_labels = self._nuisance_columns(self.ramp_kind)
         self.n_slip = self.basis.n_param
         self.n_ramp = self.ramp.shape[1]
+
+        self.nuisance_prior = None
+        if nuisance_prior:
+            self.nuisance_prior = {str(k): float(v) for k, v in nuisance_prior.items()}
+            for pattern, sigma in self.nuisance_prior.items():
+                if not sigma > 0:
+                    raise ValueError(f"nuisance_prior[{pattern!r}] = {sigma}: a sigma must be positive")
+                if not any(fnmatch(label, pattern) for label in self.ramp_labels):
+                    raise ValueError(f"nuisance_prior pattern {pattern!r} matches no nuisance "
+                                     f"column; they are {self.ramp_labels}")
 
         self.covariance = covariance
         self._chol = self._track_rows = None
@@ -588,6 +719,32 @@ class SlipInversion:
         """Number of unknowns: the slip parameters plus the ramp columns."""
         return self.n_slip + self.n_ramp
 
+    def _nuisance_columns(self, kind):
+        """`(matrix, labels)`: the ramps of `kind` followed by `extra_columns`."""
+        matrix, labels = ramp_columns(self.obs, kind)
+        if self.extra_columns is None:
+            return matrix, labels
+        extra, extra_labels = self.extra_columns
+        return np.hstack([matrix, extra]), list(labels) + list(extra_labels)
+
+    def prior_rows(self):
+        """Regularisation rows beside the zero-slip edges, `(k, n_param)`, or `None`.
+
+        No smoothing weight touches them. Here, the nuisance priors; subclasses add
+        their own (`TimeDependentInversion`).
+        """
+        if not self.nuisance_prior:
+            return None
+        columns, weights = [], []
+        for i, label in enumerate(self.ramp_labels):
+            for pattern, sigma in self.nuisance_prior.items():
+                if fnmatch(label, pattern):
+                    columns.append(self.n_slip + i)
+                    weights.append(1.0 / sigma)
+                    break
+        return sp.csr_matrix((weights, (np.arange(len(columns)), columns)),
+                             shape=(len(columns), self.n_param))
+
     def with_ramp(self, kind):
         """The same inversion with a different nuisance ramp, **sharing** `G`.
 
@@ -603,7 +760,7 @@ class SlipInversion:
         other = copy.copy(self)
         other.ramp_kind = ramp_spec(kind)
         check_ramp_tracks(other.ramp_kind, self.obs.tracks)
-        other.ramp, other.ramp_labels = ramp_columns(self.obs, other.ramp_kind)
+        other.ramp, other.ramp_labels = other._nuisance_columns(other.ramp_kind)
         other.n_ramp = other.ramp.shape[1]
         return other
 
@@ -637,24 +794,14 @@ class SlipInversion:
         """
         if method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}, got {method!r}")
-        if self.basis.name == "element":
-            smooth = neighbor_smoothing(self.mesh.neighbors, ss_ratio, ds_ratio,
-                                        weighting=smooth_weighting, mesh=self.mesh)
-        else:
-            # A continuous field lives on the nodes, so neighbouring *elements* is
-            # the wrong thing to difference; the surface Laplacian is the right one.
-            smooth = laplace_beltrami(self.mesh, ss_ratio, ds_ratio)
-        boundary = _boundary_rows(self.basis, sides, boundary_ratio)
+        smooth, boundary = regularization_blocks(self, ss_ratio, ds_ratio, boundary_ratio,
+                                                 sides, smooth_weighting)
         lo, hi = slip_bounds(self.basis.n_basis, strike, dip, polarity)
 
         if self.n_ramp:
-            # Nuisance columns are unbounded and unregularized: their whole job is
-            # to soak up whatever the slip model should not be explaining.
-            pad = sp.csr_matrix((smooth.shape[0], self.n_ramp))
-            smooth = sp.hstack([smooth, pad], format="csr")
-            boundary = sp.hstack(
-                [boundary, sp.csr_matrix((boundary.shape[0], self.n_ramp))], format="csr"
-            )
+            # Nuisance columns are unbounded and unregularized (unless a prior was
+            # asked for): their whole job is to soak up whatever the slip model
+            # should not be explaining.
             lo = np.concatenate([lo, np.full(self.n_ramp, -np.inf)])
             hi = np.concatenate([hi, np.full(self.n_ramp, np.inf)])
 
@@ -676,8 +823,8 @@ class SlipInversion:
             result = self._solve_lsq(scaled_smooth, boundary, lo, hi, max_iter,
                                      tol, lsmr_tol, verbose)
 
-        return SlipModel(
-            self, result.x, result,
+        return self._model(
+            result.x, result,
             smoothing=(float(smoothing) if np.ndim(smoothing) == 0
                        else np.asarray(smoothing, dtype=float)),
             smooth_matrix=smooth,
@@ -685,7 +832,10 @@ class SlipInversion:
                 "ss_ratio": float(ss_ratio), "ds_ratio": float(ds_ratio),
                 "boundary_ratio": float(boundary_ratio), "sides": list(sides),
                 "polarity": None if polarity is None else list(polarity),
-                "strike": list(strike), "dip": list(dip), "max_iter": int(max_iter),
+                # Limits may be one per parameter; JSON-able either way.
+                "strike": [np.asarray(v, dtype=float).tolist() for v in strike],
+                "dip": [np.asarray(v, dtype=float).tolist() for v in dip],
+                "max_iter": int(max_iter),
                 "lsmr_tol": lsmr_tol, "method": method,
                 "smooth_weighting": str(smooth_weighting),
                 # Carried so a reloaded model can rebuild the ramp columns and
@@ -701,8 +851,13 @@ class SlipInversion:
                                else None),
                 # Which faults each track was allowed to see; None = all of them.
                 "sees": getattr(self, "sees", None),
+                "nuisance_prior": self.nuisance_prior,
             },
         )
+
+    def _model(self, x, result, smoothing, smooth_matrix, options):
+        """The model a solve returns; subclasses return their own kind."""
+        return SlipModel(self, x, result, smoothing, smooth_matrix, options)
 
     def _solve_lsq(self, smooth, boundary, lo, hi, max_iter, tol, lsmr_tol, verbose):
         """`method="lsq_linear"`: the stacked system through scipy's trust region."""
@@ -714,12 +869,13 @@ class SlipInversion:
             np.zeros(boundary.shape[0]),
         ])
 
+        weighted, smooth, boundary, rhs, lo, hi, expand = _free_system(weighted, smooth, boundary, rhs, lo, hi)
         operator = _StackedOperator(weighted, smooth, boundary)
-        return lsq_linear(
+        return expand(lsq_linear(
             operator, rhs, bounds=(lo, hi),
             lsq_solver="lsmr", max_iter=max_iter, tol=tol,
             lsmr_tol=lsmr_tol, verbose=verbose,
-        )
+        ))
 
     def _solve_lsq_dense(self, smooth, boundary, lo, hi, max_iter, verbose):
         """`method="lsq_linear_dense"`: the stacked system as a dense matrix, solved to within a micron of the minimiser.
@@ -729,15 +885,17 @@ class SlipInversion:
         number is the square root of the normal equations'.
         """
         design = np.hstack([self.g, self.ramp]) if self.n_ramp else self.g
-        stacked = np.vstack([self.whiten(design), smooth.toarray(), boundary.toarray()])
         rhs = np.concatenate([
             self.whiten(self.d),
             np.zeros(smooth.shape[0]),
             np.zeros(boundary.shape[0]),
         ])
-        return lsq_linear(stacked, rhs, bounds=(lo, hi), method="trf", lsq_solver="exact",
-                          tol=EXACT_FALLBACK_TOL, max_iter=max(int(max_iter), 50 * stacked.shape[1]),
-                          verbose=verbose)
+        weighted, smooth, boundary, rhs, lo, hi, expand = _free_system(self.whiten(design), smooth, boundary,
+                                                                       rhs, lo, hi)
+        stacked = np.vstack([weighted, smooth.toarray(), boundary.toarray()])
+        return expand(lsq_linear(stacked, rhs, bounds=(lo, hi), method="trf", lsq_solver="exact",
+                                 tol=EXACT_FALLBACK_TOL, max_iter=max(int(max_iter), 50 * stacked.shape[1]),
+                                 verbose=verbose))
 
     def _data_block(self):
         """`(WA)'(WA)` and `(WA)'(Wd)`, the half of the normal equations the data set.
@@ -965,6 +1123,8 @@ class SlipModel:
         #: residual map reads in the same sense as the data map beside it.
         self.residual = self.data - self.prediction
         self._ramp_design = inversion.ramp
+        extra = getattr(inversion, "extra_columns", None)
+        self._extra_design = None if extra is None else extra[0]
 
     # -- fit ---------------------------------------------------------------
     @property
@@ -1228,7 +1388,8 @@ class SlipModel:
         Rebuilt from the observations when the model came from `load` --
         `ramp_columns` is a pure function of `obs` and the ramp kind, the
         same reasoning that lets `roughness` recover its smoothing operator
-        without storing a sparse matrix.
+        without storing a sparse matrix. Extra columns are not a
+        function of anything here, so a saved model carries them.
         """
         if self._ramp_design is None:
             kind = self.options.get("ramp")
@@ -1236,7 +1397,9 @@ class SlipModel:
                 # Saved without the kind in its options; the column count per
                 # track identifies it exactly.
                 kind = ramp_kind_for(self.ramp.size, len(self.obs.tracks))
-            self._ramp_design = ramp_columns(self.obs, kind)[0]
+            design = ramp_columns(self.obs, kind)[0]
+            extra = getattr(self, "_extra_design", None)
+            self._ramp_design = design if extra is None else np.hstack([design, extra])
         return self._ramp_design
 
     @property
@@ -1670,6 +1833,8 @@ class SlipModel:
         model["x"] = ("param", self.x)
         model.attrs["ramp_labels"] = list(self.ramp_labels)
         model.attrs["engine_nu"] = float(getattr(self._inversion.engine, "nu", 0.25))
+        if getattr(self, "_extra_design", None) is not None:
+            model["extra_columns"] = (("obs", "extra"), self._extra_design)
 
         obs = self.obs.ds.copy()
         # Zarr has no object dtype; track names ride as fixed-width text.
@@ -1778,6 +1943,8 @@ class SlipModel:
         # operator above -- G is deliberately not saved, but the ramp columns
         # cost nothing to regenerate and the nuisance surface is worth seeing.
         self._ramp_design = None
+        self._extra_design = (np.asarray(model["extra_columns"].values, dtype=float)
+                              if "extra_columns" in model else None)
         return self
 
     def __repr__(self):

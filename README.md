@@ -24,6 +24,10 @@ translation of, and extension to, the MATLAB package
 - The smoothing weight chosen by effective rank, blocked cross-validation, GCV or the
   L-curve; resolution, posterior covariance and checkerboard calibration.
 - Per-segment dip sweeps scored by the marginal likelihood, with bootstrap intervals.
+- Postseismic and interseismic modes: slip that changes with time from dated series
+  (`TimeDependentInversion`), rigid blocks plus back-slip with coupling bounds from velocities
+  (`InterseismicInversion`), and signals of known shape beside the slip (`Pattern`). See
+  [the guide](https://eitanrapa.github.io/SlipSolve-Python/guide/time-dependent/).
 
 ## Install
 

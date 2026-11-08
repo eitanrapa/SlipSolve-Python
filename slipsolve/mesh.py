@@ -64,6 +64,13 @@ from .trace import VERTICAL_TOL_DEG, FaultSegment, dip_offset  # noqa: F401
 #: measure a layout on the resampling it will be embedded on.
 LAYOUT_OVERRUN_FRACTION = 0.01
 
+#: How far `FaultMesh.from_tsurf` lets its smoother pull a surface from its vertices: small,
+#: since a community-model surface is dense and the point is to keep its shape.
+DEFAULT_TSURF_SMOOTHNESS = 1e-3
+
+#: How deep a band of a column's vertices its bottom edge is read from, metres.
+_TSURF_BOTTOM_BAND = 1e3
+
 
 class FaultMesh:
     """A triangulated fault surface in local ENU metres, `z <= 0`.
@@ -125,6 +132,27 @@ class FaultMesh:
         self.attrs = dict(attrs or {})
         if epsg is not None:
             self.attrs.setdefault("epsg", int(epsg))
+
+    def in_frame(self, frame):
+        """This mesh with its nodes in another `LocalFrame`; itself if it is already there.
+
+        Everything else carries over, so a slip vector on this mesh is a slip vector on that one, and a
+        vertical column stays exactly vertical, its nodes sharing one `(x, y)`.
+        """
+        if self.frame is None:
+            raise ValueError("this mesh has no frame to move from")
+        if self.frame.matches(frame):
+            return self
+
+        def moved(points):
+            if points is None:
+                return None
+            lon, lat = self.frame.to_lonlat(points[:, 0], points[:, 1])
+            x, y = frame.to_local(lon, lat)
+            return np.column_stack([x, y, points[:, 2]])
+
+        return FaultMesh(moved(self.nodes), self.triangles, self.params, frame=frame, attrs=self.attrs,
+                         centres=moved(self.centres), centre_params=self.centre_params)
 
     # -- construction ------------------------------------------------------
     @classmethod
@@ -250,7 +278,10 @@ class FaultMesh:
 
         Four ways to say what the geometry is, in decreasing generality:
 
-        * `surface=`: a `slipsolve.surface.FaultSurface` you fitted yourself.
+        * `surface=`: a `slipsolve.surface.FaultSurface` you fitted yourself, on this
+          mesh's own lattice, or with `layout=` on any lattice along the same resampled
+          trace (the same `edge_length`), so that a layout chosen elsewhere can go on a
+          fault that was fitted once, as `from_tsurf` leaves in `mesh.surface`.
         * `bottom_trace=`: a digitised bottom edge, at `bottom_depth`
           (default `max_depth`). The dip is whatever connects the two traces,
           so it varies continuously along strike and may reverse direction where
@@ -331,6 +362,7 @@ class FaultMesh:
         tx, ty = resampled.to_local(frame)
         s = _arc_length(tx, ty)
 
+        any_lattice = layout is not None
         layout, depths = _resolve_layout(
             layout, depths, nodes_per_level, along_spacing, s,
             top_depth, max_depth, down_dip_levels, bias_w, edge_length, balance)
@@ -345,7 +377,7 @@ class FaultMesh:
         # nominally vertical fault would land tens of microns off its own trace.
         surface, kind = _resolve_surface(
             resampled, frame, s, depths, surface, segments, dips, uniform_dip,
-            bottom_trace, bottom_depth, smoothness, depth_control, fit_kwargs,
+            bottom_trace, bottom_depth, smoothness, depth_control, fit_kwargs, any_lattice=any_lattice,
         )
 
         # `cross_nodes` is indexed by ascending z (deepest row first); the mesh
@@ -391,6 +423,84 @@ class FaultMesh:
         return mesh
 
     @classmethod
+    def from_tsurf(cls, tsurf, trace=None, frame=None, *, edge_length=3e3, max_depth=None, depths=None,
+                   smoothness=DEFAULT_TSURF_SMOOTHNESS, fraction=0.1, below="vertical"):
+        """Remesh a triangulated surface (`TSurf`), as `curved` meshes any other.
+
+        `trace` defaults to `TSurf.trace`, along the surface's
+        top edge (`fraction` as there). The vertices are read as `cross = f(s, z)` off that trace
+        and fitted on the mesh's own lattice, so the fault keeps its shape at the mesh's resolution:
+        a fault `edge_length` fine, from the surface to `max_depth` (default: the surface's
+        deepest vertex) or on the levels `depths`. Vertices above z = 0 are left out, since the
+        free surface is there.
+
+        `below` is what the fault does under the surface's bottom edge, which a community model
+        puts where seismicity stops: `"vertical"` goes straight
+        down from each column's deepest vertices; `"dip"` lets the fit carry on at about its
+        last dip, which amplifies whatever the last few km do.
+
+        `mesh.attrs` records `tsurf` (its name), `tsurf_misfit_rms` and `tsurf_misfit_max` (how
+        far the fitted surface lies from the vertices, across the fault, metres) and `tsurf_deepest`.
+
+        A surface that folds over itself as seen from its trace has no such field, and only an
+        average comes through: read the misfit. A vertex past the trace's ends is left out.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+
+        from .surface import FaultSurface
+
+        trace = trace if trace is not None else tsurf.trace(fraction=fraction)
+        frame = frame or trace.local_frame()
+        x, y, z = tsurf.local(frame)
+        if depths is None:
+            deepest = float(-z.min()) if max_depth is None else float(max_depth)
+            n = max(1, int(round(deepest / float(edge_length))))
+            depths = np.linspace(0.0, deepest, n + 1)
+        depths = np.asarray(depths, dtype=float).ravel()
+
+        resampled = trace.resample(edge_length, frame)
+        tx, ty = resampled.to_local(frame)
+        s_nodes = _arc_length(tx, ty)
+        z_nodes = -depths[::-1]
+
+        s, cross = resampled.to_curvilinear(x, y, frame)
+        s, cross = np.asarray(s, dtype=float), np.asarray(cross, dtype=float)
+        # A vertex past an end projects onto that end with a large cross, which is not its
+        # position on the fault. Its own end vertices stay.
+        off_end = ((s <= s_nodes[0]) | (s >= s_nodes[-1])) & (np.abs(cross) > float(edge_length))
+        use = ~off_end & (z <= 0.0) & (z >= z_nodes[0] - float(edge_length))
+        if use.sum() < 3:
+            raise ValueError(f"only {int(use.sum())} of the surface's {z.size} vertices lie on this trace and depth range")
+        if below not in ("vertical", "dip"):
+            raise ValueError(f"below must be 'vertical' or 'dip', got {below!r}")
+        s_fit, z_fit, cross_fit = s[use], z[use], cross[use]
+        if below == "vertical":
+            s_more, z_more, cross_more = [], [], []
+            for column in s_nodes:
+                near = use & (np.abs(s - column) <= float(edge_length))
+                if not near.any():
+                    continue
+                floor = float(z[near].min())
+                deepest = near & (z <= floor + _TSURF_BOTTOM_BAND)
+                levels = z_nodes[z_nodes < floor - 0.5 * float(edge_length)]
+                s_more.append(np.full(levels.size, column))
+                z_more.append(levels)
+                cross_more.append(np.full(levels.size, float(np.median(cross[deepest]))))
+            s_fit = np.concatenate([s_fit, *s_more])
+            z_fit = np.concatenate([z_fit, *z_more])
+            cross_fit = np.concatenate([cross_fit, *cross_more])
+        surface = FaultSurface.from_control_points(s_fit, z_fit, cross_fit, s_nodes, z_nodes, smoothness=float(smoothness))
+
+        fitted = RegularGridInterpolator((z_nodes, s_nodes), surface.cross_nodes, bounds_error=False, fill_value=None)
+        misfit = fitted(np.column_stack([z[use], s[use]])) - cross[use]
+        mesh = cls.curved(trace, frame, surface=surface, edge_length=edge_length, depths=depths)
+        mesh.attrs.update(tsurf=tsurf.name, tsurf_misfit_rms=float(np.sqrt(np.mean(misfit ** 2))),
+                          tsurf_misfit_max=float(np.abs(misfit).max()), tsurf_vertices_used=int(use.sum()),
+                          tsurf_deepest=float(-z[use].min()))
+        mesh.surface = surface                  # so that a layout can be rebuilt on it: from_layout(..., surface=mesh.surface)
+        return mesh
+
+    @classmethod
     def from_layout(cls, layout, trace, frame=None, **kwargs):
         """Build a mesh on a node layout chosen elsewhere.
 
@@ -401,6 +511,16 @@ class FaultMesh:
         extent comes from the layout.
         """
         return cls.curved(trace, frame, layout=layout, **kwargs)
+
+    def sheets(self):
+        """The meshes a `join` was made of, in order; `[self]` if it is one sheet."""
+        if "joined_nodes" not in self.attrs:
+            return [self]
+        nodes = np.cumsum([0, *self.attrs["joined_nodes"]])
+        elements = np.cumsum([0, *self.attrs["joined_elements"]])
+        attrs = {k: v for k, v in self.attrs.items() if k not in ("joined_nodes", "joined_elements", "n_faults", "layout")}
+        return [FaultMesh(self.nodes[a:b], self.triangles[c:d] - a, self.params[a:b], frame=self.frame, attrs=attrs)
+                for a, b, c, d in zip(nodes[:-1], nodes[1:], elements[:-1], elements[1:])]
 
     # -- derived geometry --------------------------------------------------
     @property
@@ -893,7 +1013,7 @@ def _place_layout(layout, resampled, frame, s_fit, depths, cross, tx, ty):
 
 
 def _resolve_surface(trace, frame, s, depths, surface, segments, dips, uniform_dip,
-                     bottom_trace, bottom_depth, smoothness, depth_control, fit_kwargs):
+                     bottom_trace, bottom_depth, smoothness, depth_control, fit_kwargs, any_lattice=False):
     """Turn whichever geometry description the caller gave into a FaultSurface."""
     from .surface import DEFAULT_SMOOTHNESS, FaultSurface, centres as _centres
 
@@ -909,7 +1029,11 @@ def _resolve_surface(trace, frame, s, depths, surface, segments, dips, uniform_d
         )
 
     if surface is not None:
-        if not np.allclose(surface.s_nodes, s) or not np.allclose(surface.z_nodes, z_nodes):
+        same = (surface.s_nodes.size == s.size and surface.z_nodes.size == z_nodes.size
+                and np.allclose(surface.s_nodes, s) and np.allclose(surface.z_nodes, z_nodes))
+        if not same and any_lattice:
+            return surface.on_lattice(s, z_nodes), "curved"
+        if not same:
             raise ValueError(
                 "The supplied surface is on a different lattice than this mesh "
                 f"({surface.cross_nodes.shape} vs {(depths.size, s.size)}); build it "

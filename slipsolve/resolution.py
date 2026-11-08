@@ -113,22 +113,11 @@ def _normal_equations(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
     design, scaled smoothing, boundary rows -- so the resolution describes the
     inversion being run rather than a tidier relative of it.
     """
-    from .regularize import (laplace_beltrami, neighbor_smoothing,
-                             scale_smoothing)
+    from .inversion import regularization_blocks
+    from .regularize import scale_smoothing
 
-    if inversion.basis.name == "element":
-        smooth = neighbor_smoothing(inversion.mesh.neighbors, ss_ratio, ds_ratio,
-                                    weighting=smooth_weighting, mesh=inversion.mesh)
-    else:
-        smooth = laplace_beltrami(inversion.mesh, ss_ratio, ds_ratio)
-    boundary = _boundary_rows(inversion.basis, sides, boundary_ratio)
-
-    n_ramp = inversion.n_ramp
-    if n_ramp:
-        smooth = sp.hstack([smooth, sp.csr_matrix((smooth.shape[0], n_ramp))],
-                           format="csr")
-        boundary = sp.hstack([boundary, sp.csr_matrix((boundary.shape[0], n_ramp))],
-                             format="csr")
+    smooth, boundary = regularization_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio,
+                                             sides, smooth_weighting)
     smooth = scale_smoothing(smooth, smoothing)
 
     weighted = weighted_design(inversion)
@@ -136,11 +125,6 @@ def _normal_equations(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
     data = weighted.T @ weighted
     damping = (smooth.T @ smooth + boundary.T @ boundary).toarray()
     return data, damping
-
-
-def _boundary_rows(basis, sides, ratio):
-    from .inversion import _boundary_rows as rows
-    return rows(basis, sides, ratio)
 
 
 def _factorized(inversion, smoothing, ss_ratio, ds_ratio, boundary_ratio, sides,
@@ -678,17 +662,11 @@ def epic_prior(inversion, sigma_target, ss_ratio=1.0, ds_ratio=3.0,
 
 def _epic_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio, sides):
     """`(H, P + B'B)` -- the operator EPIC weights, and everything it does not."""
-    from .regularize import laplace_beltrami
+    from .inversion import regularization_blocks
 
-    smooth = laplace_beltrami(inversion.mesh, ss_ratio, ds_ratio)
-    boundary = _boundary_rows(inversion.basis, sides, boundary_ratio)
-    if inversion.n_ramp:
-        # Nuisance columns are unregularized, so EPIC has no handle on them and
-        # the condition is imposed on the slip parameters alone.
-        smooth = sp.hstack([smooth, sp.csr_matrix((smooth.shape[0],
-                                                   inversion.n_ramp))], format="csr")
-        boundary = sp.hstack([boundary, sp.csr_matrix((boundary.shape[0],
-                                                       inversion.n_ramp))], format="csr")
+    # Nuisance columns are unregularized, so EPIC has no handle on them and
+    # the condition is imposed on the slip parameters alone.
+    smooth, boundary = regularization_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio, sides)
     design = weighted_design(inversion)
     fixed = design.T @ design + (boundary.T @ boundary).toarray()
     fixed.flat[:: fixed.shape[0] + 1] += JITTER * np.trace(fixed) / fixed.shape[0]
@@ -992,6 +970,43 @@ def blocked_folds(obs, n_folds=8, direction="auto"):
     return out
 
 
+def cell_folds(obs, cell=50e3, n_folds=8, seed=0, groups=None):
+    """Square cells `cell` metres wide dealt at random to folds: another fold map for cross-validation.
+
+    `blocked_folds`' slabs take a whole stretch of the data away, which is what they
+    are for on one fault. On a network of blocks they can take away a whole block, and then
+    its rotation is predicted from nothing and that alone can decide the score. Cells leave
+    blocks stations around those held out, so they test the prediction between stations and not
+    the extrapolation of a rotation. Rows in one cell stay together, so a station's components
+    do. A cell must be wider than the noise's correlation, as a slab must.
+
+    `groups` (one label per row, such as the blocks) deals each group's cells separately and
+    keeps a cell's groups apart, so no fold takes the whole of a group that spans more than one
+    cell. Without it, a block about a cell wide can still go in one fold.
+    """
+    ds = obs.ds
+    x, y = ds["x"].values.astype(float), ds["y"].values.astype(float)
+    labels = np.zeros(x.size, dtype=np.int64) if groups is None else np.unique(np.asarray(groups), return_inverse=True)[1].ravel()
+    if labels.size != x.size:
+        raise ValueError(f"groups has {labels.size} labels for {x.size} rows")
+    corner = np.column_stack([labels, np.floor(x / float(cell)), np.floor(y / float(cell))]).astype(np.int64)
+    cells, index = np.unique(corner, axis=0, return_inverse=True)
+    index = np.ravel(index)
+    if cells.shape[0] < int(n_folds):
+        raise ValueError(f"{cells.shape[0]} cells cannot fill {int(n_folds)} folds; use smaller cells or fewer folds")
+    rng = np.random.default_rng(seed)
+    dealt = np.zeros(cells.shape[0], dtype=np.int64)
+    for label in np.unique(cells[:, 0]):
+        members = np.flatnonzero(cells[:, 0] == label)
+        # A random start, so that small groups' first cells do not all land in fold 0.
+        dealt[members] = (rng.permutation(members.size) + rng.integers(int(n_folds))) % int(n_folds)
+    fold = dealt[index]
+    out = xr.DataArray(fold, dims="obs", name="fold")
+    out.attrs.update(direction="cells", block_width=float(cell), n_folds=int(n_folds),
+                     counts=[int(c) for c in np.bincount(fold, minlength=int(n_folds))])
+    return out
+
+
 def _held_in(inversion, keep):
     """The same inversion restricted to rows `keep`, sharing nothing writable.
 
@@ -1019,6 +1034,11 @@ def _held_in(inversion, keep):
     out.w = inversion.w[keep]
     out.g = inversion.g[keep]
     out.ramp = inversion.ramp[keep]
+    # What else runs per row: an interseismic solve re-fits its blocks on the rows it holds.
+    if getattr(inversion, "extra_columns", None) is not None:
+        out.extra_columns = (inversion.extra_columns[0][keep], inversion.extra_columns[1])
+    if getattr(inversion, "blocks", None) is not None:
+        out.blocks = inversion.blocks[keep]
 
     if inversion.covariance is not None:
         # Refactorised on the retained rows: chol(Cd)[keep, keep] is not
@@ -1069,6 +1089,16 @@ def _fold_problems(inversion, folds):
                     "of its own, so its nuisance columns are unconstrained and "
                     "its held-out rows are unpredictable. Use fewer folds, or "
                     "a lower ramp degree.")
+        # The same for a rigid block, except that a prior can keep the solve alive, and then
+        # the score is decided by rows predicted from nothing.
+        blocks = getattr(inversion, "blocks", None)
+        if blocks is not None:
+            starved = [str(name) for name in np.unique(blocks) if np.sum(blocks[keep] == name) < 3]
+            if starved:
+                warnings.warn(
+                    f"fold {int(label)} leaves block(s) {starved} too few rows to fix a rotation, so their "
+                    "held-out rows are predicted from nothing and can decide the score. Hold out "
+                    "cells (cell_folds) rather than slabs.", RuntimeWarning, stacklevel=3)
         problems.append((_held_in(inversion, keep), test))
     return problems
 
@@ -1079,6 +1109,11 @@ def _score_folds(inversion, problems, smoothing, **solve_kwargs):
     predicted = np.full(n, np.nan)
     profiled = np.full(n, np.nan)
     converged = True
+    # The postseismic and interseismic modes score in units of each row's noise: their rows
+    # mix data of very different noise, and a virtual pair's size is not a displacement
+    # (it grows with the number of dates). So there `cv_rms` reads 1 at the noise level.
+    noise_units = bool(getattr(inversion, "cv_in_noise_units", False))
+    scale = inversion.w if noise_units else 1.0
     for held_in, test in problems:
         model = held_in.solve(smoothing=smoothing, **solve_kwargs)
         converged &= bool(model.converged)
@@ -1093,11 +1128,12 @@ def _score_folds(inversion, problems, smoothing, **solve_kwargs):
             # ramp subspace. See `cv_rms_profiled` below for why that is the
             # score to read on this data.
             design = inversion.ramp[test]
-            coef, *_ = np.linalg.lstsq(design, inversion.d[test] - fault,
+            row = scale[test, None] if noise_units else 1.0
+            coef, *_ = np.linalg.lstsq(design * row, (inversion.d[test] - fault) * np.ravel(row),
                                        rcond=None)
             profiled[test] = fault + design @ coef
 
-    residual = inversion.d - predicted
+    residual = (inversion.d - predicted) * scale
     per_fold = np.array([
         float(np.sqrt(np.mean(residual[test] ** 2))) for _, test in problems])
     out = {"smoothing": _smoothing_label(smoothing),
@@ -1135,7 +1171,7 @@ def _score_folds(inversion, problems, smoothing, **solve_kwargs):
     # the in-sample fit. Read it for where it minimises, never for its level.
     if inversion.n_ramp:
         out["cv_rms_profiled"] = float(
-            np.sqrt(np.mean((inversion.d - profiled) ** 2)))
+            np.sqrt(np.mean(((inversion.d - profiled) * scale) ** 2)))
     return out
 
 
@@ -1212,8 +1248,11 @@ def _warn_narrow_blocks(inversion, folds):
 
 
 def blocked_cv_curve(inversion, weights, n_folds=8, direction="auto",
-                     rank=True, **solve_kwargs):
+                     rank=True, folds=None, **solve_kwargs):
     """`blocked_cross_validation` over a sweep, plus where it minimises.
+
+    `folds` is a fold map to use instead of `blocked_folds`' slabs, such as
+    `cell_folds`' on a network of blocks.
 
     Returns an `xarray.Dataset` on `smoothing` carrying `cv_rms`,
     `cv_rms_spread`, `cv_rms_worst`, `converged`, (with a covariance
@@ -1241,7 +1280,8 @@ def blocked_cv_curve(inversion, weights, n_folds=8, direction="auto",
     if len(weights) < 2:
         raise ValueError("a cross-validation curve needs at least two weights")
 
-    folds = blocked_folds(inversion.obs, n_folds=n_folds, direction=direction)
+    if folds is None:
+        folds = blocked_folds(inversion.obs, n_folds=n_folds, direction=direction)
     _warn_narrow_blocks(inversion, folds)
     problems = _fold_problems(inversion, folds)
 
@@ -1333,26 +1373,15 @@ def condition_number(inversion, smoothing=None, ss_ratio=1.0, ds_ratio=3.0,
     cannot choose a weight. Magen et al. vary the *discretisation* at fixed
     regularisation, and that is the comparison this reproduces.
     """
-    from .regularize import (laplace_beltrami, neighbor_smoothing,
-                             scale_smoothing)
+    from .inversion import regularization_blocks
+    from .regularize import scale_smoothing
 
     design = weighted_design(inversion)
     if smoothing is not None:
         # The same blocks `_normal_equations` assembles, kept as rows rather
         # than squared up, so the singular values are the operator's own.
-        if inversion.basis.name == "element":
-            smooth = neighbor_smoothing(inversion.mesh.neighbors, ss_ratio,
-                                        ds_ratio, weighting=smooth_weighting,
-                                        mesh=inversion.mesh)
-        else:
-            smooth = laplace_beltrami(inversion.mesh, ss_ratio, ds_ratio)
-        boundary = _boundary_rows(inversion.basis, sides, boundary_ratio)
-        if inversion.n_ramp:
-            pad = sp.csr_matrix((smooth.shape[0], inversion.n_ramp))
-            smooth = sp.hstack([smooth, pad], format="csr")
-            boundary = sp.hstack(
-                [boundary,
-                 sp.csr_matrix((boundary.shape[0], inversion.n_ramp))], format="csr")
+        smooth, boundary = regularization_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio,
+                                                 sides, smooth_weighting)
         smooth = scale_smoothing(smooth, smoothing)
         design = np.vstack([design, smooth.toarray(), boundary.toarray()])
     values = np.linalg.svd(design, compute_uv=False)
