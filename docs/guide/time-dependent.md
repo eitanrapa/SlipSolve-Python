@@ -4,7 +4,8 @@ A slip inversion is linear in slip whatever the time scale, so both modes are
 `SlipInversion` with what their data need added. Both are kinematic: they map slip
 fields and coupling. Signals with a physical shape, such as poroelastic rebound or
 viscoelastic relaxation from a forward code, go in beside the slip as patterns with a
-free amplitude ([Signals beside the slip](#signals-beside-the-slip)).
+free amplitude ([Signals beside the slip](#signals-beside-the-slip),
+[Flow from PSGRN](#flow-from-psgrn)).
 
 ## Postseismic: slip that changes with time
 
@@ -145,6 +146,50 @@ monte_carlo(result, n=60).apply(lambda m: m.pattern_amplitudes["poroelastic"])
 - It assumes the whole crust is saturated and that the two ratios are uniform, and rebound is
   largest in the shallowest rock, where that is least true. The fields are for a half-space
   unless you hand it engines.
+
+## Flow from PSGRN
+
+Viscoelastic relaxation of a layered crust comes from PSGRN (Wang, Lorenzo-Martín & Roth 2006,
+Computers & Geosciences 32, 527-541), run as a separate program. `slipsolve.psgrn` writes its
+input from the crust's `VelocityModel` and a `Rheology` per depth range, reads its tables, and
+integrates them over the coseismic model's own mesh. The result is a `Pattern` with one
+amplitude:
+
+```python
+from slipsolve import Rheology, TimeBasis, TimeDependentInversion, relaxation_pattern, run_psgrn
+
+mantle = [Rheology(32e3, None, eta_maxwell=3e18)]                         # Maxwell below the Moho
+tables = run_psgrn(crust, mantle, "psgrn_mantle", r_max=300e3, nr=301,
+                   z_min=500.0, z_max=24500.0, nz=25, nt=512, window_days=320.0)
+flow = relaxation_pattern(coseismic, tables, name="flow", until=300.0, frame=frame)
+inversion = TimeDependentInversion(mesh, series, TimeBasis.log_decay(1.0), engine=engine, patterns=[flow])
+```
+
+- **Rheologies:** Maxwell (`eta_maxwell`), a Standard Linear Solid (`eta_kelvin` and `alpha`) or
+  Burgers (both), in shear; the bulk modulus stays elastic. A Standard Linear Solid relaxes
+  stress with the time `eta_kelvin (1 - alpha) / mu`.
+- **The executable:** pass `executable=`, set `SLIPSOLVE_PSGRN`, or put `psgrn` on `PATH`. Use a
+  build of the 2020 release (github.com/RongjiangWang/PSGRN-PSCMP_2020) with the three
+  time-domain corrections the module's notes describe; as released it puts a Standard Linear
+  Solid's series 2-11% off.
+- **Viscosity scales time:** multiply every viscosity by `c` and every time by `c`
+  (`PsgrnTables.rescaled`), so one run per profile shape serves a whole scan of uniform levels.
+- **Reading a viscosity:** with the amplitude free, the viscosity at which it comes out at 1 is
+  the one the data ask for. A free amplitude can also take up a residual of the same shape at
+  any viscosity, so a held-out gain that does not change with the viscosity does not choose one.
+- **Grids:**
+  - the tables must cover the mesh's depths and every source-receiver distance (it raises
+    otherwise);
+  - keep source depths off layer interfaces;
+  - take the time step at about a twentieth of the earliest time fitted, and run early
+    postseismic in its own window, since the first samples of a run are the least accurate;
+  - gravity is on by default (`gravity=1`).
+- **Accuracy:**
+  - corrected, the relaxed state of a Standard Linear Solid matches an independent layered code
+    to 5e-3 of each source type's largest component;
+  - the time series of Maxwell, Standard Linear Solid and Burgers bodies match the
+    correspondence principle to 0.2-1.5%;
+  - the split into modes (`PsgrnTables.modes`) rebuilds the history to its `tolerance`.
 
 ## Interseismic: rigid blocks plus back-slip
 
