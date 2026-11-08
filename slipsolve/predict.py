@@ -84,8 +84,9 @@ def predicted_los(model, los_stack, frame=None, spacing=DEFAULT_SPACING,
     if exclude_within is None:
         # Only the singularity itself has to be avoided, not the near field: the
         # band excluded here becomes a NaN hole that `refine_within` would then be
-        # unable to fill. Half a coarse cell is enough.
-        exclude_within = 0.5 * spacing
+        # unable to fill. It is measured to the trace, so a sliver of a cell is
+        # enough to keep a grid point that falls on the trace out.
+        exclude_within = 0.01 * spacing
     field = model.surface_displacement(
         spacing=spacing, bounds=bounds, exclude_within=exclude_within, block=block
     )

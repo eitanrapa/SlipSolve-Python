@@ -61,17 +61,38 @@ def _blocked(projection):
     return sp.bmat([[projection, zero], [zero, projection]], format="csr")
 
 
-def _far_enough(x, y, trace_nodes, distance, block=20000):
-    """True where a point is further than `distance` from any trace node.
+def _surface_segments(mesh):
+    """The fault's outcrop as map-view segments `(start, end)`, each `(n, 2)`.
 
-    Blocked over the points, since the full pairwise matrix against a long fault's
-    node row is large and only its row minimum is wanted.
+    Every element edge whose two nodes are both on the top edge, plus a zero-length
+    segment at each top node, so a node with no such edge still counts.
     """
+    top = mesh.boundary_nodes("top")
+    tri = np.asarray(mesh.triangles)
+    edges = np.concatenate([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]])
+    edges = np.unique(np.sort(edges[top[edges[:, 0]] & top[edges[:, 1]]], axis=1), axis=0)
+    nodes = np.flatnonzero(top)
+    start = np.concatenate([edges[:, 0], nodes])
+    end = np.concatenate([edges[:, 1], nodes])
+    return mesh.nodes[start, :2], mesh.nodes[end, :2]
+
+
+def _far_enough(x, y, start, end, distance, block=4096):
+    """True where a point is further than `distance` from every segment `start[i] -> end[i]`.
+
+    Distance to the segments, not to their end points: a point on the trace halfway
+    between two surface nodes is as close to the fault as a point can be. Blocked over
+    the points, since only each row's minimum is wanted.
+    """
+    d = end - start
+    length2 = np.maximum((d ** 2).sum(axis=1), 1e-30)
     keep = np.empty(x.size, dtype=bool)
-    for start in range(0, x.size, block):
-        sl = slice(start, start + block)
-        d2 = ((x[sl, None] - trace_nodes[None, :, 0]) ** 2
-              + (y[sl, None] - trace_nodes[None, :, 1]) ** 2)
+    for first in range(0, x.size, block):
+        sl = slice(first, first + block)
+        px = x[sl, None] - start[None, :, 0]
+        py = y[sl, None] - start[None, :, 1]
+        t = np.clip((px * d[None, :, 0] + py * d[None, :, 1]) / length2[None, :], 0.0, 1.0)
+        d2 = (px - t * d[None, :, 0]) ** 2 + (py - t * d[None, :, 1]) ** 2
         keep[sl] = d2.min(axis=1) > distance ** 2
     return keep
 
@@ -1256,10 +1277,9 @@ class SlipModel:
             # most of the elements it is meant to stand for.
             exclude_within = float(
                 np.sqrt(2.0 * np.percentile(self.mesh.areas, 90)))
-        # The fault outcrops along its shallowest node row; that is where a
-        # dislocation solution is singular at the free surface.
-        top = nodes[self.mesh.boundary_nodes("top")]
-        keep = _far_enough(xx.ravel(), yy.ravel(), top, exclude_within)
+        # The fault outcrops along its top edge; that is where a dislocation
+        # solution is singular at the free surface.
+        keep = _far_enough(xx.ravel(), yy.ravel(), *_surface_segments(self.mesh), exclude_within)
 
         flat = np.full((xx.size, 3), np.nan)
         index = np.nonzero(keep)[0]

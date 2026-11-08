@@ -842,15 +842,47 @@ def test_surface_displacement_is_nan_on_the_trace(recovery):
     model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
     grid = model.surface_displacement(spacing=4000.0, pad=20e3, exclude_within=8000.0)
 
-    top = mesh.nodes[mesh.params[:, 1] == mesh.params[:, 1].max()]
     xx, yy = np.meshgrid(grid.x.values, grid.y.values)
-    distance = np.sqrt(np.min((xx.ravel()[:, None] - top[None, :, 0]) ** 2
-                              + (yy.ravel()[:, None] - top[None, :, 1]) ** 2, axis=1))
-    near = (distance <= 8000.0).reshape(xx.shape)
+    near = (_distance_to_trace(mesh, xx.ravel(), yy.ravel()) <= 8000.0).reshape(xx.shape)
 
     assert near.any(), "the test needs some grid points on the fault"
     assert np.all(np.isnan(grid["ux"].values[near]))
     assert np.isfinite(grid["ux"].values[~near]).all()
+
+
+def _distance_to_trace(mesh, x, y):
+    """Map-view distance from each point to the polyline through the top-edge nodes, in along-strike order."""
+    top = np.flatnonzero(mesh.params[:, 1] == mesh.params[:, 1].max())
+    line = mesh.nodes[top[np.argsort(mesh.params[top, 0])], :2]
+    p, q = line[:-1], line[1:]
+    d = q - p
+    t = np.clip(((x[:, None] - p[None, :, 0]) * d[None, :, 0] + (y[:, None] - p[None, :, 1]) * d[None, :, 1])
+                / (d ** 2).sum(axis=1)[None, :], 0.0, 1.0)
+    return np.sqrt(np.min((x[:, None] - p[None, :, 0] - t * d[None, :, 0]) ** 2
+                          + (y[:, None] - p[None, :, 1] - t * d[None, :, 1]) ** 2, axis=1))
+
+
+def test_surface_displacement_is_nan_between_surface_nodes(recovery):
+    """A grid point on the trace halfway between two surface nodes is on the fault too.
+
+    The exclusion is measured to the trace, not to its nodes: with nodes 6 km apart, a
+    point on the line between two of them is 3 km from each, so a 500 m exclusion
+    measured to the nodes would keep it and hand the engine its singularity.
+    """
+    mesh, _, _, inversion = recovery
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    top = np.flatnonzero(mesh.params[:, 1] == mesh.params[:, 1].max())
+    line = mesh.nodes[top[np.argsort(mesh.params[top, 0])], :2]
+    mid = 0.5 * (line[2] + line[3])
+    assert np.hypot(*(line[3] - line[2])) > 2 * 500.0, "the test needs surface nodes more than 1 km apart"
+    grid = model.surface_displacement(spacing=1000.0, exclude_within=500.0,
+                                      bounds=(mid[0], mid[0] + 4000.0, mid[1] - 4000.0, mid[1]))
+
+    assert np.isclose(grid.x.values[0], mid[0]) and np.isclose(grid.y.values[0], mid[1])
+    assert np.isnan(grid["ux"].values[0, 0]), "the point on the trace must come back NaN"
+    xx, yy = np.meshgrid(grid.x.values, grid.y.values)
+    far = (_distance_to_trace(mesh, xx.ravel(), yy.ravel()) > 500.0).reshape(xx.shape)
+    assert np.isfinite(grid["ux"].values[far]).all()
 
 
 def test_surface_displacement_matches_forward_point_by_point(recovery):
