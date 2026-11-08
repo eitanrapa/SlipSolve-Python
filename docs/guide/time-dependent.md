@@ -139,6 +139,9 @@ monte_carlo(result, n=60).apply(lambda m: m.pattern_amplitudes["poroelastic"])
 
 - **An amplitude alone is not a detection.** It takes up anything with that shape and that time
   function, so read it beside the fit it buys on held-out rows.
+- **Fit an amplitude freely before holding it at 1.** A pattern held at 1 (`(1.0, sigma)`) is only
+  as good as the model it came from. If the data want much less of it, it carries something they
+  reject; split it into parts and fit each, since one part may be sound and another not.
 - **Only amplitude x (nu_u - nu_d) is read.** Different pairs of Poisson's ratios give nearly the
   same held-out misfit, since the shape barely depends on which pair it is. The pattern is not a
   scaled copy of the coseismic field: its ratio to the coseismic vertical changes sign from place
