@@ -516,11 +516,14 @@ def plot_quadrature_order(engine, mesh, obs, ax=None, cmap="viridis",
     import matplotlib.pyplot as plt
     from matplotlib.collections import PolyCollection
 
-    if not hasattr(engine, "_orders"):
+    from .layered import LayeredPointSource
+
+    if not isinstance(engine, LayeredPointSource):
         raise TypeError(
-            f"{type(engine).__name__} has no quadrature -- only the layered "
-            "point-source engine cuts elements into point sources; the "
-            "half-space engine evaluates a closed form per element"
+            f"plot_quadrature_order needs a LayeredPointSource, not a {type(engine).__name__}: "
+            "only that engine cuts each element into point sources by distance. The "
+            "half-space engine evaluates a closed form per element, and LayeredTDE "
+            "integrates its near field exactly and rules only the remainder far away"
         )
     reduce = {"total": np.sum, "mean": np.mean, "max": np.max}
     if stat not in reduce:
