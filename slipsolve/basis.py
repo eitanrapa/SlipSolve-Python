@@ -50,10 +50,12 @@ class ElementBasis:
 
     @property
     def n_basis(self):
+        """Number of basis functions: one per element."""
         return self.mesh.n_elements
 
     @property
     def n_param(self):
+        """Number of slip parameters: strike- and dip-slip for each basis function."""
         return 2 * self.n_basis
 
     def projection(self):
@@ -69,6 +71,7 @@ class ElementBasis:
         return self.mesh.areas
 
     def boundary(self, sides):
+        """Mask of the basis functions on any of the mesh's `sides`."""
         mask = np.zeros(self.n_basis, dtype=bool)
         for side in sides:
             mask |= self.mesh.boundary_elements(side)
@@ -94,10 +97,12 @@ class NodeBasis:
 
     @property
     def n_basis(self):
+        """Number of basis functions: one per node."""
         return self.mesh.n_nodes
 
     @property
     def n_param(self):
+        """Number of slip parameters: strike- and dip-slip for each basis function."""
         return 2 * self.n_basis
 
     def projection(self):

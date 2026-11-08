@@ -279,6 +279,10 @@ class LayeredTDE:
                 yield int(node), n, tents[:, j]
 
     def forward(self, mesh, slip, x, y, look=None, z=None, basis=None):
+        """Displacement produced by `slip`, or line-of-sight with `look`.
+
+        As `slipsolve.greens.HalfSpaceTDE.forward`, with `basis` the parameterisation (elements by default).
+        """
         slip = np.asarray(slip, dtype=float)
         if slip.ndim == 2:
             slip = np.concatenate([slip[:, 0], slip[:, 1]])

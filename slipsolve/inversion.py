@@ -382,6 +382,28 @@ class SlipInversion:
 
     The Green's matrix is built once, on construction, and reused across every
     smoothing weight -- which is what makes an L-curve sweep cheap.
+
+    Attributes
+    ----------
+    mesh : FaultMesh
+        The fault.
+    obs : Observations
+        The samples.
+    engine
+        The Green's function engine.
+    basis
+        The slip parameterization, an `ElementBasis` or a `NodeBasis`.
+    g : ndarray
+        The Green's matrix, `(n_obs, n_slip)`: each sample's line-of-sight per unit slip of each
+        parameter.
+    d : ndarray
+        Each sample's observed line-of-sight, in metres, positive toward the sensor.
+    w : ndarray
+        Each sample's weight.
+    n_slip : int
+        Number of slip parameters.
+    n_ramp : int
+        Number of ramp columns.
     """
 
     def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
@@ -563,6 +585,7 @@ class SlipInversion:
 
     @property
     def n_param(self):
+        """Number of unknowns: the slip parameters plus the ramp columns."""
         return self.n_slip + self.n_ramp
 
     def with_ramp(self, kind):
@@ -879,7 +902,40 @@ class _StackedOperator(LinearOperator):
 
 
 class SlipModel:
-    """A solved slip distribution, with its fit statistics and provenance."""
+    """A solved slip distribution, with its fit statistics and provenance.
+
+    Attributes
+    ----------
+    strike_slip : ndarray
+        Strike-slip of each basis function (element or node), in metres; positive is
+        left-lateral.
+    dip_slip : ndarray
+        Dip-slip of each basis function, in metres; see the conventions page for its sign.
+    ramp : ndarray
+        The fitted nuisance coefficients, in the order of `ramp_labels`.
+    ramp_labels : list of str
+        `"{track}:{term}"` for each ramp column, such as `"asc:offset"`.
+    data : ndarray
+        Each sample's observed line-of-sight, in metres.
+    prediction : ndarray
+        The model's line-of-sight at each sample, slip and ramp together.
+    residual : ndarray
+        Observed minus modelled.
+    x : ndarray
+        The whole solution: strike-slip, dip-slip, then the ramp.
+    smoothing : float or ndarray
+        The smoothing weight it was solved with.
+    options : dict
+        The solve's other settings: smoothing ratios, bounds, polarity, method, ramp, rigidity.
+    mesh : FaultMesh
+        The fault.
+    obs : Observations
+        The samples.
+    basis
+        The slip parameterization.
+    result
+        The solver's own result.
+    """
 
     STAGE = "slip_model"
 
@@ -947,6 +1003,7 @@ class SlipModel:
 
     @property
     def rms_misfit(self):
+        """Root-mean-square of `residual`, unweighted, in metres."""
         return float(np.sqrt(np.mean(self.residual ** 2)))
 
     @property
@@ -1009,10 +1066,12 @@ class SlipModel:
 
     @property
     def slip_magnitude(self):
+        """`hypot(strike_slip, dip_slip)` for each basis function, in metres."""
         return np.hypot(self.strike_slip, self.dip_slip)
 
     @property
     def max_slip(self):
+        """The largest `slip_magnitude`, in metres."""
         return float(self.slip_magnitude.max())
 
     def moment(self, shear_modulus=None, rule="integrated", order=MOMENT_ORDER):
@@ -1154,6 +1213,7 @@ class SlipModel:
 
     @property
     def moment_magnitude(self):
+        """`Mw = (2/3) (log10 M0 - 9.1)` of `moment()` at its default rigidity; NaN for zero moment."""
         m0 = self.moment()
         return float((2.0 / 3.0) * (np.log10(m0) - 9.1)) if m0 > 0 else float("nan")
 
@@ -1564,6 +1624,7 @@ class SlipModel:
         return [node_path, element_path]
 
     def persist(self, workspace, name=None, overwrite=False, **params):
+        """Write the model to a `Workspace` stage and return the stored dataset, reopened."""
         name = name or self.STAGE
         full = {
             "stage": name,

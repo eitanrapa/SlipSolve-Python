@@ -656,10 +656,12 @@ class RemainderTables:
 
     @property
     def has_surface(self):
+        """Whether the tables include `surface`, the finer set for receivers at the surface."""
         return self.surface is not None
 
     @property
     def has_strain(self):
+        """Whether the tables include `strain`, which the strain of a source at depth needs."""
         return self.strain is not None
 
     @classmethod
@@ -794,6 +796,7 @@ class RemainderTables:
 
     # -- files ------------------------------------------------------------------------
     def save(self, path):
+        """Write the tables to a compressed `.npz` file."""
         import json
         path = Path(path).expanduser()
         extra = ({} if self.surface is None else
@@ -811,6 +814,7 @@ class RemainderTables:
 
     @classmethod
     def load(cls, path):
+        """Read tables written by `save`."""
         import json
         with np.load(Path(path).expanduser(), allow_pickle=False) as f:
             surface = ({k: f[f"surface_{k}"] for k in ("r", "z", "whole", "remainder")}

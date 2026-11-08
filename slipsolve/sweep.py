@@ -381,6 +381,7 @@ class DipSweep:
     # -- geometry -----------------------------------------------------------
     @property
     def n_segments(self):
+        """Number of segments, each with its own dip."""
         return int(self.breaks.size - 1)
 
     @property
@@ -965,6 +966,7 @@ class SweepResult:
         return -row["log_evidence"] if self.score == "evidence" else row[self.score]
 
     def solution(self, dips):
+        """The solution vector for the dip combination `dips`."""
         return self._solutions[self._combination(dips)]
 
     def profiles(self):

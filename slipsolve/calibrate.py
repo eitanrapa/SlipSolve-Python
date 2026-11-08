@@ -126,6 +126,7 @@ class CheckerboardTarget:
 
     @property
     def strike(self):
+        """The strike-slip half of `slip`."""
         return self.slip[: self.slip.size // 2]
 
     def unreachable_fraction(self, sign=None):
@@ -316,6 +317,7 @@ class CalibrationCase:
 
     @property
     def name(self):
+        """A name for the case's files, from its stage, cell size, budget, layout and seed."""
         return ("s%d_%.0fkm_b%d_%s_seed%d"
                 % (self.stage, self.cell / 1e3, self.budget, self.layout,
                    self.seed))

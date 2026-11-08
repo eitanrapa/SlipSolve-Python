@@ -227,6 +227,7 @@ class VelocityModel:
 
     @classmethod
     def from_dict(cls, d):
+        """Rebuild a model from `to_dict`'s output."""
         return cls(d["depth"], d["vp"], d["vs"], d["rho"], name=d.get("name"))
 
     def __len__(self):

@@ -74,6 +74,17 @@ class FaultTrace:
     Vertex *order* is meaningful: it fixes the along-strike direction, and hence
     the sign of strike-slip and which side of the fault is "left". Reversing the
     file reverses both consistently.
+
+    Attributes
+    ----------
+    lon : ndarray
+        Vertex longitudes, degrees, in along-strike order.
+    lat : ndarray
+        Vertex latitudes, degrees.
+    name : str or None
+        A label for the trace.
+    n_duplicates_dropped : int
+        Repeated consecutive vertices removed on construction.
     """
 
     def __init__(self, lon, lat, name=None):
@@ -109,6 +120,7 @@ class FaultTrace:
 
     @classmethod
     def from_lonlat(cls, lon, lat, name=None):
+        """A trace from longitude and latitude arrays, in along-strike order."""
         return cls(lon, lat, name=name)
 
     # -- frame -------------------------------------------------------------
@@ -365,6 +377,7 @@ class FaultSegment:
 
     @classmethod
     def from_files(cls, paths):
+        """One segment per file, each read with `from_file`."""
         return [cls.from_file(p) for p in paths]
 
     @classmethod
@@ -384,6 +397,7 @@ class FaultSegment:
 
     @property
     def length(self):
+        """Map-view length, in metres."""
         return float(np.hypot(self.x_end - self.x_begin, self.y_end - self.y_begin))
 
     def strike_vector(self):

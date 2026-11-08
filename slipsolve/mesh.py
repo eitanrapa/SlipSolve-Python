@@ -70,6 +70,25 @@ class FaultMesh:
 
     Built through `vertical`, `curved`, `from_layout` or `join` rather than
     directly; the constructor exists to reopen a persisted mesh.
+
+    Attributes
+    ----------
+    nodes : ndarray
+        `(n_nodes, 3)` node positions, local east, north and up in metres.
+    triangles : ndarray
+        `(n_elements, 3)` node indices of each element. Their winding sets the sign of dip-slip,
+        so it is checked on construction.
+    params : ndarray
+        `(n_nodes, 2)` each node's arc length along the trace and its `z`, in metres: the
+        parameter space a mesh is laid out in.
+    frame : LocalFrame or None
+        The frame the coordinates are in.
+    centres : ndarray or None
+        Cell centres of a lattice mesh, `(n, 3)`, fitted with the surface; None otherwise.
+    centre_params : ndarray or None
+        The same centres in parameter space.
+    attrs : dict
+        How the mesh was built.
     """
 
     def __init__(self, nodes, triangles, params, frame=None, epsg=None, attrs=None,
@@ -386,10 +405,12 @@ class FaultMesh:
     # -- derived geometry --------------------------------------------------
     @property
     def n_nodes(self):
+        """Number of nodes."""
         return self.nodes.shape[0]
 
     @property
     def n_elements(self):
+        """Number of triangular elements."""
         return self.triangles.shape[0]
 
     @property
@@ -420,11 +441,13 @@ class FaultMesh:
 
     @property
     def areas(self):
+        """Element areas, in square metres."""
         v = self.vertices
         return 0.5 * np.linalg.norm(np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=1)
 
     @property
     def centroids(self):
+        """Element centroids, `(n_elements, 3)`, in local metres."""
         return self.vertices.mean(axis=1)
 
     @property
@@ -589,6 +612,7 @@ class FaultMesh:
 
     @classmethod
     def from_dataset(cls, ds):
+        """Rebuild a mesh from `to_dataset`'s output."""
         from .frame import LocalFrame
 
         nodes = np.column_stack([ds["node_x"].values, ds["node_y"].values, ds["node_z"].values])

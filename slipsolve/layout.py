@@ -172,10 +172,12 @@ class MeshLayout:
 
     @property
     def n_nodes(self):
+        """Number of nodes."""
         return int(self.params.shape[0])
 
     @property
     def n_elements(self):
+        """Number of triangles."""
         return int(self.triangles.shape[0])
 
     @property
@@ -200,6 +202,7 @@ class MeshLayout:
         return [slice(int(a), int(b)) for a, b in zip(stop - self.counts, stop)]
 
     def quality(self):
+        """`layout_quality` of this layout."""
         return layout_quality(self.params, self.triangles)
 
     def __repr__(self):

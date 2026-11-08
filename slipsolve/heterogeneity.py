@@ -575,6 +575,7 @@ class Box:
         self.x, self.y, self.depth = (tuple(float(v) for v in r) for r in (x, y, depth))
 
     def contains(self, x, y, depth):
+        """Points strictly inside the box: a boolean mask."""
         return ((x > self.x[0]) & (x < self.x[1]) & (y > self.y[0]) & (y < self.y[1])
                 & (depth > self.depth[0]) & (depth < self.depth[1]))
 
@@ -590,6 +591,7 @@ class Prism:
         self.depth = tuple(float(v) for v in depth)
 
     def contains(self, x, y, depth):
+        """Points strictly inside the prism (inside its polygon and between its depths): a boolean mask."""
         x, y, depth = (np.asarray(a, dtype=float) for a in (x, y, depth))
         inside = self.path.contains_points(np.column_stack([x.ravel(), y.ravel()])).reshape(x.shape)
         return inside & (depth > self.depth[0]) & (depth < self.depth[1])
@@ -805,6 +807,7 @@ class VoxelModel:
 
     @property
     def n_active(self):
+        """Number of active voxels."""
         return int(self.index.shape[0])
 
     def spec(self, i):
@@ -812,6 +815,7 @@ class VoxelModel:
         return ("box", self.bounds(i))
 
     def source(self, engine, i):
+        """Active voxel `i`'s moment source for `engine`, a `VoxelSource`."""
         return VoxelSource(engine, *self.bounds(i))
 
     def bounds(self, i):
@@ -1296,6 +1300,10 @@ class HeterogeneousEngine:
 
     @property
     def gamma(self):
+        """`Gamma`, `(6 n, 6 n)`, built on first use.
+
+        The strain in each active voxel per unit moment density in each.
+        """
         if self._gamma is None:
             n = self.voxels.n_active
             build = (lambda: self.voxels.strain_operator(self.base, workers=self._workers())) \
@@ -1429,6 +1437,10 @@ class HeterogeneousEngine:
         return g0 - self._apply_h(x, y, None, m)
 
     def forward(self, mesh, slip, x, y, look=None, z=None, basis=None):
+        """Displacement produced by `slip`, or line-of-sight with `look`.
+
+        As `slipsolve.greens.HalfSpaceTDE.forward`, with `basis` the parameterisation (elements by default).
+        """
         slip = np.asarray(slip, dtype=float)
         if slip.ndim == 2:
             slip = np.concatenate([slip[:, 0], slip[:, 1]])

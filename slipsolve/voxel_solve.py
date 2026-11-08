@@ -177,6 +177,7 @@ class ConvolutionGamma:
 
     @property
     def nbytes(self):
+        """Memory held by the convolution kernels, in bytes."""
         return self.kernels.nbytes
 
     @property
@@ -240,6 +241,7 @@ class StrainSystem:
         return eps + self.gamma.matvec(moment)
 
     def precondition(self, y):
+        """Apply the preconditioner's inverse: each voxel's own `P_v^-1` to its six rows of `y`."""
         n = self.d.shape[0]
         return np.einsum("nab,nbk->nak", self.p_inv, y.reshape(n, 6, -1)).reshape(6 * n, -1)
 

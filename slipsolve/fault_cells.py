@@ -267,6 +267,7 @@ class PrismCells:
 
     @property
     def n_active(self):
+        """Number of active cells."""
         return int(self.ids.size)
 
     def stiffness(self):
@@ -281,6 +282,7 @@ class PrismCells:
         return ("prism", self.inner[k], self.outer[k])
 
     def source(self, engine, i):
+        """Active cell `i`'s moment source for `engine`."""
         return _make_source(engine, self.spec(i))
 
     def contains(self, points):
@@ -356,6 +358,7 @@ class PrismCells:
         return _pairwise_gamma([self], engine, log=log, workers=workers)
 
     def describe(self):
+        """A JSON-able summary: the cell counts and a digest of the moduli."""
         from .heterogeneity import _digest
 
         return {"kind": "prism_cells", "n_cells": int(self.active.size), "n_active": self.n_active,
@@ -441,6 +444,7 @@ class FaultCells(PrismCells):
         return True
 
     def describe(self):
+        """A JSON-able summary: `PrismCells.describe`'s, with the layers, sides and mesh."""
         out = super().describe()
         out.update(kind="fault_cells", thickness=self.thickness.tolist(), sides=list(self.sides),
                    mesh=self.mesh.digest())
@@ -538,13 +542,16 @@ class CombinedCells:
 
     @property
     def n_active(self):
+        """Number of active cells, over all the parts."""
         return int(self._starts[-1])
 
     @property
     def centres(self):
+        """Centres of the active cells, part by part, `(n_active, 3)`."""
         return np.concatenate([m.centres for m in self.models]) if self.n_active else np.zeros((0, 3))
 
     def stiffness(self):
+        """`D` of every part, block-diagonal (see `slipsolve.heterogeneity.VoxelModel.stiffness`)."""
         import scipy.sparse as sp
 
         return sp.block_diag([m.stiffness() for m in self.models if m.n_active], format="csr")
@@ -554,13 +561,19 @@ class CombinedCells:
         return self.models[a], i - self._starts[a]
 
     def spec(self, i):
+        """Active cell `i`'s picklable description, from the part that holds it."""
         model, j = self._locate(i)
         return model.spec(j)
 
     def source(self, engine, i):
+        """Active cell `i`'s moment source for `engine`."""
         return _make_source(engine, self.spec(i))
 
     def on_faces(self, x, y, z=None, tol=None):
+        """Points on a face of any part's active cells: a boolean mask.
+
+        See `slipsolve.heterogeneity.VoxelModel.on_faces`.
+        """
         out = np.zeros(np.size(x), bool)
         for m in self.models:
             if m.n_active:
@@ -568,6 +581,10 @@ class CombinedCells:
         return out
 
     def check_clearance(self, mesh, buffer=None, samples=24, contact=False):
+        """Run each part's `check_clearance` against `mesh`.
+
+        See `slipsolve.heterogeneity.VoxelModel.check_clearance`.
+        """
         for m in self.models:
             if m.n_active:
                 m.check_clearance(mesh, buffer=buffer, samples=samples, contact=contact)
@@ -585,6 +602,7 @@ class CombinedCells:
         return _pairwise_gamma(live, engine, log=log, workers=workers, blocks=own)
 
     def describe(self):
+        """A JSON-able summary of each part."""
         parts = []
         for m in self.models:
             if hasattr(m, "describe"):

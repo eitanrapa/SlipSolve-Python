@@ -221,10 +221,12 @@ class RigidityContrast:
     # -- intervals and blocks -------------------------------------------------
     @property
     def n_intervals(self):
+        """Number of intervals along strike, each with its own ratio."""
         return int(self.ratios.shape[0])
 
     @property
     def n_bands(self):
+        """Number of depth bands (`depth_breaks`), each with its own ratio."""
         return int(self.ratios.shape[1])
 
     def with_ratio(self, ratio):
@@ -296,6 +298,7 @@ class RigidityContrast:
 
     # -- persistence ------------------------------------------------------------
     def to_dict(self):
+        """A JSON-able form, for a saved model's options."""
         return {"lon": self.trace.lon.tolist(), "lat": self.trace.lat.tolist(),
                 "trace_name": self.trace.name, "frame": self.frame.to_dict(),
                 "side": self.side, "ratio": self.ratio.tolist(),
@@ -304,6 +307,7 @@ class RigidityContrast:
 
     @classmethod
     def from_dict(cls, d):
+        """Rebuild a contrast from `to_dict`'s output."""
         from .frame import LocalFrame
 
         trace = FaultTrace.from_lonlat(np.asarray(d["lon"]), np.asarray(d["lat"]),
@@ -463,6 +467,10 @@ class Bimaterial:
 
     @classmethod
     def from_description(cls, d, engine=None):
+        """Rebuild a model from `describe`'s record.
+
+        `engine` defaults to a half-space with the recorded Poisson's ratio.
+        """
         return cls(RigidityContrast.from_dict(d["contrast"]),
                    engine=engine if engine is not None else HalfSpaceTDE(d.get("nu", 0.25)),
                    exact=d.get("exact", False), extend=d.get("extend"),
@@ -899,6 +907,7 @@ class InterfaceSolve:
 
     @property
     def n_elements(self):
+        """Number of triangles in the interface."""
         return int(self.vertices.shape[0])
 
     def _sides(self, contrast):

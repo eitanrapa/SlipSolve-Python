@@ -188,11 +188,13 @@ class CovarianceModel:
         return np.where(h == 0, 0.0, gamma)
 
     def to_dict(self):
+        """A JSON-able form."""
         return {"sill": float(self.sill), "range_m": float(self.range_m),
                 "nugget": float(self.nugget), "kind": str(self.kind)}
 
     @classmethod
     def from_dict(cls, data):
+        """Rebuild a model from `to_dict`'s output."""
         return cls(sill=float(data["sill"]), range_m=float(data["range_m"]),
                    nugget=float(data["nugget"]),
                    kind=str(data.get("kind", "exponential")))

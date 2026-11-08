@@ -33,6 +33,22 @@ class LocalFrame:
     `origin_lon`; pass it separately only to reproduce an existing model built
     on a different meridian. `ellps` defaults to WGS84; set it to `"clrk66"`
     to reproduce SlipSolve-Curve's `ll2xy.m` numerically.
+
+    Attributes
+    ----------
+    origin_lon : float
+        Longitude of the local origin, degrees.
+    origin_lat : float
+        Latitude of the local origin, degrees.
+    ref_lon : float
+        The projection's central meridian, degrees.
+    ellps : str
+        The ellipsoid.
+    crs : pyproj.CRS
+        The transverse Mercator projection, without the origin shift.
+    local_crs : pyproj.CRS
+        The same projection with the origin folded into its false easting and northing: the CRS
+        of a raster whose x and y are local metres.
     """
 
     def __init__(self, origin_lon, origin_lat, ref_lon=None, ellps="WGS84"):
@@ -113,6 +129,7 @@ class LocalFrame:
 
     @classmethod
     def from_dict(cls, d):
+        """Rebuild a frame from `to_dict`'s output."""
         return cls(d["origin_lon"], d["origin_lat"],
                    ref_lon=d.get("ref_lon"), ellps=d.get("ellps", "WGS84"))
 

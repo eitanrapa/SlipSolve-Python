@@ -35,6 +35,11 @@ class Observations:
     sensor), `look_e`/`look_n`/`look_u` (target->sensor unit vector),
     `std` (the within-cell scatter), `weight` and `track`; and `region`
     when the track was sampled with `regions=` (see `from_los`).
+
+    Attributes
+    ----------
+    ds : xarray.Dataset
+        The samples, with the variables above.
     """
 
     STAGE = "slip_observations"
@@ -378,19 +383,23 @@ class Observations:
     # -- accessors ---------------------------------------------------------
     @property
     def n(self):
+        """Number of samples."""
         return int(self.ds.sizes["obs"])
 
     @property
     def frame(self):
+        """The `LocalFrame` the samples are in."""
         from .frame import LocalFrame
 
         return LocalFrame.from_dict(self.ds.attrs["frame"])
 
     @property
     def tracks(self):
+        """The track names, sorted."""
         return [str(t) for t in np.unique(self.ds["track"].values)]
 
     def track_mask(self, name):
+        """Boolean mask of the samples from track `name`."""
         return self.ds["track"].values == name
 
     # -- persistence -------------------------------------------------------
@@ -418,6 +427,7 @@ class Observations:
 
     @classmethod
     def from_zarr(cls, path):
+        """Reopen a set written by `persist`."""
         return cls(open_stage(path))
 
     def __repr__(self):
