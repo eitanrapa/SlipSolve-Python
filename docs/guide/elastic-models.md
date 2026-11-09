@@ -168,8 +168,9 @@ inversion = SlipInversion(mesh, obs, engine=engine, velocity_model=crust)
   - The product of curvature and gravity is left out too, about 1% of the field at 500 km.
 - **Frame.** Distances and azimuths are those of the local frame (a transverse Mercator), whose
   own distortion is a few tenths of a percent at 500 km. Its grid north also turns away from
-  true north, by about the longitude offset times the sine of the latitude. The time-dependent modes
-  rotate the look vectors for that (`frame_looks`); `SlipInversion` takes them as given.
+  true north, by about the longitude offset times the sine of the latitude. Over such distances
+  rotate the look vectors for that too: `SlipInversion(frame_looks=True)`, the default of the
+  time-dependent modes ([Conventions](conventions.md#one-local-frame)).
 
 ## Rigidity in the moment
 

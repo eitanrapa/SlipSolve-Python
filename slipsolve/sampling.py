@@ -474,30 +474,46 @@ class Observations:
         return f"<Observations n={self.n} tracks={self.tracks}>"
 
 
+def _frame_axes(frame, x, y):
+    """True east and north at `(x, y)` as unit vectors along a `LocalFrame`'s axes: `(east, north)`, each `(2, ...)`.
+
+    The frame's projection is conformal, so the two stay perpendicular; each is read off the projection by a central
+    difference.
+    """
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    lon, lat = frame.to_lonlat(x, y)
+    half = 5e-4                                     # degrees: about 50 m either side
+    east = np.array(frame.to_local(lon + half, lat)) - np.array(frame.to_local(lon - half, lat))
+    north = np.array(frame.to_local(lon, lat + half)) - np.array(frame.to_local(lon, lat - half))
+    return east / np.hypot(*east), north / np.hypot(*north)
+
+
 def frame_looks(frame, x, y, look_e, look_n, look_u):
     """Geographic east/north/up look vectors rotated into a `LocalFrame`'s axes.
 
     A look vector is measured against true east and north, but the Green's functions
     return displacement along the frame's x and y, and a transverse Mercator's grid
     north turns away from true north with distance from its central meridian (by about
-    `d_lon * sin(lat)`). A plain coseismic run ignores this: over its few hundred km,
-    near a low-latitude meridian, the turn is a fraction of a degree. It is 3 degrees at
-    500 km from the meridian at 36 N, which on 20 mm/yr of elastic signal is 1 mm/yr, so
-    the postseismic and interseismic modes rotate by default.
-
-    The frame's projection is conformal, so true east and north stay perpendicular; each
-    is read off the projection by a small step. The vertical is untouched.
+    `d_lon * sin(lat)`): about 1 degree 150 km from the meridian at 37 N, 3 degrees at
+    500 km from it at 36 N, which on 20 mm/yr of elastic signal is 1 mm/yr. The
+    postseismic and interseismic modes rotate by default; `SlipInversion` does when
+    asked (`frame_looks=True`). The vertical is untouched.
     """
-    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    east, north = _frame_axes(frame, x, y)
     look_e, look_n = np.asarray(look_e, dtype=float), np.asarray(look_n, dtype=float)
-    lon, lat = frame.to_lonlat(x, y)
-    step = 1e-3                                     # degrees: about 100 m
-    east = np.array(frame.to_local(lon + step, lat)) - np.array([x, y])
-    north = np.array(frame.to_local(lon, lat + step)) - np.array([x, y])
-    east = east / np.hypot(*east)
-    north = north / np.hypot(*north)
     return (look_e * east[0] + look_n * north[0], look_e * east[1] + look_n * north[1],
             np.asarray(look_u, dtype=float))
+
+
+def geographic_enu(frame, x, y, u_x, u_y, u_z):
+    """Displacement along a `LocalFrame`'s axes turned to geographic east/north/up, `frame_looks`' inverse.
+
+    The Green's functions give displacement along the frame's x and y; a model solved with
+    rotated look vectors reports its east and north through this.
+    """
+    east, north = _frame_axes(frame, x, y)
+    u_x, u_y = np.asarray(u_x, dtype=float), np.asarray(u_y, dtype=float)
+    return u_x * east[0] + u_y * east[1], u_x * north[0] + u_y * north[1], np.asarray(u_z, dtype=float)
 
 
 def stack_epsg(ds):

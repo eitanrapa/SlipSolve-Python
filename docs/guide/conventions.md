@@ -50,6 +50,13 @@ zones, and their coordinates are then metres from two different central meridian
 - To write a raster whose `x`/`y` are local metres, tag it with
   `frame.local_crs`, not `frame.crs`. The latter is the bare projection, offset from
   local metres by the origin and the 500 km false easting.
+- **The frame's \(y\) is grid north, not true north.** Away from the central meridian
+  they differ by about the longitude offset times the sine of the latitude: 1 degree
+  150 km from it at 37 N, which puts 1.7% of the horizontal field in the wrong
+  component. Look vectors are geographic. `SlipInversion(frame_looks=True)` rotates
+  them into the frame's axes, as the time-dependent modes do by default, and a model
+  solved that way reports geographic east and north. Turn it on once the data reach
+  a degree or more of longitude from the meridian at mid latitudes.
 
 ## Depth and the free surface
 

@@ -21,6 +21,7 @@ model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
 | `velocity_model` | the rigidity used for the moment; 30 GPa without it |
 | `covariance` | a [noise model](observations.md#noise), one for every track or `{track: model}` |
 | `sees` | for a [joined mesh](faults-and-meshes.md#several-faults), which faults each track measures |
+| `frame_looks` | rotate the look vectors into the local frame's axes ([Conventions](conventions.md#one-local-frame)); off by default |
 
 ## The problem solved
 
@@ -189,7 +190,10 @@ grid = model.surface_displacement(spacing=1000.0)           # ux, uy, uz on a gr
 
 `surface_displacement` returns an xarray Dataset of east, north and up displacement
 on a regular grid in the local frame, NaN within about an element size of the trace,
-where a discretised fault means nothing.
+where a discretised fault means nothing. East and north are the frame's x and y, or
+geographic for a model solved with `frame_looks=True` (the Dataset's
+`horizontal_axes` says which); such a model also rotates the look vectors given to
+`forward`.
 
 ### Saving and exporting
 

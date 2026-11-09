@@ -586,7 +586,7 @@ class SlipInversion:
 
     def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
                  velocity_model=None, covariance=None, sees=None, extra_columns=None,
-                 nuisance_prior=None, g=None):
+                 nuisance_prior=None, g=None, frame_looks=False):
         """`engine` and `basis` choose the physics and the parameterization.
 
         `ramp` adds unbounded per-track nuisance columns -- `"none"`,
@@ -653,6 +653,17 @@ class SlipInversion:
 
         `g` is the Green's matrix when the caller has already built it,
         `(n_obs, basis.n_param)`; the engine is then used only to forward-model.
+
+        `frame_looks` rotates each look vector into the local frame's axes
+        (`slipsolve.sampling.frame_looks`). The Green's functions give displacement along the
+        frame's x and y, and the frame's grid north turns away from true north with distance
+        from its central meridian, by about the longitude offset times the sine of the
+        latitude: 1 degree 150 km from it at 37 N, so 1.7% of the horizontal field lands in
+        the wrong component. Off by default; worth it once the data reach a degree or more of
+        longitude from the meridian at mid latitudes. A model solved this way forwards the same
+        way: `SlipModel.forward` rotates the look vectors it is given, and its east and north,
+        and `SlipModel.surface_displacement`'s, are geographic. With `g` given it records how
+        `g` was built.
         """
         self.mesh = mesh
         self.obs = obs
@@ -667,9 +678,13 @@ class SlipInversion:
         self.d = np.asarray(ds["los"].values, dtype=float)
         self.w = np.asarray(ds["weight"].values, dtype=float)
         self.exact_basis = bool(getattr(self.engine, "supports_basis", False))
+        self.use_frame_looks = bool(frame_looks)
         if g is None:
-            points = (ds["x"].values, ds["y"].values,
-                      ds["look_e"].values, ds["look_n"].values, ds["look_u"].values)
+            if self.use_frame_looks and ds.attrs.get("frame") is None:
+                raise ValueError("frame_looks needs the observations' LocalFrame, which these do not carry")
+            looks = (obs.frame_looks() if self.use_frame_looks
+                     else (ds["look_e"].values, ds["look_n"].values, ds["look_u"].values))
+            points = (ds["x"].values, ds["y"].values, *looks)
             self.g = assemble_design(self.engine, mesh, self.basis, points, elevation=obs_elevation(obs))
         else:
             self.g = np.asarray(g, dtype=float)
@@ -954,6 +969,8 @@ class SlipInversion:
                 # Which faults each track was allowed to see; None = all of them.
                 "sees": getattr(self, "sees", None),
                 "nuisance_prior": self.nuisance_prior,
+                # Carried so the model forwards in the axes it was solved in.
+                "frame_looks": bool(getattr(self, "use_frame_looks", False)),
             },
         )
 
@@ -1543,14 +1560,34 @@ class SlipModel:
         return np.column_stack([self.basis.element_values(self.strike_slip),
                                 self.basis.element_values(self.dip_slip)])
 
+    @property
+    def frame_rotated(self):
+        """Whether the model was solved with look vectors rotated into its frame's axes (`frame_looks`)."""
+        return bool((getattr(self, "options", None) or {}).get("frame_looks", False))
+
     def forward(self, x, y, look=None):
-        """Predict displacement at arbitrary points from this slip model."""
+        """Predict displacement at arbitrary points from this slip model.
+
+        With `look` (`(look_e, look_n, look_u)`, geographic), the line of sight; without, east/north/up `(n, 3)`.
+        A model solved with `frame_looks` rotates `look` into its frame and returns geographic east and north.
+        """
         engine = self._inversion.engine
+        rotated = self.frame_rotated and self.mesh.frame is not None
+        if rotated and look is not None:
+            from .sampling import frame_looks
+
+            look = frame_looks(self.mesh.frame, np.ravel(x), np.ravel(y), *(np.ravel(v) for v in look))
         if getattr(self._inversion, "exact_basis", False):
             # The engine assembled in the basis, so hand it the coefficients.
-            return engine.forward(self.mesh, self.x[:2 * self.basis.n_basis],
-                                  x, y, look=look, basis=self.basis)
-        return engine.forward(self.mesh, self.element_slip, x, y, look=look)
+            out = engine.forward(self.mesh, self.x[:2 * self.basis.n_basis],
+                                 x, y, look=look, basis=self.basis)
+        else:
+            out = engine.forward(self.mesh, self.element_slip, x, y, look=look)
+        if rotated and look is None:
+            from .sampling import geographic_enu
+
+            out = np.column_stack(geographic_enu(self.mesh.frame, np.ravel(x), np.ravel(y), *np.asarray(out).T))
+        return out
 
     def surface_displacement(self, spacing=1000.0, pad=50e3, bounds=None,
                              exclude_within=None, block=4096):
@@ -1563,6 +1600,8 @@ class SlipModel:
         an inversion recovers is the full vector, so it is worth being able to
         look at it. Ascending and descending line-of-sight fields can be checked
         against it, and the horizontal field is what a GPS network would measure.
+        East and north are the frame's x and y, or geographic for a model solved with
+        `frame_looks` (the Dataset's `horizontal_axes` attribute says which).
 
         `bounds` is `(x_min, x_max, y_min, y_max)` in local-frame metres;
         without it the mesh's footprint plus `pad` is used.
@@ -1614,6 +1653,12 @@ class SlipModel:
             at = index[start:start + int(block)]
             flat[at] = self._inversion.engine.forward(
                 self.mesh, self.element_slip, xx.ravel()[at], yy.ravel()[at])
+        if self.frame_rotated:
+            # Solved with rotated look vectors: east and north are geographic, not the frame's x and y.
+            from .sampling import geographic_enu
+
+            flat[index] = np.column_stack(geographic_enu(self.mesh.frame, xx.ravel()[index], yy.ravel()[index],
+                                                         *flat[index].T))
 
         ds = xr.Dataset(
             {name: (("y", "x"), flat[:, i].reshape(xx.shape).astype(np.float32))
@@ -1624,7 +1669,8 @@ class SlipModel:
             ds[name].attrs.update(units="m", long_name=f"surface displacement, {direction}")
         ds.attrs.update(engine=self._inversion.engine.name, basis=self.basis.name,
                         smoothing=self.smoothing, spacing=float(spacing),
-                        exclude_within=float(exclude_within))
+                        exclude_within=float(exclude_within),
+                        horizontal_axes="geographic" if self.frame_rotated else "frame")
         # `local_crs`, not `crs`: this grid's x/y are local metres, and the frame's
         # bare projection is offset from them by the origin's projected position
         # (its false easting, and its distance from the equator) -- an error

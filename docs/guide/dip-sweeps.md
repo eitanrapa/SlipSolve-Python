@@ -20,7 +20,9 @@ result.profiles()                 # each segment's score against its dip, others
 
 Dips follow `FaultMesh.curved(uniform_dip=)`: below 90 the fault dips toward the
 trace's left-hand side, above 90 toward its right. Check `mesh.dip_direction` on
-your trace (for example on `sweep.segment_mesh(0, 70)`).
+your trace (for example on `sweep.segment_mesh(0, 70)`). The keywords `engine`, `ramp`,
+`velocity_model` and `frame_looks` mean what they mean to
+[`SlipInversion`](inversion.md).
 
 ## How it stays affordable
 

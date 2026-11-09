@@ -540,7 +540,8 @@ class TimeDependentInversion(SlipInversion):
 
         joined = FaultMesh.join([mesh] * K)
         super().__init__(joined, obs, engine=engine, ramp=ramp, basis=basis, velocity_model=velocity_model,
-                         covariance=covariance, nuisance_prior=nuisance_prior, g=g, extra_columns=extra)
+                         covariance=covariance, nuisance_prior=nuisance_prior, g=g, extra_columns=extra,
+                         frame_looks=frame_looks)
         self.boundary_scale = pinned_edges(self.w)
 
     @staticmethod

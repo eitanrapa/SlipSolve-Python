@@ -516,7 +516,7 @@ obs, model, history = iterate_sampling(
 - `frame_looks` (on by default) rotates look vectors into the local frame's axes for the
   Green's functions. A transverse Mercator's grid north turns away from true north with
   distance from its central meridian: 3 degrees at 500 km at 36 N, about 1 mm/yr on 20 mm/yr of
-  elastic signal. The plain `SlipInversion` keeps geographic looks, as every coseismic model has.
+  elastic signal. A plain `SlipInversion` rotates only when asked (`frame_looks=True`).
 - The zero-slip rows are scaled by the median row weight (`pinned_edges`), so an edge is pinned
   in m/yr as it is in metres. A plain `SlipInversion` sets `boundary_ratio` by hand.
 - `solve` uses `method="active_set"`, as every inversion does by default. Limits whose two ends coincide fix a parameter. An

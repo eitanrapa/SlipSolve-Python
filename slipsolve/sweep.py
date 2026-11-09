@@ -271,8 +271,8 @@ class DipSweep:
     `dips` is the grid every segment draws from: planar dips, and tuples for a
     dip that changes with depth (see `geometry_key`). `max_depth`,
     `edge_length`, `down_dip_levels`, `bias_w` and `depths` place the
-    nodes as in `FaultMesh.curved`. `engine`, `ramp` and
-    `velocity_model` mean what they mean to `SlipInversion`, and the
+    nodes as in `FaultMesh.curved`. `engine`, `ramp`, `velocity_model` and
+    `frame_looks` mean what they mean to `SlipInversion`, and the
     remaining keywords are `SlipInversion.solve`'s regularization and
     bounds; the slip is always nodal.
 
@@ -297,7 +297,7 @@ class DipSweep:
                  ramp="none", reference_dip=90.0, velocity_model=None, ss_ratio=1.0,
                  ds_ratio=3.0, boundary_ratio=1.0, sides=("bottom", "left", "right"),
                  polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0),
-                 contrast=None, ratios=None):
+                 contrast=None, ratios=None, frame_looks=False):
         if hasattr(engine, "contrast"):
             raise ValueError("give the rigidity contrast to DipSweep(contrast=...), with a plain "
                              "engine, so the sweep can scale its blocks; not a Bimaterial engine")
@@ -329,6 +329,7 @@ class DipSweep:
         self.engine = engine
         self.ramp_kind = ramp_spec(ramp)
         self.velocity_model = velocity_model
+        self.frame_looks = bool(frame_looks)
         self.reference_dip = float(reference_dip)
         self.sides = tuple(sides)
         self._meshes, self._submeshes, self._blocks = {}, {}, {}
@@ -485,7 +486,7 @@ class DipSweep:
         if dip not in self._blocks:
             self._blocks[dip] = [
                 np.asarray(SlipInversion(self.segment_mesh(j, dip), self.obs, engine=self.engine,
-                                         basis="node").g, dtype=float)
+                                         basis="node", frame_looks=self.frame_looks).g, dtype=float)
                 for j in range(self.n_segments)]
         return self._blocks[dip]
 
