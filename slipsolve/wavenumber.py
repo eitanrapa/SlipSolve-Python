@@ -261,7 +261,12 @@ def _layer_index(tops, z):
 
 
 class _Solution:
-    """The layer coefficients for one source depth, at every wavenumber."""
+    """The layer coefficients for one source depth, at every wavenumber.
+
+    A layer's `lam` and `mu` are numbers, or arrays along the wavenumber axis (`(n_layers, n_k)`), and may be
+    complex: the viscoelastic tables (`slipsolve.relaxation`) solve it at complex moduli, many Laplace
+    variables at once, each its own stretch of `k`.
+    """
 
     def __init__(self, k, tops, lam, mu, z_source, psv_jump, sh_jump):
         k = np.asarray(k, dtype=float)
@@ -269,9 +274,11 @@ class _Solution:
         if z_source > 0 and np.any(np.isclose(tops, z_source, rtol=0, atol=1e-9)):
             raise ValueError(f"a source at {z_source} m sits on a layer interface")
         # Split the source's layer at the source: the jump goes on that interface.
+        lam, mu = np.asarray(lam), np.asarray(mu)
         self.tops = np.insert(tops, j + 1, z_source)
-        self.lam = np.insert(lam, j + 1, lam[j])
-        self.mu = np.insert(mu, j + 1, mu[j])
+        self.lam = np.insert(lam, j + 1, lam[j], axis=0)
+        self.mu = np.insert(mu, j + 1, mu[j], axis=0)
+        dtype = np.result_type(self.lam, self.mu, np.float64)
         self.k = k
         n_layers = self.tops.size
         thick = np.diff(self.tops)
@@ -283,10 +290,10 @@ class _Solution:
         n_sh = 2 * (n_layers - 1) + 1
         self._cols = ([slice(2 * i, 2 * i + 2) for i in range(n_layers - 1)]
                       + [slice(2 * (n_layers - 1), n_sh)])
-        a = np.zeros((nk, n_psv, n_psv))
-        b = np.zeros((nk, n_sh, n_sh))
-        rhs = np.zeros((nk, n_psv, nsrc))
-        rhs_sh = np.zeros((nk, n_sh, nsrc))
+        a = np.zeros((nk, n_psv, n_psv), dtype=dtype)
+        b = np.zeros((nk, n_sh, n_sh), dtype=dtype)
+        rhs = np.zeros((nk, n_psv, nsrc), dtype=dtype)
+        rhs_sh = np.zeros((nk, n_sh, nsrc), dtype=dtype)
         zero = np.zeros(nk)
 
         # The free surface: no traction.
@@ -324,7 +331,7 @@ class _Solution:
         z_receiver = np.atleast_1d(np.asarray(z_receiver, dtype=float))
         k = self.k
         n_layers = self.tops.size
-        out = np.empty((6 if derivatives else 3, z_receiver.size, k.size, self.c.shape[-1]))
+        out = np.empty((6 if derivatives else 3, z_receiver.size, k.size, self.c.shape[-1]), dtype=self.c.dtype)
         layer = _layer_index(self.tops, z_receiver)
         for which in np.unique(layer):
             pick = np.flatnonzero(layer == which)
@@ -340,7 +347,7 @@ class _Solution:
             out[2, pick] = np.einsum("zki,kis->zks", e_sh[:, :, 0, :],
                                      self.c_sh[:, self._cols[which], :])
             if derivatives:
-                lam, mu = self.lam[which], self.mu[which]
+                lam, mu = (v[None, :, None] if np.ndim(v) else v for v in (self.lam[which], self.mu[which]))
                 # The traction rows, scaled by 1 / (k MU_SCALE) as in the global matrix.
                 rs = np.einsum("zkri,kis->rzks", e[:, :, 2:4, :], self.c[:, self._col[which], :])
                 t = np.einsum("zki,kis->zks", e_sh[:, :, 1, :], self.c_sh[:, self._cols[which], :])

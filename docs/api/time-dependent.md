@@ -10,6 +10,8 @@
 
 ::: slipsolve.patterns
 
+::: slipsolve.relaxation
+
 ::: slipsolve.psgrn
 
 ::: slipsolve.tsurf

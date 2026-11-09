@@ -7,10 +7,11 @@ files. This module:
 
 - writes its input from a `slipsolve.edgrn.VelocityModel` and a `Rheology` per depth range (`write_psgrn_input`,
   `run_psgrn`);
-- reads its displacement tables (`PsgrnTables`);
-- splits their time dependence into a few functions with an SVD (`PsgrnTables.modes`);
-- integrates each part over a solved slip model's own mesh and basis (`relaxation_pattern`), so the relaxation goes
-  into the postseismic mode as a `slipsolve.patterns.Pattern` with one amplitude.
+- reads its displacement tables (`PsgrnTables`), into the class `slipsolve.relaxation` computes its own in, so the
+  modes, `relaxation_history` and `relaxation_pattern` work on either.
+
+`slipsolve.relaxation` computes the same tables without PSGRN and without gravity. PSGRN is the way to have gravity,
+which dip-slip relaxation over long times needs.
 
 **What is used.** For t > 0, PSGRN's tables hold the postseismic part, coseismic subtracted. These samples are the
 complete field: the half-space solution PSGRN subtracts from its coseismic tables, and PSCMP adds back, is elastic
@@ -54,98 +55,19 @@ from pathlib import Path
 
 import numpy as np
 
-from .edgrn import EdgrnTables
-from .layered import _moment_components, _slip_directions, _tent, _triangle_quadrature
-from .patterns import Pattern
-from .temporal import TimeBasis
+from .relaxation import (COMPONENTS, SECONDS_PER_DAY, RelaxationTables, Rheology, _constant_layers,  # noqa: F401
+                         relaxation_history, relaxation_pattern)
 
 __all__ = ["Rheology", "PsgrnTables", "psgrn_layers", "write_psgrn_input", "run_psgrn", "find_psgrn",
            "relaxation_history", "relaxation_pattern"]
 
-#: The tables a shear dislocation needs, as `slipsolve.edgrn` names them: no explosion, and no tangential CLVD.
-COMPONENTS = {"ss": ("uz", "ur", "ut"), "ds": ("uz", "ur", "ut"), "cl": ("uz", "ur")}
 #: PSGRN's output names for the three displacement, six stress and five other fields; only the first three are read.
 OUTPUT_NAMES = (("uz", "ur", "ut"), ("szz", "srr", "stt", "szr", "srt", "stz"), ("tr", "tt", "rot", "gd", "gr"))
 #: Environment variable naming a PSGRN executable, checked after `executable=`.
 ENVIRONMENT = "SLIPSOLVE_PSGRN"
-SECONDS_PER_DAY = 86400.0
-
-
-class Rheology:
-    """The rheology of one depth range, in metres from `top` to `bottom` (`None`: to the bottom of the half-space).
-
-    A Burgers body: a Maxwell element (the layer's own shear modulus with `eta_maxwell`) in series with a Kelvin
-    element (`eta_kelvin`, and a modulus set by `alpha`). `None` is an infinite viscosity, so:
-
-    - both `None` is elastic;
-    - `eta_kelvin=None` (or `alpha=1`) is Maxwell;
-    - `eta_maxwell=None` is a Standard Linear Solid.
-
-    `alpha` is the fully relaxed over the unrelaxed modulus of the Kelvin part, `mu_K / (mu_K + mu)` in PSGRN's terms.
-    A Standard Linear Solid relaxes stress with the time `eta_kelvin (1 - alpha) / mu` and creeps with
-    `eta_kelvin (1 - alpha) / (alpha mu)`. A Maxwell body relaxes stress with `eta_maxwell / mu`. The bulk modulus
-    stays elastic.
-    """
-
-    def __init__(self, top, bottom=None, eta_maxwell=None, eta_kelvin=None, alpha=1.0):
-        self.top = float(top)
-        self.bottom = None if bottom is None else float(bottom)
-        if self.bottom is not None and not self.bottom > self.top:
-            raise ValueError(f"a rheology's bottom ({self.bottom}) must lie below its top ({self.top})")
-        for label, value in (("eta_maxwell", eta_maxwell), ("eta_kelvin", eta_kelvin)):
-            if value is not None and not float(value) > 0:
-                raise ValueError(f"{label} must be positive, or None for infinite")
-        self.eta_maxwell = None if eta_maxwell is None else float(eta_maxwell)
-        self.eta_kelvin = None if eta_kelvin is None else float(eta_kelvin)
-        self.alpha = float(alpha)
-        if not 0.0 < self.alpha <= 1.0:
-            raise ValueError("alpha must be in (0, 1]")
-
-    def contains(self, depth):
-        """Whether `depth` lies in `[top, bottom)`."""
-        return depth >= self.top and (self.bottom is None or depth < self.bottom)
-
-    def psgrn(self):
-        """PSGRN's `eta1 eta2 alpha` (Kelvin, Maxwell, alpha), with 0 for infinite."""
-        return (0.0 if self.eta_kelvin is None else self.eta_kelvin,
-                0.0 if self.eta_maxwell is None else self.eta_maxwell,
-                self.alpha)
-
-    def scaled(self, factor):
-        """The same with every viscosity times `factor`."""
-        return Rheology(self.top, self.bottom,
-                        None if self.eta_maxwell is None else self.eta_maxwell * factor,
-                        None if self.eta_kelvin is None else self.eta_kelvin * factor, self.alpha)
-
-    def __repr__(self):
-        bottom = "" if self.bottom is None else f"-{self.bottom / 1e3:g}"
-        return (f"<Rheology {self.top / 1e3:g}{bottom} km maxwell={self.eta_maxwell} kelvin={self.eta_kelvin} "
-                f"alpha={self.alpha:g}>")
 
 
 _ELASTIC = (0.0, 0.0, 1.0)
-
-
-def _constant_layers(model):
-    """`[(top, vp, vs, rho)]` of a piecewise-constant velocity model, the last row the half-space's top."""
-    depth, vp, vs, rho = (np.asarray(a, dtype=float) for a in (model.depth, model.vp, model.vs, model.rho))
-    if depth[0] > 0:
-        raise ValueError("the velocity model must start at the surface")
-    layers = []
-    for i in range(depth.size - 1):
-        if depth[i + 1] == depth[i]:
-            continue
-        if not np.allclose([vp[i], vs[i], rho[i]], [vp[i + 1], vs[i + 1], rho[i + 1]], rtol=1e-9):
-            raise NotImplementedError(f"the model has a gradient between {depth[i]:.0f} and {depth[i + 1]:.0f} m; "
-                                      "give it as constant layers")
-        layers.append((depth[i], vp[i], vs[i], rho[i]))
-    layers.append((depth[-1], vp[-1], vs[-1], rho[-1]))
-    merged = [layers[0]]
-    for row in layers[1:]:
-        if np.allclose(row[1:], merged[-1][1:], rtol=1e-9):
-            continue
-        merged.append(row)
-    return merged
 
 
 def psgrn_layers(model, rheology=()):
@@ -331,27 +253,11 @@ def _interfaces(text):
     return np.unique(out)
 
 
-class PsgrnTables:
-    """PSGRN's displacement tables, on a uniform `(r, z)` grid at `times` (days, the first 0).
+class PsgrnTables(RelaxationTables):
+    """PSGRN's displacement tables: a `slipsolve.relaxation.RelaxationTables` read from a PSGRN run.
 
-    `coseismic[kind][component]` is `(nr, nz)`: the elastic response less the receiver layer's half-space.
-    `postseismic[kind][component]` is `(nt, nr, nz)`: the response at each time less the coseismic, 0 at `times[0]`.
-    Kinds are `ss`, `ds`, `cl`. Components are `uz` (positive down), `ur` and `ut`, as `slipsolve.edgrn.EdgrnTables`
-    has them: per unit potency, the azimuthal factor stripped. `interfaces` are the depths no interpolation crosses.
+    `coseismic` is PSGRN's: the elastic response less the receiver layer's half-space.
     """
-
-    def __init__(self, r, z, times, coseismic, postseismic, interfaces=(), attrs=None):
-        self.r = np.asarray(r, dtype=float)
-        self.z = np.asarray(z, dtype=float)
-        self.times = np.asarray(times, dtype=float)
-        if self.r.size < 2 or self.z.size < 2:
-            raise ValueError("PSGRN tables need at least two distances and two source depths")
-        self.coseismic = coseismic
-        self.postseismic = postseismic
-        self.interfaces = np.unique(np.asarray(interfaces, dtype=float))
-        self.attrs = dict(attrs or {})
-        self._grid = EdgrnTables(self.r, self.z, self._edgrn_dict(lambda kind, comp: coseismic[kind][comp]),
-                                 interfaces=self.interfaces)
 
     @classmethod
     def from_directory(cls, path):
@@ -372,220 +278,3 @@ class PsgrnTables:
         r, z, t = grid
         return cls(r, z, t, coseismic, postseismic, interfaces=_interfaces(text),
                    attrs={"source": "psgrn", "directory": str(path), "input": text})
-
-    def _edgrn_dict(self, values):
-        out = {}
-        for kind, comps in COMPONENTS.items():
-            out[kind] = {comp: values(kind, comp) for comp in comps}
-            if "ut" not in out[kind]:
-                out[kind]["ut"] = np.zeros((self.r.size, self.z.size))
-        return out
-
-    def rescaled(self, factor):
-        """The tables of the same structure with every viscosity times `factor`: the times scale with it."""
-        return PsgrnTables(self.r, self.z, self.times * float(factor), self.coseismic, self.postseismic,
-                           self.interfaces, dict(self.attrs, viscosity_factor=self.attrs.get("viscosity_factor", 1.0) * factor))
-
-    def at(self, day):
-        """The postseismic part at `day` as `slipsolve.edgrn.EdgrnTables`, linear between the stored times."""
-        k = int(np.clip(np.searchsorted(self.times, day), 1, self.times.size - 1))
-        t0, t1 = self.times[k - 1], self.times[k]
-        w = 0.0 if not np.isfinite(t1) else float(np.clip((day - t0) / (t1 - t0), 0.0, 1.0))
-        return EdgrnTables(self.r, self.z,
-                           self._edgrn_dict(lambda kind, comp: (1 - w) * self.postseismic[kind][comp][k - 1]
-                                            + w * self.postseismic[kind][comp][k]),
-                           interfaces=self.interfaces)
-
-    def modes(self, tolerance=1e-4, max_modes=16, until=None):
-        """`(times, functions, stacks)`: the postseismic tables as a few functions of time times a few tables.
-
-        An SVD over time of every table, each first scaled by its own largest value. It keeps the fewest modes
-        that bring every table back to `tolerance` of its largest value, up to `max_modes`.
-
-        - `functions`: `(n_times, M)`.
-        - `stacks[kind][component]`: `(nr, nz, M)`.
-        - `until` (days): only times up to the first sample at or past it.
-        """
-        times = self.times
-        keep = times.size if until is None else int(min(np.searchsorted(times, float(until)) + 1, times.size))
-        times = times[:keep]
-        if times.size < 2 or not np.isfinite(times).all():
-            raise ValueError("modes need a time series (nt > 2)")
-        keys = [(kind, comp) for kind, comps in COMPONENTS.items() for comp in comps]
-        scales = {key: max(float(np.abs(self.postseismic[key[0]][key[1]][:keep]).max()), 1e-300) for key in keys}
-        blocks = [self.postseismic[k][c][:keep].reshape(keep, -1) / scales[(k, c)] for k, c in keys]
-        history = np.hstack(blocks)
-        values, vectors = np.linalg.eigh(history @ history.T)
-        order = np.argsort(values)[::-1]
-        values, vectors = np.clip(values[order], 0.0, None), vectors[:, order]
-        sizes = [b.shape[1] for b in blocks]
-        chosen = None
-        for m in range(1, min(int(max_modes), keep) + 1):
-            u = vectors[:, :m]
-            residual = history - u @ (u.T @ history)
-            worst = max(float(np.abs(part).max()) for part in np.split(residual, np.cumsum(sizes)[:-1], axis=1))
-            if worst <= tolerance:
-                chosen = m
-                break
-        if chosen is None:
-            chosen = min(int(max_modes), keep)
-        u = vectors[:, :chosen]
-        spatial = u.T @ history                        # (M, N): the functions are u itself, unit-normed
-        stacks, start = {kind: {} for kind in COMPONENTS}, 0
-        for (kind, comp), size in zip(keys, sizes):
-            part = spatial[:, start:start + size] * scales[(kind, comp)]
-            stacks[kind][comp] = np.moveaxis(part.reshape(chosen, self.r.size, self.z.size), 0, -1)
-            start += size
-        return times, u, stacks
-
-    def __repr__(self):
-        return (f"<PsgrnTables nr={self.r.size} r=0-{self.r[-1] / 1e3:.0f}km nz={self.z.size} "
-                f"z={self.z[0] / 1e3:.2f}-{self.z[-1] / 1e3:.2f}km nt={self.times.size} "
-                f"to {self.times[-1]:.4g} d interfaces={self.interfaces.size}>")
-
-
-class _Sources:
-    """A slip model's point sources: positions (ENU), area weights, and five packed moment components with slip."""
-
-    def __init__(self, mesh, basis, strike_slip, dip_slip, order):
-        points, weights, moments = [], [], []
-        strike_slip = np.asarray(strike_slip, dtype=float)
-        dip_slip = np.asarray(dip_slip, dtype=float)
-        nodal = basis is not None and basis.name == "node"
-        for e in range(mesh.n_elements):
-            p1, p2, p3 = mesh.vertices[e]
-            normal = mesh.normals[e]
-            pts, share = _triangle_quadrature(p1, p2, p3, int(order))
-            if nodal:
-                triangle = mesh.triangles[e]
-                tents = [_tent(mesh.vertices[e], triangle, node, pts) for node in triangle]
-                ss = sum(t * strike_slip[node] for t, node in zip(tents, triangle))
-                ds = sum(t * dip_slip[node] for t, node in zip(tents, triangle))
-            else:
-                ss = np.full(len(pts), strike_slip[e])
-                ds = np.full(len(pts), dip_slip[e])
-            along, down = _slip_directions(normal)
-            m_ss = np.asarray(_moment_components(normal, along))
-            m_ds = np.asarray(_moment_components(normal, down))
-            points.append(pts)
-            weights.append(share * mesh.areas[e] * np.ones(len(pts)))
-            moments.append(np.outer(m_ss, ss) + np.outer(m_ds, ds))       # (5, nq)
-        self.points = np.vstack(points)
-        self.weights = np.concatenate(weights)
-        self.moments = np.hstack(moments)
-
-
-def _stencil(grid, distance, depth):
-    """`EdgrnTables.interpolate`'s bilinear stencil, never across an interface: `(i0, i1, j0, j1, ti, tj)`."""
-    r, z = grid.r, grid.z
-    nr, nz = r.size, z.size
-    dr = (r[-1] - r[0]) / (nr - 1)
-    dz = (z[-1] - z[0]) / (nz - 1)
-    fi = np.minimum(np.maximum((distance - r[0]) / dr, 0.0), nr - 1)
-    fj = np.minimum(np.maximum((depth - z[0]) / dz, 0.0), nz - 1)
-    i0 = np.minimum(np.floor(fi).astype(int), nr - 2)
-    j0 = np.minimum(np.floor(fj).astype(int), nz - 2)
-    ti, tj = fi - i0, fj - j0
-    i1, j1 = i0 + 1, j0 + 1
-    if grid._layers is not None:
-        j0, j1, tj = grid._within_layers(fj, dz, j0, j1, tj)
-    return i0, i1, j0, j1, ti, tj
-
-
-def _evaluate(sources, stacks, grid, x, y, budget=4e6):
-    """East, north and up at `(x, y)` from `stacks[kind][component]`, `(nr, nz, K)`: `(n, 3, K)`."""
-    x = np.asarray(x, dtype=float).ravel()
-    y = np.asarray(y, dtype=float).ravel()
-    k = next(iter(stacks["ss"].values())).shape[-1]
-    out = np.zeros((x.size, 3, k))
-    r_max = grid.r[-1]
-    z_lo, z_hi = grid.z[0], grid.z[-1]
-    depth_all = -sources.points[:, 2]
-    spacing = grid.z[1] - grid.z[0]
-    # Within one spacing of the table's first or last depth a source takes that row, as EdgrnTables clamps.
-    if depth_all.min() < z_lo - spacing or depth_all.max() > z_hi + spacing:
-        raise ValueError(f"the sources lie at {depth_all.min() / 1e3:.2f}-{depth_all.max() / 1e3:.2f} km, the tables "
-                         f"at {z_lo / 1e3:.2f}-{z_hi / 1e3:.2f} km")
-    chunk = max(1, int(budget // max(1, x.size * k)))
-    for start in range(0, sources.weights.size, chunk):
-        sl = slice(start, start + chunk)
-        pts, w, m = sources.points[sl], sources.weights[sl], sources.moments[:, sl]
-        dn = y[:, None] - pts[None, :, 1]
-        de = x[:, None] - pts[None, :, 0]
-        distance = np.hypot(dn, de)
-        if distance.max() > r_max:
-            raise ValueError(f"a receiver lies {distance.max() / 1e3:.1f} km from a source; the tables stop at "
-                             f"{r_max / 1e3:.1f} km")
-        depth = np.broadcast_to(-pts[None, :, 2], distance.shape)
-        azimuth = np.arctan2(de, dn)
-        cos1, sin1 = np.cos(azimuth), np.sin(azimuth)
-        cos2, sin2 = np.cos(2.0 * azimuth), np.sin(2.0 * azimuth)
-        m1, m2, m3, m4, m5 = (row[None, :] for row in m)
-        ps_ss = m1 * sin2 + m4 * cos2
-        sh_ss = m1 * cos2 - m4 * sin2
-        ps_ds = m2 * cos1 + m5 * sin1
-        sh_ds = m2 * sin1 - m5 * cos1
-        i0, i1, j0, j1, ti, tj = _stencil(grid, distance, depth)
-        w00, w10 = ((1 - ti) * (1 - tj))[..., None], (ti * (1 - tj))[..., None]
-        w01, w11 = ((1 - ti) * tj)[..., None], (ti * tj)[..., None]
-
-        def look(kind, comp):
-            a = stacks[kind][comp]
-            return w00 * a[i0, j0] + w10 * a[i1, j0] + w01 * a[i0, j1] + w11 * a[i1, j1]
-
-        uz = ps_ss[..., None] * look("ss", "uz") + ps_ds[..., None] * look("ds", "uz") + m3[..., None] * look("cl", "uz")
-        ur = ps_ss[..., None] * look("ss", "ur") + ps_ds[..., None] * look("ds", "ur") + m3[..., None] * look("cl", "ur")
-        ut = sh_ss[..., None] * look("ss", "ut") + sh_ds[..., None] * look("ds", "ut")
-        north = ur * cos1[..., None] - ut * sin1[..., None]
-        east = ur * sin1[..., None] + ut * cos1[..., None]
-        weight = w[None, :, None]
-        out[:, 0] += (east * weight).sum(axis=1)
-        out[:, 1] += (north * weight).sum(axis=1)
-        out[:, 2] += (-uz * weight).sum(axis=1)
-    return out
-
-
-def _model_parts(model, frame):
-    mesh = model.mesh if frame is None else model.mesh.in_frame(frame)
-    return mesh, model.basis, model.strike_slip, model.dip_slip
-
-
-def relaxation_history(model, tables, x, y, order=4, frame=None):
-    """`(times, enu)`: a slip model's postseismic displacement at `(x, y)` at every time of the tables.
-
-    `enu` is `(n_times, n, 3)` (east, north, up), zero at `times[0]`. `model` is a solved
-    `slipsolve.inversion.SlipModel`, its mesh moved into `frame` if given. Each triangle is cut into `order**2`
-    point sources weighted by the slip there (its nodal tents on a nodal basis).
-    """
-    mesh, basis, ss, ds = _model_parts(model, frame)
-    sources = _Sources(mesh, basis, ss, ds, order)
-    stacks = {kind: {comp: np.moveaxis(tables.postseismic[kind][comp], 0, -1) for comp in comps}
-              for kind, comps in COMPONENTS.items()}
-    out = _evaluate(sources, stacks, tables._grid, x, y)
-    return tables.times, np.moveaxis(out, -1, 0)
-
-
-def relaxation_pattern(model, tables, name="viscoelastic", until=None, tolerance=1e-4, max_modes=16, order=4,
-                       frame=None):
-    """A `slipsolve.patterns.Pattern` of a slip model's relaxation: an amplitude of 1 is these tables' rheology.
-
-    - The tables' time dependence is split into a few functions (`PsgrnTables.modes`, to `tolerance`); their shapes,
-      integrated over the model's mesh, are the pattern's terms.
-    - `until` (days) is the last date it will be asked about; past the tables' last time the pattern holds its last
-      value.
-    - `frame`: the inversion's local frame, if the model was solved in another.
-    """
-    mesh, basis, ss, ds = _model_parts(model, frame)
-    if until is not None and tables.times[-1] < float(until):
-        raise ValueError(f"the tables end at {tables.times[-1]:.4g} d, before {float(until):.4g} d")
-    times, functions, stacks = tables.modes(tolerance=tolerance, max_modes=max_modes, until=until)
-    sources = _Sources(mesh, basis, ss, ds, order)
-    grid = tables._grid
-
-    def enu(x, y):
-        out = _evaluate(sources, stacks, grid, x, y)
-        return out[:, 0], out[:, 1], out[:, 2]
-
-    pattern = Pattern.from_enu(name, enu, time=TimeBasis.tabulated(times, functions))
-    pattern.frame = mesh.frame
-    return pattern
