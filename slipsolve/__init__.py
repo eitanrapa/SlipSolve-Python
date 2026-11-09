@@ -108,7 +108,7 @@ from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
 from .patterns import Pattern, poroelastic_pattern, separate_history
 from .psgrn import PsgrnTables, run_psgrn
 from .relaxation import RelaxationTables, Rheology, relaxation_history, relaxation_pattern
-from .regional import RegionalModel, fit_frame_rotation
+from .regional import RegionalModel, celeri_inputs, fit_frame_rotation, mesh_edges, west_first
 from .predict import (iterate_sampling, model_rms_min, predicted_los,
                       sample_slip)
 from .resolution import (
@@ -194,6 +194,7 @@ __all__ = [
     "block_labels",
     "bound_fraction",
     "calibrate",
+    "celeri_inputs",
     "cell_folds",
     "cell_size_ladder",
     "checkerboard",
@@ -222,6 +223,7 @@ __all__ = [
     "gridfit",
     "iterate_sampling",
     "lloyd_layout",
+    "mesh_edges",
     "model_rms_min",
     "monte_carlo",
     "noise_floor",
@@ -268,6 +270,7 @@ __all__ = [
     "triangulate",
     "velocity_observations",
     "weighted_design",
+    "west_first",
     "whitening_factors",
     "with_solution",
     "write_edgrn_input",

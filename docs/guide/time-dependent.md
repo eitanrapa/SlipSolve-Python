@@ -351,10 +351,10 @@ folds = cell_folds(obs, cell=50e3, n_folds=8, groups=blocks)     # blocked_cv_cu
 
 ## A regional block model for the far field
 
-A local network is a piece of a wider system. A regional block model of that system, solved by a
-block-modelling code (celeri, for one; Meade & Loveless 2009), describes the rest. `RegionalModel`
-reads one and evaluates it at the local model's own rows, in the two forms the local inversion
-takes: rotation priors, and patterns.
+A local network is a piece of a wider system. A regional block model of that system (Meade & Loveless
+2009) describes the rest. `RegionalModel` solves one from station velocities or reads one solved by
+celeri, and evaluates it at the local model's own rows, in the two forms the local inversion takes:
+rotation priors, and patterns.
 
 ```python
 from slipsolve import InterseismicInversion, RegionalModel, fit_frame_rotation
@@ -387,6 +387,31 @@ inversion = InterseismicInversion(mesh, obs, blocks=blocks, faults=faults, patte
   Segments on the local faults' `traces` are the local model's own and are left out, as are the
   segments over 1000 km long that close the regional blocks far away. Hold a part at 1 with
   `nuisance_prior={"pattern:regional:outside": (1.0, 1e-4)}`.
+
+**Solving a regional model.** `RegionalModel.solve` fits one to station velocities: block rotations, the slip rates
+they ask of every segment (locked from the surface to its locking depth), and slip on triangulated faults.
+
+```python
+from slipsolve import RegionalModel, celeri_inputs
+
+regional = RegionalModel.solve(**celeri_inputs("wna_config.json"))   # or segments, blocks, stations, meshes as tables
+regional.segments[["name", "strike_slip", "strike_slip_sigma"]]       # mm/yr, from the rotations' covariance
+regional.blocks[["name", "euler_lon", "euler_lat", "euler_rate"]]
+```
+
+- **The model.** A station moves with its block's rotation, less the elastic field of every segment slipping at the
+  rate the two blocks beside it ask (Meade & Loveless 2009) and of each mesh's slip. A segment's dip is read to the
+  right of it run from its western end (`west_first`).
+- **The estimator** is weighted least squares over the stations' horizontal velocities (and vertical ones with
+  `vertical=True`), with slip-rate constraints, blocks held at an a priori pole, each mesh's umbrella smoothing on its
+  element centroids (Desbrun et al. 1999) and zero slip on chosen mesh edges (`mesh_edges` finds the top, bottom and
+  sides). It is celeri's dense estimator: solved this way, celeri's western North America example (31 blocks, 837
+  segments, a 1841-element subduction mesh, 1686 stations) gives celeri's own solution to 1e-4 mm/yr in rotation,
+  slip rate, mesh slip and prediction.
+- **Inputs** are tables in a block model's units (degrees, km, mm/yr), the ones celeri writes, and `celeri_inputs` reads
+  celeri's input files (its configuration, segment, block, station and gmsh mesh files) with its flags and weights.
+- **Not built:** block strain, volume sources, mesh edges tied to the blocks' motion, coupling bounds and celeri's other
+  estimators (eigenmodes, bounded QP, MCMC).
 
 **Read with care:**
 

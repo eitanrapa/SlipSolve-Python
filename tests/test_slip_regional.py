@@ -148,3 +148,160 @@ def test_celeri_files_round_trip(tmp_path):
     assert np.allclose(back.segment_velocity(lon, lat), model.segment_velocity(lon, lat))
     assert back.poisson == pytest.approx(0.25)
     assert back.block_of(lon, lat).tolist() == [1, 0]
+
+
+# -- solving a block model ---------------------------------------------------------------------------------------
+
+def _planted():
+    """`two_blocks` with a third block outside held at rest, and the slip rates its rotations ask for."""
+    from slipsolve import regional
+
+    model = two_blocks()
+    blocks = pd.concat([model.blocks, pd.DataFrame([dict(name="rest", interior_lon=LON0 + 5, interior_lat=0.0,
+                                                         euler_lon=0.0, euler_lat=90.0, euler_rate=0.0)])],
+                       ignore_index=True)
+    blocks["apriori"] = blocks["name"] == "rest"
+    segments = regional.west_first(model.segments)
+    segments["azimuth"], segments["length_km"], _, _ = regional._geodesics(segments)
+    planted = RegionalModel(segments, blocks)
+    omega = np.concatenate([planted.rotation(b).omega for b in range(len(blocks))])
+    rates = regional._kinematics(segments, planted.segment_blocks(), len(blocks), planted.radius) @ omega
+    for c, name in enumerate(("strike_slip", "dip_slip", "tensile")):
+        planted.segments[name] = 1e3 * rates[:, c]
+    return planted, omega
+
+
+def _stations(model, lon, lat, sigma=0.1):
+    v = 1e3 * model.velocity(lon, lat)
+    return pd.DataFrame(dict(name=[f"s{i}" for i in range(lon.size)], lon=lon, lat=lat, east=v[:, 0], north=v[:, 1],
+                             east_sigma=sigma, north_sigma=sigma))
+
+
+def test_a_block_model_recovers_its_rotations():
+    """Stations from a planted model: the profile across its middle is Savage & Burford's, and the solve gets the
+    rotations and the fault's slip rate back."""
+    planted, omega = _planted()
+    assert planted.segments.loc[0, "strike_slip"] == pytest.approx(RATE, rel=1e-6)    # left-lateral, as planted
+    x_km = np.array([-50.0, -20.0, -10.0, -5.0, 5.0, 10.0, 20.0, 50.0])
+    profile = _stations(planted, LON0 + np.degrees(x_km * 1e3 / CELERI_RADIUS), np.zeros(x_km.size))
+    assert np.allclose(profile["north"], RATE * (0.5 + np.arctan(x_km / DEPTH) / np.pi), atol=0.01 * RATE)
+    rng = np.random.default_rng(7)
+    lon = LON0 + np.r_[-rng.uniform(0.1, 1.9, 30), rng.uniform(0.1, 1.9, 30)]
+    stations = pd.concat([profile, _stations(planted, lon, rng.uniform(-8.0, 8.0, 60))], ignore_index=True)
+    segments = planted.segments[["name", "lon1", "lat1", "lon2", "lat2", "dip", "locking_depth"]]
+    solved = RegionalModel.solve(segments, planted.blocks, stations)
+    assert np.allclose(solved.parameters, omega, rtol=0.0, atol=1e-6 * np.abs(omega).max())
+    assert solved.segments.loc[0, "strike_slip"] == pytest.approx(RATE, rel=1e-5)
+    assert solved.rms < 1e-6
+    assert solved.segments.loc[0, "strike_slip_sigma"] > 0
+
+
+def test_a_slip_rate_constraint_holds_its_rate():
+    planted, _ = _planted()
+    rng = np.random.default_rng(8)
+    lon = LON0 + np.r_[-rng.uniform(0.1, 1.9, 20), rng.uniform(0.1, 1.9, 20)]
+    stations = _stations(planted, lon, rng.uniform(-8.0, 8.0, 40), sigma=1.0)
+    segments = planted.segments[["name", "lon1", "lat1", "lon2", "lat2", "dip", "locking_depth"]].copy()
+    segments["ss_rate"], segments["ss_rate_sigma"] = np.nan, np.nan
+    segments.loc[0, ["ss_rate", "ss_rate_sigma"]] = (0.5 * RATE, 1e-4)
+    solved = RegionalModel.solve(segments, planted.blocks, stations)
+    assert solved.segments.loc[0, "strike_slip"] == pytest.approx(0.5 * RATE, abs=1e-3)
+
+
+def _grid_mesh(lon0=LON0 + 0.6, nx=6, nz=4, length_deg=0.6, depth_km=20.0):
+    """A vertical rectangle along the meridian `lon0`, triangulated on a regular grid: `(points, triangles)`."""
+    lats = np.linspace(-0.5 * length_deg, 0.5 * length_deg, nx + 1)
+    depths = np.linspace(0.0, -depth_km, nz + 1)
+    points = np.array([[lon0, la, de] for de in depths for la in lats])
+    triangles = []
+    for k in range(nz):
+        for i in range(nx):
+            a, b = k * (nx + 1) + i, k * (nx + 1) + i + 1
+            c, d = a + nx + 1, b + nx + 1
+            triangles += [[a, c, b], [b, c, d]]
+    return points, np.array(triangles)
+
+
+def test_mesh_edges_and_the_umbrella_operator():
+    from slipsolve import regional
+
+    points, triangles = _grid_mesh()
+    edges = regional.mesh_edges(points, triangles)
+    assert edges["top"].sum() == 6 and edges["bottom"].sum() == 6 and edges["side"].sum() == 6
+    tri, _, centroid = regional._mesh_geometry(points, triangles, CELERI_RADIUS)
+    L = regional._umbrella(tri, centroid).toarray()
+    assert np.allclose(L.sum(axis=1), 0.0, atol=1e-18)
+    i = int(np.flatnonzero((L != 0).sum(axis=1) == 4)[0])                   # an element with three neighbours
+    neighbours = np.flatnonzero(L[i] > 0)
+    d = np.linalg.norm(centroid[neighbours] - centroid[i], axis=1)
+    assert L[i, i] == pytest.approx(-2.0 / d.sum() * np.sum(1.0 / d), rel=1e-12)    # Desbrun et al. (1999)
+    assert np.allclose(L[i, neighbours], 2.0 / d.sum() / d, rtol=1e-12)
+
+
+def test_celeri_input_files_are_read(tmp_path):
+    """A block model written as celeri's input files, a mesh among them: the same solve as from the tables."""
+    import json
+
+    from slipsolve.regional import _read_msh, celeri_inputs
+
+    planted, _ = _planted()
+    rng = np.random.default_rng(9)
+    lon = LON0 + np.r_[-rng.uniform(0.1, 1.9, 20), rng.uniform(0.1, 1.9, 20)]
+    stations = _stations(planted, lon, rng.uniform(-8.0, 8.0, 40))
+    s = planted.segments
+    pd.DataFrame(dict(name=s["name"], lon1=s["lon1"], lat1=s["lat1"], lon2=s["lon2"], lat2=s["lat2"], dip=s["dip"],
+                      locking_depth=s["locking_depth"], locking_depth_flag=0, ss_rate=0.0, ss_rate_sig=0.0, ss_rate_flag=0,
+                      ds_rate=0.0, ds_rate_sig=0.0, ds_rate_flag=0, ts_rate=0.0, ts_rate_sig=0.0, ts_rate_flag=0,
+                      mesh_flag=0)).to_csv(tmp_path / "segment.csv", index=False)
+    b = planted.blocks
+    pd.DataFrame(dict(name=b["name"], interior_lon=b["interior_lon"], interior_lat=b["interior_lat"],
+                      euler_lon=b["euler_lon"], euler_lat=b["euler_lat"], rotation_rate=b["euler_rate"],
+                      rotation_flag=b["apriori"].astype(int))).to_csv(tmp_path / "block.csv", index=False)
+    pd.DataFrame(dict(lon=stations["lon"], lat=stations["lat"], name=stations["name"], east_vel=stations["east"],
+                      north_vel=stations["north"], east_sig=0.1, north_sig=0.1, flag=1, up_vel=0.0, up_sig=1.0)).to_csv(
+        tmp_path / "station.csv", index=False)
+    points, triangles = _grid_mesh()
+    lines = ["$MeshFormat", "2.2 0 8", "$EndMeshFormat", "$Nodes", str(len(points))]
+    lines += [f"{i + 1} {p[0]} {p[1]} {p[2]}" for i, p in enumerate(points)]
+    lines += ["$EndNodes", "$Elements", str(len(triangles))]
+    lines += [f"{i + 1} 2 2 0 1 {t[0] + 1} {t[1] + 1} {t[2] + 1}" for i, t in enumerate(triangles)]
+    lines += ["$EndElements", ""]
+    (tmp_path / "fault.msh").write_text("\n".join(lines))
+    back_points, back_triangles = _read_msh(tmp_path / "fault.msh")
+    assert np.allclose(back_points, points) and (back_triangles == triangles).all()
+    (tmp_path / "mesh.json").write_text(json.dumps([dict(mesh_filename="fault.msh", smoothing_weight=1e16,
+                                                         top_slip_rate_constraint=0, bot_slip_rate_constraint=1,
+                                                         side_slip_rate_constraint=0)]))
+    (tmp_path / "config.json").write_text(json.dumps(dict(
+        segment_file_name="segment.csv", block_file_name="block.csv", station_file_name="station.csv",
+        mesh_parameters_file_name="mesh.json", slip_constraint_weight=1e5, tri_con_weight=1e6,
+        material_lambda=3e10, material_mu=3e10)))
+    inputs = celeri_inputs(tmp_path / "config.json")
+    assert inputs["poisson"] == pytest.approx(0.25) and len(inputs["meshes"]) == 1
+    from_files = RegionalModel.solve(**inputs)
+    direct = RegionalModel.solve(planted.segments[["name", "lon1", "lat1", "lon2", "lat2", "dip", "locking_depth"]],
+                                 planted.blocks, stations, meshes=[dict(points=points, triangles=triangles,
+                                                                        smoothing=1e16, edges={"bottom": 1e-3})])
+    assert np.allclose(from_files.parameters, direct.parameters, rtol=1e-9, atol=1e-15)
+
+
+def test_a_mesh_recovers_uniform_slip():
+    """Uniform slip is free under the umbrella operator, so with strong smoothing a planted uniform slip-rate deficit
+    on a mesh comes back exactly, with the rotations."""
+    from slipsolve import regional
+
+    planted, omega = _planted()
+    points, triangles = _grid_mesh()
+    _, corners, _ = regional._mesh_geometry(points, triangles, CELERI_RADIUS)
+    table = pd.DataFrame({f"{key}{k + 1}": corners[:, k, c] for k in range(3) for c, key in enumerate(("lon", "lat", "dep"))})
+    table["strike_slip"], table["dip_slip"] = 5.0, -2.0
+    planted.meshes = table
+    rng = np.random.default_rng(10)
+    lon = LON0 + np.r_[-rng.uniform(0.1, 1.9, 30), rng.uniform(0.1, 1.9, 30), 0.6 + rng.uniform(-0.3, 0.3, 20)]
+    stations = _stations(planted, lon, np.r_[rng.uniform(-8.0, 8.0, 60), rng.uniform(-0.4, 0.4, 20)])
+    segments = planted.segments[["name", "lon1", "lat1", "lon2", "lat2", "dip", "locking_depth"]]
+    solved = RegionalModel.solve(segments, planted.blocks, stations,
+                                 meshes=[dict(points=points, triangles=triangles, smoothing=1e24)])
+    assert np.allclose(solved.meshes["strike_slip"], 5.0, atol=1e-4)
+    assert np.allclose(solved.meshes["dip_slip"], -2.0, atol=1e-4)
+    assert np.allclose(solved.parameters[:omega.size], omega, rtol=0.0, atol=1e-6 * np.abs(omega).max())
