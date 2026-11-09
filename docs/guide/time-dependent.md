@@ -2,10 +2,44 @@
 
 A slip inversion is linear in slip whatever the time scale, so both modes are
 `SlipInversion` with what their data need added. Both are kinematic: they map slip
-fields and coupling. Signals with a physical shape, such as poroelastic rebound or
-viscoelastic relaxation from a forward code, go in beside the slip as patterns with a
-free amplitude ([Signals beside the slip](#signals-beside-the-slip),
-[Flow from PSGRN](#flow-from-psgrn)).
+fields and coupling. Signals with a physical shape, such as poroelastic rebound,
+viscoelastic relaxation or the far field of a regional block model, go in beside the slip
+as patterns with an amplitude, free or held at 1.
+
+## How the two modes work
+
+**Postseismic.** The cumulative slip after the earthquake is a sum of known functions of
+time times unknown slip fields, \(s(\mathbf{x}, t) = \sum_k f_k(t)\, m_k(\mathbf{x})\). An
+interferogram between \(t_0\) and \(t_1\), or a GNSS position change, is then linear in the
+\(m_k\):
+
+\[
+d = \sum_k \left[f_k(t_1) - f_k(t_0)\right] \mathbf{G}\, m_k
+  + \text{ramp}
+  + \sum_p \alpha_p \left[g_p(t_1) - g_p(t_0)\right] P_p ,
+\]
+
+with \(\mathbf{G}\) the elastic Green's functions of the coseismic model and \(P_p\) the
+patterns beside the slip, each with an amplitude \(\alpha_p\) and its own time functions
+\(g_p\). The \(K\) fields are \(K\) copies of the fault joined into one mesh, so smoothing,
+bounds, cross-validation and resolution work as for one earthquake, and a series of any length
+reduces exactly to at most \(K\) virtual pairs per set of cells. The patterns come from the
+coseismic model itself: poroelastic rebound, and viscoelastic relaxation of a layered crust
+from tables this package computes (or PSGRN's, which add gravity).
+
+**Interseismic.** Velocities are the rigid rotation of the block each point lies in, plus the
+elastic effect of the slip the faults are not taking:
+
+\[
+\mathbf{v} = \mathbf{R}\,\boldsymbol{\omega} + \mathbf{G}\,\mathbf{b}, \qquad
+\mathbf{b} = -c\, \mathbf{V}(\boldsymbol{\omega}), \qquad 0 \le c \le 1 ,
+\]
+
+with \(\mathbf{V}(\boldsymbol{\omega})\) the long-term slip the blocks' relative motion asks of
+each fault node and \(c\) its coupling (Savage 1983). The bound depends on the rotations, so the
+solve alternates between them until the long-term rate settles. A fault network has a block pair
+per stretch of each fault. A regional block model brings in what the local blocks and faults leave
+out: its rotations as priors on the local ones, and the field of its other faults as patterns.
 
 ## Postseismic: slip that changes with time
 
@@ -150,49 +184,55 @@ monte_carlo(result, n=60).apply(lambda m: m.pattern_amplitudes["poroelastic"])
   largest in the shallowest rock, where that is least true. The fields are for a half-space
   unless you hand it engines.
 
-## Flow from PSGRN
+## Viscoelastic flow
 
-Viscoelastic relaxation of a layered crust comes from PSGRN (Wang, Lorenzo-Martín & Roth 2006,
-Computers & Geosciences 32, 527-541), run as a separate program. `slipsolve.psgrn` writes its
-input from the crust's `VelocityModel` and a `Rheology` per depth range, reads its tables, and
-integrates them over the coseismic model's own mesh. The result is a `Pattern` with one
-amplitude:
+Viscoelastic relaxation of a layered crust goes in beside the afterslip as one pattern with one
+amplitude. `RelaxationTables.compute` makes the tables: the response of point sources at the
+surface, at any set of times after a step dislocation, per unit potency.
 
 ```python
-from slipsolve import Rheology, TimeBasis, TimeDependentInversion, relaxation_pattern, run_psgrn
+from slipsolve import RelaxationTables, Rheology, TimeBasis, TimeDependentInversion, relaxation_pattern
 
 mantle = [Rheology(32e3, None, eta_maxwell=3e18)]                         # Maxwell below the Moho
-tables = run_psgrn(crust, mantle, "psgrn_mantle", r_max=300e3, nr=301,
-                   z_min=500.0, z_max=24500.0, nz=25, nt=512, window_days=320.0)
+tables = RelaxationTables.compute(crust, mantle, r_max=300e3, nr=301, z_min=250.0, z_max=19750.0, nz=40,
+                                  window_days=320.0, nt=48, workers=4)
 flow = relaxation_pattern(coseismic, tables, name="flow", until=300.0, frame=frame)
 inversion = TimeDependentInversion(mesh, series, TimeBasis.log_decay(1.0), engine=engine, patterns=[flow])
 ```
 
+- **How.** By the correspondence principle a linear viscoelastic body answers a step dislocation,
+  in the Laplace domain, as the elastic body would with each shear modulus replaced by its
+  transform \(\mu(s)\), the whole divided by \(s\) (Lee 1955; Peltier 1974; Pollitz 1992). The
+  layered propagator of the coseismic engine solves the elastic problem at those complex moduli,
+  and Talbot's method (on the fixed contour of Abate & Valkó 2004) inverts the postseismic part,
+  each output time on its own contour. `relaxation_pattern` splits the tables' time dependence
+  into a few functions (`RelaxationTables.modes`) and sums the shapes over the coseismic model's
+  own mesh and basis.
 - **Rheologies:** Maxwell (`eta_maxwell`), a Standard Linear Solid (`eta_kelvin` and `alpha`) or
   Burgers (both), in shear; the bulk modulus stays elastic. A Standard Linear Solid relaxes
-  stress with the time `eta_kelvin (1 - alpha) / mu`.
-- **The executable:** pass `executable=`, set `SLIPSOLVE_PSGRN`, or put `psgrn` on `PATH`. Use a
-  build of the 2020 release (github.com/RongjiangWang/PSGRN-PSCMP_2020) with the three
-  time-domain corrections the module's notes describe; as released it puts a Standard Linear
-  Solid's series 2-11% off.
+  stress with the time `eta_kelvin (1 - alpha) / mu`. Sources must lie in elastic layers.
+- **No gravity.** Buoyancy matters for dip-slip relaxation over several relaxation times, where it
+  resists vertical motion. PSGRN (Wang, Lorenzo-Martín & Roth 2006) has it, and `run_psgrn` runs it
+  into the same tables (`PsgrnTables`), so `relaxation_pattern` takes either. Use a build of
+  PSGRN's 2020 release with the three time-domain corrections `slipsolve.psgrn` describes.
 - **Viscosity scales time:** multiply every viscosity by `c` and every time by `c`
-  (`PsgrnTables.rescaled`), so one run per profile shape serves a whole scan of uniform levels.
+  (`RelaxationTables.rescaled`), so one table set per profile shape serves a whole scan of
+  uniform levels.
 - **Reading a viscosity:** with the amplitude free, the viscosity at which it comes out at 1 is
   the one the data ask for. A free amplitude can also take up a residual of the same shape at
   any viscosity, so a held-out gain that does not change with the viscosity does not choose one.
-- **Grids:**
-  - the tables must cover the mesh's depths and every source-receiver distance (it raises
-    otherwise);
-  - keep source depths off layer interfaces;
-  - take the time step at about a twentieth of the earliest time fitted, and run early
-    postseismic in its own window, since the first samples of a run are the least accurate;
-  - gravity is on by default (`gravity=1`).
+- **Grids:** distances and source depths are uniform; the tables must cover the mesh's depths and
+  every source-receiver distance (it raises otherwise); keep source depths off layer interfaces.
+  Times can be anything: by default 0 and then log-spaced to `window_days`.
 - **Accuracy:**
-  - corrected, the relaxed state of a Standard Linear Solid matches an independent layered code
-    to 5e-3 of each source type's largest component;
-  - the time series of Maxwell, Standard Linear Solid and Burgers bodies match the
-    correspondence principle to 0.2-1.5%;
-  - the split into modes (`PsgrnTables.modes`) rebuilds the history to its `tolerance`.
+  - against Savage & Prescott (1978), a long strike-slip fault through an elastic layer over a
+    Maxwell half-space, read at its middle: 0.1-0.2% of the relaxation near the fault, with the
+    fault's finite length the rest (0.3% at 80 km for a 4800 km fault);
+  - a fully relaxed Standard Linear Solid equals the elastic solution with its relaxed modulus;
+  - against corrected PSGRN without gravity, 0.04-0.2% wherever PSGRN's time steps are fine
+    enough; its earliest samples are its least accurate, while each of these times is inverted
+    alone;
+  - the split into modes rebuilds the history to its `tolerance`.
 
 ## Interseismic: rigid blocks plus back-slip
 
@@ -308,6 +348,56 @@ folds = cell_folds(obs, cell=50e3, n_folds=8, groups=blocks)     # blocked_cv_cu
   in the sense of slip on its neighbours.
 - **Coupling on a slow fault has no meaning**: a ratio of two small numbers. Read its deficit
   rate.
+
+## A regional block model for the far field
+
+A local network is a piece of a wider system. A regional block model of that system, solved by a
+block-modelling code (celeri, for one; Meade & Loveless 2009), describes the rest. `RegionalModel`
+reads one and evaluates it at the local model's own rows, in the two forms the local inversion
+takes: rotation priors, and patterns.
+
+```python
+from slipsolve import InterseismicInversion, RegionalModel, fit_frame_rotation
+
+regional = RegionalModel.from_celeri("celeri_run/")                        # a solved run's output folder
+shift, kept = fit_frame_rotation(lon, lat, ve, vn, ve_regional, vn_regional)  # shared stations, m/yr
+lon_rows, lat_rows = frame.to_lonlat(obs.ds["x"].values, obs.ds["y"].values)
+ties = regional.ties(lon_rows, lat_rows, blocks)                           # each local block's regional block
+priors = regional.rotation_priors(obs, blocks, ties, frame_rotation=shift)
+patterns = regional.far_field(obs, blocks, ties, traces=traces, polygons=polygons)
+inversion = InterseismicInversion(mesh, obs, blocks=blocks, faults=faults, patterns=patterns,
+                                  nuisance_prior=priors)
+```
+
+- **How.** A regional model's velocity is the rotation of the block a point lies in, less the
+  elastic field of every locked segment (a rectangle from the surface to its locking depth, Okada
+  1985, in an oblique Mercator projection along it) and of every mesh triangle. Its blocks are
+  the faces of its segment network, named by the interior points it gives them. It reproduces a
+  solved celeri run's own predictions at its stations to a few thousandths of a mm/yr.
+- **The priors** tie each local block's three rotation coefficients to the rotation of the regional
+  block holding most of its rows, moved into the local data's frame by `fit_frame_rotation`
+  (from stations both data sets share). `sigma` is on the velocity at the block's centre.
+- **The patterns** come in parts, each named `"regional:{part}"`:
+  - `rotation`: where a regional block is smaller than the local one, its rotation less the tied one;
+  - `inside` and `outside`: the field of the regional faults inside and outside the local blocks'
+    `polygons`, without tensile slip;
+  - `inside_tensile`, `outside_tensile`: their tensile slip;
+  - `meshes`: the regional model's triangulated faults.
+
+  Segments on the local faults' `traces` are the local model's own and are left out, as are the
+  segments over 1000 km long that close the regional blocks far away. Hold a part at 1 with
+  `nuisance_prior={"pattern:regional:outside": (1.0, 1e-4)}`.
+
+**Read with care:**
+
+- **Fit each part's amplitude freely before holding any at 1.** A regional model's own picture of
+  the local blocks competes with the local model's: its smaller blocks and the faults between
+  them describe the same ground as the local blocks, and the data can reject them.
+- **Tensile slip is how rigid blocks take fault-normal motion across a vertical segment.** Where
+  blocks converge or diverge across vertical faults it can be most of a regional model's field,
+  while the local faults carry no fault-normal deficit at all.
+- **The far field moves the local rates.** Held-out misfit can be flat while a held part moves
+  slip between neighbouring local faults by several mm/yr; read the rates beside the misfit.
 
 ## How well it is known
 

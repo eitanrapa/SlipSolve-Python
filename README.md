@@ -26,8 +26,9 @@ translation of, and extension to, the MATLAB package
 - Per-segment dip sweeps scored by the marginal likelihood, with bootstrap intervals.
 - Postseismic and interseismic modes: slip that changes with time from dated series
   (`TimeDependentInversion`), rigid blocks plus back-slip with coupling bounds from velocities
-  (`InterseismicInversion`), and viscoelastic relaxation from PSGRN as a pattern beside the slip
-  (`relaxation_pattern`). See [the guide](https://eitanrapa.github.io/SlipSolve-Python/guide/time-dependent/).
+  (`InterseismicInversion`), and signals beside the slip: viscoelastic relaxation of a layered crust
+  (`RelaxationTables`) and the far field of a regional block model (`RegionalModel`). See
+  [the guide](https://eitanrapa.github.io/SlipSolve-Python/guide/time-dependent/).
 
 ## Install
 
