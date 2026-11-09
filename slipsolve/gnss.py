@@ -33,6 +33,7 @@ stack's amplitude: it helps short windows.
 import numpy as np
 import pandas as pd
 
+from .interseismic import EARTH_RADIUS
 from .sampling import Observations
 
 #: Days in the year rates and random walks are measured per.
@@ -151,7 +152,7 @@ def screen_velocities(table, max_vertical=0.01, max_from_neighbours=0.01, neighb
     groups = np.zeros(lon.size, dtype=int) if groups is None else np.asarray(groups)
     if groups.size != lon.size:
         raise ValueError(f"groups has {groups.size} labels for {lon.size} stations")
-    degree = np.radians(1.0) * 6371e3
+    degree = np.radians(1.0) * EARTH_RADIUS
     x, y = lon * degree * np.cos(np.radians(lat.mean())), lat * degree
     good = reason == ""
     for k in np.flatnonzero(good):

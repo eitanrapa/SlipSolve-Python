@@ -1,8 +1,8 @@
-"""`slipsolve.regional`: a regional block model read, evaluated and handed to a local interseismic model.
+"""`slipsolve.regional`: a regional block model solved, evaluated and handed to a local interseismic model.
 
 The oracle is physical: two regional blocks moving past each other on a long locked fault give, as rotation less
 back-slip, the arctangent of Savage & Burford (1973), `v = V/2 + (V/pi) atan(x / D)` from the far block's frame.
-celeri's files are written here from the synthetic model and read back, so no celeri is needed.
+celeri's input files are written here from the synthetic model and read back (`celeri_inputs`), so no celeri is needed.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ import pytest
 from slipsolve import FaultTrace, InterseismicInversion, Observations, gnss_observations
 from slipsolve import _okada
 from slipsolve.interseismic import EARTH_RADIUS, EulerPole, _axes_at, rotation_columns
-from slipsolve.regional import CELERI_RADIUS, RegionalModel, fit_frame_rotation
+from slipsolve.regional import RegionalModel, fit_frame_rotation
 
 LON0 = 240.0                   # the fault's meridian, celeri's 0-360 longitudes
 RATE = 20.0                    # mm/yr, left-lateral: the east block moves north
@@ -35,7 +35,7 @@ def two_blocks():
                          length_km=111.2 * (abs(lat2 - lat1) + abs(lon2 - lon1)),
                          strike_slip=rate, dip_slip=0.0, tensile=0.0))
     # The east block's pole: 90 degrees west of the fault on the equator, so it moves north there at RATE.
-    rate_deg = RATE * 1e-3 / CELERI_RADIUS / _DEG_PER_MYR
+    rate_deg = RATE * 1e-3 / EARTH_RADIUS / _DEG_PER_MYR
     blocks = pd.DataFrame([dict(name="west", interior_lon=LON0 - 1, interior_lat=0.0, euler_lon=0.0, euler_lat=90.0,
                                 euler_rate=0.0),
                            dict(name="east", interior_lon=LON0 + 1, interior_lat=0.0, euler_lon=LON0 - 90.0,
@@ -73,7 +73,7 @@ def test_rotation_less_back_slip_is_the_arctangent():
     """The far field a one-block local model would need: Savage & Burford's interseismic profile across the fault."""
     model = two_blocks()
     x_km = np.array([-50.0, -20.0, -10.0, -5.0, 5.0, 10.0, 20.0, 50.0])
-    lon = LON0 + np.degrees(x_km * 1e3 / CELERI_RADIUS)
+    lon = LON0 + np.degrees(x_km * 1e3 / EARTH_RADIUS)
     lat = np.zeros(x_km.size)
     trace = FaultTrace(np.array([LON0 - 360.0, LON0 - 360.0]), np.array([-1.0, 1.0]), name="probe")
     frame = trace.local_frame()
@@ -108,7 +108,7 @@ def test_rotation_priors_hold_the_regional_pole():
     _, _, centres = rotation_columns(obs, blocks)
     axes = _axes_at(centres["east"])
     omega = sum(priors[f"block:east:{c}"][0] * axis for c, axis in zip(("ve", "vn", "spin"), axes))
-    assert np.allclose(omega, model.rotation(1).omega * CELERI_RADIUS / EARTH_RADIUS - shift.omega, rtol=1e-12, atol=1e-25)
+    assert np.allclose(omega, model.rotation(1).omega * model.radius / EARTH_RADIUS - shift.omega, rtol=1e-12, atol=1e-25)
     tied = InterseismicInversion(_probe_mesh(frame), obs, blocks=blocks, nuisance_prior=priors)
     assert np.abs(tied.rigid_poles()["east"].omega - omega).max() < 1e-6 * np.abs(omega).max()
 
@@ -131,23 +131,6 @@ def test_frame_rotation_is_recovered():
     pole, kept = fit_frame_rotation(lon, lat, e0, n0, e1, n1, floor=1e-5)
     assert not kept[:3].any() and kept[3:].all()
     assert np.allclose(pole.omega, truth.omega, rtol=2e-2)
-
-
-def test_celeri_files_round_trip(tmp_path):
-    model = two_blocks()
-    s = model.segments
-    pd.DataFrame({"name": s["name"], "lon1": s["lon1"], "lat1": s["lat1"], "lon2": s["lon2"], "lat2": s["lat2"],
-                  "dip": s["dip"], "locking_depth": s["locking_depth"], "azimuth": s["azimuth"],
-                  "length": 1e3 * s["length_km"], "model_strike_slip_rate": s["strike_slip"],
-                  "model_dip_slip_rate": s["dip_slip"], "model_tensile_slip_rate": s["tensile"]}).to_csv(
-        tmp_path / "model_segment.csv", index=False)
-    model.blocks.to_csv(tmp_path / "model_block.csv", index=False)
-    (tmp_path / "config.json").write_text('{"material_lambda": 3e10, "material_mu": 3e10}')
-    back = RegionalModel.from_celeri(tmp_path)
-    lon, lat = np.array([LON0 + 0.1, LON0 - 0.3]), np.array([1.0, -2.0])
-    assert np.allclose(back.segment_velocity(lon, lat), model.segment_velocity(lon, lat))
-    assert back.poisson == pytest.approx(0.25)
-    assert back.block_of(lon, lat).tolist() == [1, 0]
 
 
 # -- solving a block model ---------------------------------------------------------------------------------------
@@ -183,7 +166,7 @@ def test_a_block_model_recovers_its_rotations():
     planted, omega = _planted()
     assert planted.segments.loc[0, "strike_slip"] == pytest.approx(RATE, rel=1e-6)    # left-lateral, as planted
     x_km = np.array([-50.0, -20.0, -10.0, -5.0, 5.0, 10.0, 20.0, 50.0])
-    profile = _stations(planted, LON0 + np.degrees(x_km * 1e3 / CELERI_RADIUS), np.zeros(x_km.size))
+    profile = _stations(planted, LON0 + np.degrees(x_km * 1e3 / EARTH_RADIUS), np.zeros(x_km.size))
     assert np.allclose(profile["north"], RATE * (0.5 + np.arctan(x_km / DEPTH) / np.pi), atol=0.01 * RATE)
     rng = np.random.default_rng(7)
     lon = LON0 + np.r_[-rng.uniform(0.1, 1.9, 30), rng.uniform(0.1, 1.9, 30)]
@@ -228,7 +211,7 @@ def test_mesh_edges_and_the_umbrella_operator():
     points, triangles = _grid_mesh()
     edges = regional.mesh_edges(points, triangles)
     assert edges["top"].sum() == 6 and edges["bottom"].sum() == 6 and edges["side"].sum() == 6
-    tri, _, centroid = regional._mesh_geometry(points, triangles, CELERI_RADIUS)
+    tri, _, centroid = regional._mesh_geometry(points, triangles, EARTH_RADIUS)
     L = regional._umbrella(tri, centroid).toarray()
     assert np.allclose(L.sum(axis=1), 0.0, atol=1e-18)
     i = int(np.flatnonzero((L != 0).sum(axis=1) == 4)[0])                   # an element with three neighbours
@@ -292,7 +275,7 @@ def test_a_mesh_recovers_uniform_slip():
 
     planted, omega = _planted()
     points, triangles = _grid_mesh()
-    _, corners, _ = regional._mesh_geometry(points, triangles, CELERI_RADIUS)
+    _, corners, _ = regional._mesh_geometry(points, triangles, EARTH_RADIUS)
     table = pd.DataFrame({f"{key}{k + 1}": corners[:, k, c] for k in range(3) for c, key in enumerate(("lon", "lat", "dep"))})
     table["strike_slip"], table["dip_slip"] = 5.0, -2.0
     planted.meshes = table

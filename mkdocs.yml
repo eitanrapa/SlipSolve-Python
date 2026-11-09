@@ -1,5 +1,5 @@
 site_name: slipsolve
-site_description: Geodetic coseismic slip inversion on triangular fault meshes, from InSAR, pixel offsets and GNSS.
+site_description: Geodetic slip inversion on triangular fault meshes, from InSAR, pixel offsets and GNSS.
 site_url: https://eitanrapa.github.io/SlipSolve-Python/
 repo_url: https://github.com/eitanrapa/SlipSolve-Python
 repo_name: eitanrapa/SlipSolve-Python

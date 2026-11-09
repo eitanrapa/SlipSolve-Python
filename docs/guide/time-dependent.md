@@ -362,14 +362,14 @@ folds = cell_folds(obs, cell=50e3, n_folds=8, groups=blocks)     # blocked_cv_cu
 ## A regional block model for the far field
 
 A local network is a piece of a wider system. A regional block model of that system (Meade & Loveless
-2009) describes the rest. `RegionalModel` solves one from station velocities or reads one solved by
-celeri, and evaluates it at the local model's own rows, in the two forms the local inversion takes:
-rotation priors, and patterns.
+2009) describes the rest. `RegionalModel` solves one from station velocities (below) and evaluates
+it at the local model's own rows, in the two forms the local inversion takes: rotation priors, and
+patterns.
 
 ```python
-from slipsolve import InterseismicInversion, RegionalModel, fit_frame_rotation
+from slipsolve import InterseismicInversion, RegionalModel, celeri_inputs, fit_frame_rotation
 
-regional = RegionalModel.from_celeri("celeri_run/")                        # a solved run's output folder
+regional = RegionalModel.solve(**celeri_inputs("config.json"))            # or tables; see below
 shift, kept = fit_frame_rotation(lon, lat, ve, vn, ve_regional, vn_regional)  # shared stations, m/yr
 lon_rows, lat_rows = frame.to_lonlat(obs.ds["x"].values, obs.ds["y"].values)
 ties = regional.ties(lon_rows, lat_rows, blocks)                           # each local block's regional block
@@ -382,8 +382,7 @@ inversion = InterseismicInversion(mesh, obs, blocks=blocks, faults=faults, patte
 - **How.** A regional model's velocity is the rotation of the block a point lies in, less the
   elastic field of every locked segment (a rectangle from the surface to its locking depth, Okada
   1985, in an oblique Mercator projection along it) and of every mesh triangle. Its blocks are
-  the faces of its segment network, named by the interior points it gives them. It reproduces a
-  solved celeri run's own predictions at its stations to a few thousandths of a mm/yr.
+  the faces of its segment network, named by the interior points it gives them.
 - **The priors** tie each local block's three rotation coefficients to the rotation of the regional
   block holding most of its rows, moved into the local data's frame by `fit_frame_rotation`
   (from stations both data sets share). `sigma` is on the velocity at the block's centre.
@@ -415,11 +414,14 @@ regional.blocks[["name", "euler_lon", "euler_lat", "euler_rate"]]
 - **The estimator** is weighted least squares over the stations' horizontal velocities (and vertical ones with
   `vertical=True`), with slip-rate constraints, blocks held at an a priori pole, each mesh's umbrella smoothing on its
   element centroids (Desbrun et al. 1999) and zero slip on chosen mesh edges (`mesh_edges` finds the top, bottom and
-  sides). It is celeri's dense estimator: solved this way, celeri's western North America example (31 blocks, 837
-  segments, a 1841-element subduction mesh, 1686 stations) gives celeri's own solution to 1e-4 mm/yr in rotation,
-  slip rate, mesh slip and prediction.
+  sides). It is celeri's dense estimator. On celeri's western North America example (31 blocks, 837 segments, a
+  1841-element subduction mesh, 1686 stations), solved at celeri's Earth radius (`radius=6367444.7`, the mean of
+  WGS84's semi-axes), it gives celeri's own slip rates, mesh slip and predictions to 1e-4 mm/yr and its rotations to
+  1e-3 mm/yr at the surface. At the package's radius (`EARTH_RADIUS`, 6371 km, the default) the slip rates move by up
+  to 0.04 mm/yr and the predictions by 0.005 mm/yr.
 - **Inputs** are tables in a block model's units (degrees, km, mm/yr), the ones celeri writes, and `celeri_inputs` reads
   celeri's input files (its configuration, segment, block, station and gmsh mesh files) with its flags and weights.
+  celeri itself is not needed.
 - **Not built:** block strain, volume sources, mesh edges tied to the blocks' motion, coupling bounds and celeri's other
   estimators (eigenmodes, bounded QP, MCMC).
 

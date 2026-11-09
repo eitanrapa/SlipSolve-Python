@@ -3,8 +3,8 @@
 A local model (`slipsolve.interseismic.InterseismicInversion`) has its own blocks and faults, a piece of a wider system.
 A regional block model of that system describes the rest: how the blocks the local ones sit in rotate, and the faults
 the local model leaves out, each locked to a depth and slipping as its two blocks' rotations ask (Meade & Loveless
-2009). `RegionalModel` reads a solved one and evaluates it at the local model's observation points, in the two forms
-the local inversion takes:
+2009). `RegionalModel` holds a solved one, from `RegionalModel.solve`, and evaluates it at the local model's observation
+points, in the two forms the local inversion takes:
 
 - `RegionalModel.rotation_priors`: each local block's three rotation coefficients tied to the rotation of the regional
   block it lies in, as `nuisance_prior` entries with a mean;
@@ -31,9 +31,11 @@ A regional model's velocity at a point is its block's rotation less the elastic 
 Segments are rectangles from the surface to their locking depth (Okada 1985, `slipsolve._okada`), each in an oblique
 Mercator projection along it; mesh triangles are triangular dislocations (`slipsolve._tde`) in a transverse Mercator
 projection at each one's centroid. The blocks are the faces of the segment network, each named by the interior point
-the model gives it. `from_celeri` reads a solved run of celeri (github.com/brendanjmeade/celeri), whose conventions
-these follow: velocities in mm/yr, strike-slip positive left-lateral, dip-slip positive thrust (its sign flipped past
-90 degrees of dip), tensile positive opening. Everything this module returns is in m/yr.
+the model gives it. The tables follow celeri's conventions (github.com/brendanjmeade/celeri): velocities in mm/yr,
+strike-slip positive left-lateral, dip-slip positive thrust (its sign flipped past 90 degrees of dip), tensile positive
+opening. Everything this module returns is in m/yr. Rotations and positions use the package's Earth radius,
+`slipsolve.interseismic.EARTH_RADIUS` (6371 km); celeri's is 6367.4 km, the mean of WGS84's semi-axes, so pass that as
+`radius` to reproduce its numbers exactly.
 """
 
 import json
@@ -57,8 +59,6 @@ CLOSURE_KM = 1000.0
 #: within `ON_FAULT_ANGLE` (degrees) of the trace there.
 ON_FAULT_DISTANCE = 1.5e3
 ON_FAULT_ANGLE = 20.0
-#: celeri's Earth radius, the mean of WGS84's semi-axes (m): its rotation velocities use it.
-CELERI_RADIUS = 0.5 * (6378137.0 + 6356752.314245)
 _MM = 1e-3
 _PARTS = ("rotation", "inside", "inside_tensile", "outside", "outside_tensile", "meshes")
 
@@ -161,7 +161,7 @@ def _triangle_fields(corners, lon, lat, poisson):
     """`(n, 3, 2)`: east, north, up at points of unit strike- and dip-slip on a triangle (`corners`: lon, lat, depth in
     km, negative down), in a transverse Mercator projection at its centroid."""
     lons, lats, deps = _lon180(corners[:, 0]), corners[:, 1], corners[:, 2]
-    centre = _unit(lons, lats) * (CELERI_RADIUS + 1e3 * deps)[:, None]
+    centre = _unit(lons, lats) * (EARTH_RADIUS + 1e3 * deps)[:, None]
     centre = centre.mean(axis=0)
     lon0 = np.degrees(np.arctan2(centre[1], centre[0]))
     lat0 = np.degrees(np.arctan2(centre[2], np.hypot(centre[0], centre[1])))
@@ -214,10 +214,10 @@ class RegionalModel:
             below the surface) and `strike_slip`, `dip_slip` (mm/yr); or `None`.
         stations: the model's own stations (`lon`, `lat`, `east`, `north`, mm/yr, in its frame), or `None`.
         poisson: the half-space's Poisson's ratio.
-        radius: the Earth radius (m) its rotation velocities use.
+        radius: the Earth radius (m) its rotation velocities use, `EARTH_RADIUS` by default.
     """
 
-    def __init__(self, segments, blocks, meshes=None, stations=None, poisson=0.25, radius=CELERI_RADIUS):
+    def __init__(self, segments, blocks, meshes=None, stations=None, poisson=0.25, radius=EARTH_RADIUS):
         self.segments = pd.DataFrame(segments).reset_index(drop=True)
         self.blocks = pd.DataFrame(blocks).reset_index(drop=True)
         self.meshes = None if meshes is None else pd.DataFrame(meshes).reset_index(drop=True)
@@ -227,42 +227,7 @@ class RegionalModel:
         self._polygons = None
 
     @classmethod
-    def from_celeri(cls, run):
-        """A solved celeri run's output folder: `model_segment.csv`, `model_block.csv`, `model_meshes.csv`,
-        `model_station.csv` and `config.json`."""
-        run = Path(run).expanduser()
-        seg = pd.read_csv(run / "model_segment.csv")
-        segments = pd.DataFrame({
-            "name": seg["name"].astype(str).str.strip(), "lon1": seg["lon1"], "lat1": seg["lat1"],
-            "lon2": seg["lon2"], "lat2": seg["lat2"], "dip": seg["dip"], "locking_depth": seg["locking_depth"],
-            "azimuth": seg["azimuth"], "length_km": seg["length"] / 1e3,
-            "strike_slip": seg["model_strike_slip_rate"], "dip_slip": seg["model_dip_slip_rate"],
-            "tensile": seg["model_tensile_slip_rate"]})
-        blk = pd.read_csv(run / "model_block.csv")
-        blocks = pd.DataFrame({"name": blk["name"].astype(str).str.strip(), "interior_lon": blk["interior_lon"],
-                               "interior_lat": blk["interior_lat"], "euler_lon": blk["euler_lon"],
-                               "euler_lat": blk["euler_lat"], "euler_rate": blk["euler_rate"]})
-        meshes = None
-        if (run / "model_meshes.csv").exists():
-            mesh = pd.read_csv(run / "model_meshes.csv")
-            if len(mesh):
-                meshes = mesh[["lon1", "lat1", "dep1", "lon2", "lat2", "dep2", "lon3", "lat3", "dep3"]].copy()
-                meshes["strike_slip"] = mesh["strike_slip_rate"]
-                meshes["dip_slip"] = mesh["dip_slip_rate"]
-        stations = None
-        if (run / "model_station.csv").exists():
-            st = pd.read_csv(run / "model_station.csv")
-            stations = pd.DataFrame({"name": st["name"].astype(str).str.strip(), "lon": st["lon"], "lat": st["lat"],
-                                     "east": st["east_vel"], "north": st["north_vel"]})
-        poisson = 0.25
-        if (run / "config.json").exists():
-            config = json.loads((run / "config.json").read_text())
-            lam, mu = float(config.get("material_lambda", 3e10)), float(config.get("material_mu", 3e10))
-            poisson = lam / (2.0 * (lam + mu))
-        return cls(segments, blocks, meshes, stations, poisson=poisson)
-
-    @classmethod
-    def solve(cls, segments, blocks, stations, meshes=(), *, poisson=0.25, radius=CELERI_RADIUS, vertical=False):
+    def solve(cls, segments, blocks, stations, meshes=(), *, poisson=0.25, radius=EARTH_RADIUS, vertical=False):
         """A block model fitted to station velocities (Meade & Loveless 2009): its rotations, slip rates and mesh slip.
 
     The tables are in a block model's units (degrees, km, mm/yr), as celeri writes them; `celeri_inputs` reads celeri's
@@ -686,7 +651,7 @@ def _pole(omega):
             float(np.degrees(rate) * 1e6))
 
 
-def _solve_block_model(cls, segments, blocks, stations, meshes=(), *, poisson=0.25, radius=CELERI_RADIUS,
+def _solve_block_model(cls, segments, blocks, stations, meshes=(), *, poisson=0.25, radius=EARTH_RADIUS,
                        vertical=False):
     from scipy import sparse
     from scipy.linalg import lstsq
@@ -860,6 +825,9 @@ def celeri_inputs(config):
     segments replaced by a mesh (`mesh_flag`) given no elastic field; flagged slip rates and poles as constraints, with
     celeri's weights as sigmas (`slip_constraint_weight`, `tri_con_weight`; its a priori poles are held, as its weight
     of 1e24 does). A mesh edge flagged 2 (slip tied to the blocks' motion) is not supported.
+
+    The solve then uses the package's Earth radius. celeri's is the mean of WGS84's semi-axes, 6367.4 km: add
+    `radius=0.5 * (6378137.0 + 6356752.314245)` to reproduce celeri's own solution.
     """
     config = Path(config).expanduser()
     options = json.loads(config.read_text())

@@ -1,4 +1,4 @@
-"""Geodetic coseismic slip inversion from InSAR, pixel offsets and GNSS.
+"""Geodetic slip inversion from InSAR, pixel offsets and GNSS.
 
 `slipsolve` turns surface displacement into slip on a fault. Gridded
 line-of-sight observations are adaptively downsampled, a triangulated fault

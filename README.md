@@ -1,6 +1,6 @@
 # slipsolve-python
 
-Geodetic coseismic slip inversion on triangular fault meshes. Given gridded InSAR
+Geodetic slip inversion on triangular fault meshes. Given gridded InSAR
 line-of-sight displacement, pixel offsets and GNSS, a mapped fault trace and a model
 of its dip, `slipsolve` solves a bounded, regularized least-squares problem for the
 slip on a vertical, dipping or curved fault, with Green's functions for a
@@ -27,8 +27,7 @@ translation of, and extension to, the MATLAB package
 - Postseismic and interseismic modes: slip that changes with time from dated series
   (`TimeDependentInversion`), rigid blocks plus back-slip with coupling bounds from velocities
   (`InterseismicInversion`), and signals beside the slip: viscoelastic relaxation of a layered crust
-  (`RelaxationTables`) and the far field of a regional block model (`RegionalModel`). See
-  [the guide](https://eitanrapa.github.io/SlipSolve-Python/guide/time-dependent/).
+  (`RelaxationTables`) and the far field of a regional block model (`RegionalModel`).
 
 ## Install
 
