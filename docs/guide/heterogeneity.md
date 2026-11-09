@@ -106,3 +106,8 @@ so no voxel crosses one.
   and distance grids; strain is more demanding than displacement.
 - `order="born1"` keeps only the first term, \(\mathbf{G}_0 - \mathbf{H}\,\Delta\mathbf{C}\,\mathbf{E}\),
   for a quick look at a weak departure.
+- **Topography and the far field.** Observation heights work as for every engine: the
+  voxels, like the fault, stay beneath the datum while each point's surface moves to its
+  height ([Elastic models](elastic-models.md#topography)). Earth's curvature and gravity go on
+  around the engine, `Curvature(HeterogeneousEngine(...), tables)`, computed on the layered
+  reference ([Elastic models](elastic-models.md#earths-curvature-and-gravity)).

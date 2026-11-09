@@ -44,7 +44,9 @@ LOS grids, offsets, GNSS ──> Observations ┘
   & Walter 2015); a layered crust through the package's own wavenumber-domain tables
   (`RemainderTables`, `LayeredTDE`), exact near the fault and at depth; fully 3-D
   heterogeneity on voxels
-  (`HeterogeneousEngine`); a rigidity contrast across the fault (`Bimaterial`).
+  (`HeterogeneousEngine`); a rigidity contrast across the fault (`Bimaterial`);
+  topography by the elevation shift; and Earth's curvature and gravity as a correction
+  for the far field (`Curvature`).
 - **Data.** Quadtree sampling of gridded LOS products, optionally driven by a
   model's predicted field (Wang & Fialko 2015) or by model resolution; one offset
   per separately unwrapped region; pixel offsets and GNSS as tracks of their own;
@@ -61,6 +63,11 @@ LOS grids, offsets, GNSS ──> Observations ┘
 - **Geometry search.** Per-segment dip sweeps, including dips that change with
   depth, scored by misfit at fixed effective rank or by the marginal likelihood,
   with bootstrap intervals (`DipSweep`, `GeometryEvidence`).
+- **Postseismic and interseismic.** Slip that changes with time from dated series
+  (`TimeDependentInversion`); rigid blocks plus back-slip with coupling bounds from
+  velocities (`InterseismicInversion`); and signals beside the slip: viscoelastic
+  relaxation of a layered crust (`RelaxationTables`) and the far field of a regional
+  block model (`RegionalModel`).
 - **Output.** Seismic moment with depth-dependent rigidity, surface displacement
   grids (GMT `.grd`), element and node tables, a single-file save format, and
   figures.
