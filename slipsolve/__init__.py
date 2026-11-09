@@ -40,8 +40,8 @@ Main entry points:
 - Data: `LosGrid` (a gridded LOS product with its look vectors), `resample_all`
   and `Observations` (`from_los` quadtree-downsamples a scene, `from_points`
   takes GNSS, `concat` joins tracks).
-- Green's functions: `HalfSpaceTDE` (the default), `LayeredTDE` and
-  `LayeredPointSource` (a layered crust), `HeterogeneousEngine` (3-D
+- Green's functions: `HalfSpaceTDE` (the default), `LayeredTDE` (a layered
+  crust, from a `VelocityModel`), `HeterogeneousEngine` (3-D
   heterogeneity on a `VoxelModel`) and `Bimaterial` (blocks of different
   rigidity either side of the fault).
 - The solve: `SlipInversion` returns a `SlipModel`, which reports the fit and
@@ -81,6 +81,7 @@ from .covariance import (
     scene_covariance,
     whitening_factors,
 )
+from .crust import VelocityModel
 from .diagnostics import (
     cell_size_ladder,
     noise_floor,
@@ -89,7 +90,6 @@ from .diagnostics import (
     ramp_sweep,
     scene_report,
 )
-from .edgrn import EdgrnTables, VelocityModel, run_edgrn, write_edgrn_input
 from .evidence import GeometryEvidence, smoothing_precision
 from .frame import LocalFrame
 from .gnss import (StationSeries, common_mode, fit_trajectory, gnss_observations, gnss_series, noise_levels,
@@ -100,7 +100,6 @@ from .heterogeneity import HeterogeneousEngine, VoxelModel
 from .interseismic import (EulerPole, InterseismicInversion, InterseismicModel, block_labels,
                            coupling_bounds, rotation_columns, side_labels, strain_from_coefficients)
 from .inversion import SlipInversion, SlipModel
-from .layered import LayeredPointSource
 from .layered_tde import LayeredTDE
 from .layout import MeshLayout, graded_layout, lloyd_layout, triangulate
 from .mesh import FaultMesh
@@ -149,7 +148,6 @@ __all__ = [
     "BootstrapResult",
     "CovarianceModel",
     "DipSweep",
-    "EdgrnTables",
     "ElementBasis",
     "Ensemble",
     "EulerPole",
@@ -163,7 +161,6 @@ __all__ = [
     "HeterogeneousEngine",
     "InterseismicInversion",
     "InterseismicModel",
-    "LayeredPointSource",
     "LayeredTDE",
     "LocalFrame",
     "LosGrid",
@@ -251,7 +248,6 @@ __all__ = [
     "resolution_matrix",
     "resolution_report",
     "rotation_columns",
-    "run_edgrn",
     "sample_slip",
     "scene_covariance",
     "scene_report",
@@ -270,5 +266,4 @@ __all__ = [
     "west_first",
     "whitening_factors",
     "with_solution",
-    "write_edgrn_input",
 ]

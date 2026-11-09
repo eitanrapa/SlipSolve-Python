@@ -5,7 +5,8 @@ import pytest
 
 from slipsolve import wavenumber as wn
 from slipsolve._tde import tde_disp_hs
-from slipsolve.edgrn import VelocityModel, _point_dislocation, _project, _SOURCE_GEOMETRY
+from slip_synthetic import SOURCE_GEOMETRY, point_dislocation, project_azimuth
+from slipsolve.crust import VelocityModel
 
 #: A two-layer crust with a strong shallow contrast and different Poisson ratios:
 #: a 2 km sedimentary lid over crystalline crust.
@@ -23,8 +24,8 @@ def _tde_tables(nu, r, z_s, z_r, n_az=16, size=1.0):
     ox, oy = (rr * np.sin(pp)).ravel(), (rr * np.cos(pp)).ravel()
     oz = np.full(ox.size, -float(z_r))
     f = {}
-    for label, normal, slip in _SOURCE_GEOMETRY:
-        p1, p2, p3, comp = _point_dislocation(normal, slip, z_s, size)
+    for label, normal, slip in SOURCE_GEOMETRY:
+        p1, p2, p3, comp = point_dislocation(normal, slip, z_s, size)
         f[label] = np.stack(tde_disp_hs(ox, oy, oz, p1, p2, p3, *comp, nu)) / (0.5 * size ** 2)
     sources = {"ss": f["ss"], "ds": f["ds"], "cl": 0.5 * (f["tz"] - 0.5 * (f["tx"] + f["ty"])),
                "ep": (f["tx"] + f["ty"] + f["tz"]) / 3.0}
@@ -34,7 +35,7 @@ def _tde_tables(nu, r, z_s, z_r, n_az=16, size=1.0):
         north, east, down = un, ue, -uu
         values = {"uz": down, "ur": north * np.cos(phi) + east * np.sin(phi),
                   "ut": -north * np.sin(phi) + east * np.cos(phi)}[comp]
-        out[:, col] = _project(values, phi, "cl" if kind == "ep" else kind, comp)
+        out[:, col] = project_azimuth(values, phi, "cl" if kind == "ep" else kind, comp)
     return out
 
 

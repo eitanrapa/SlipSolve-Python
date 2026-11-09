@@ -5,8 +5,8 @@ import pytest
 
 from slipsolve import wavenumber as wn
 from slipsolve._tde import tde_disp_hs
-from slipsolve.edgrn import VelocityModel
-from slipsolve.layered import _triangle_quadrature
+from slipsolve.crust import VelocityModel
+from slipsolve._quadrature import _triangle_quadrature
 from slipsolve.layered_tde import LayeredTDE, moment_packing, split_by_layers
 
 TWO_LAYERS = VelocityModel([0.0, 2000.0, 2000.0, 60e3],
@@ -163,7 +163,7 @@ def test_the_three_tents_add_up_to_the_element(two_layer_tables):
 def test_a_tent_is_its_finely_subdivided_triangle(one_layer_tables):
     """Against oriented constant-slip sub-triangles carrying the tent's value at their centroids."""
     from slipsolve._tde import tde_disp_hs_unit
-    from slipsolve.layered import _sub_triangles
+    from slipsolve._quadrature import _sub_triangles
 
     engine = LayeredTDE(one_layer_tables, far=None)
     nu = float(ONE_LAYER.poisson())
@@ -188,16 +188,13 @@ def test_a_tent_is_its_finely_subdivided_triangle(one_layer_tables):
 def test_nodal_columns_match_point_sources_away_from_the_fault(two_layer_tables):
     """Two independent tent integrations of one crust, a few km and more from the fault.
 
-    `LayeredPointSource` on tables of the full layered kernel from the same solver
-    (remainder plus half-space, at the surface), integrating each tent with point sources.
-    They agree to 2-5e-3 of each receiver's largest column, the same at point-source
-    tolerance 1e-3 and 1e-4 -- the point sources' own 100 m tables. Projecting
-    element means instead differs from these tents by 9-14% on this coarse mesh.
+    Point sources of the full layered kernel from the same solver (remainder plus half-space, at the surface), each
+    tent's weighted by the tent and summed at a fixed order-12 rule by the viscoelastic tables' own integrator
+    (`slipsolve.relaxation`), against `LayeredTDE`'s nodal columns: within 1e-2 of the largest column.
     """
     from slipsolve import FaultMesh, FaultTrace
     from slipsolve.basis import make_basis
-    from slipsolve.edgrn import EdgrnTables
-    from slipsolve.layered import LayeredPointSource
+    from slipsolve.relaxation import _evaluate, _Grid, _Sources
 
     trace = FaultTrace.from_lonlat(np.array([-80.0, -79.8]), np.array([8.0, 8.0]))
     frame = trace.local_frame()
@@ -207,19 +204,25 @@ def test_nodal_columns_match_point_sources_away_from_the_fault(two_layer_tables)
     k, dln = wn.wavenumbers(n=2048)
     r = np.linspace(0.0, 120e3, 1201)
     z = np.linspace(50.0, 12050.0, 121)                  # nodes off the 2 km interface
-    tables = {kind: {c: np.zeros((r.size, z.size)) for c in ("uz", "ur", "ut")} for kind in ("ss", "ds", "cl")}
+    tables = {kind: {c: np.zeros((r.size, z.size, 1)) for c in ("uz", "ur", "ut")} for kind in ("ss", "ds", "cl")}
     for j, z_s in enumerate(z):
         U, V, W = wn.kernels(tops, lam, mu, z_s, np.array([0.0]), k, remainder=False)
         values = wn.transform(U, V, W, k, dln, np.maximum(r, 1.0))[0]
         for col, (kind, comp) in enumerate(wn.TABLE_KEYS[:8]):
-            tables[kind][comp][:, j] = values[:, col]
-    point = LayeredPointSource(EdgrnTables(r, z, tables, interfaces=tops[1:]), tolerance=1e-3)
-    s0, s1 = trace.to_curvilinear(*trace.from_curvilinear(np.array([5e3, 15e3]), np.zeros(2), frame), frame)[0]
+            tables[kind][comp][:, j, 0] = values[:, col]
+    grid = _Grid(r, z, tops[1:])
     xs, ys = trace.from_curvilinear(np.array([5e3, 10e3, 15e3, 8e3, 12e3]),
                                     np.array([6e3, -7e3, 12e3, -15e3, 25e3]), frame)
-    look = (np.full(5, 0.6), np.full(5, -0.1), np.full(5, 0.79))
-    g_tde = LayeredTDE(two_layer_tables).los_matrix(mesh, xs, ys, *look, basis=basis)
-    g_pts = point.los_matrix(mesh, xs, ys, *look, basis=basis)
+    look = np.array([0.6, -0.1, 0.79])
+    g_tde = LayeredTDE(two_layer_tables).los_matrix(mesh, xs, ys, *(np.full(5, c) for c in look), basis=basis)
+    n = mesh.n_nodes
+    g_pts = np.empty_like(g_tde)
+    for col in range(2 * n):
+        unit = np.zeros(n)
+        unit[col % n] = 1.0
+        ss, ds = (unit, np.zeros(n)) if col < n else (np.zeros(n), unit)
+        enu = _evaluate(_Sources(mesh, basis, ss, ds, 12), tables, grid, xs, ys)[:, :, 0]
+        g_pts[:, col] = enu @ look
     assert np.abs(g_tde - g_pts).max() < 1e-2 * np.abs(g_pts).max()
 
 
@@ -247,17 +250,15 @@ def test_far_surface_receivers_take_point_sources_of_the_same_field(two_layer_ta
         assert np.abs(ta[i] - tb[i]).max() < 1e-2 * np.abs(ta[i]).max()
 
 
-def test_the_quadratic_rule_splits_the_remainder_among_the_tents(two_layer_tables):
-    """The default (`quadratic=True`): the remainder and far path by a rule exact for quadratics.
+def test_the_rule_splits_the_remainder_among_the_tents(two_layer_tables):
+    """The remainder and the far path are integrated by a rule exact for quadratics.
 
-    The sub-triangle centroids (`quadratic=False`) give each far-away tent a third of the
-    element, an error first order in size / distance. Against the converged tents (these
-    tables, surface, 1.5-30 sizes): centroids 2e-3 to 1.8e-2 of a tent's peak, the quadratic
-    rule at most 2e-4.
+    Sub-triangle centroids would give each far-away tent a third of the element, an error first order in size /
+    distance (2e-3 to 1.8e-2 of a tent's peak on these tables). Against the converged tents (surface, 1.5-30 sizes)
+    this rule stays within 5e-4.
     """
     reference = LayeredTDE(two_layer_tables, tolerance=1e-7)
-    default, centroids = LayeredTDE(two_layer_tables), LayeredTDE(two_layer_tables, quadratic=False)
-    assert default.quadratic and not centroids.quadratic
+    engine = LayeredTDE(two_layer_tables)
     for v in (BELOW, CROSSING):
         size = np.sqrt(np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0])))
         angle = np.linspace(0.0, 2 * np.pi, 7)[:-1]
@@ -267,7 +268,5 @@ def test_the_quadratic_rule_splits_the_remainder_among_the_tents(two_layer_table
         z = np.zeros(x.size)
         want = reference.tent_field(v, x, y, z, components=(0, 1, 2))
         peak = np.abs(want).max(axis=(1, 2, 3))
-        error = {name: (np.abs(e.tent_field(v, x, y, z, components=(0, 1, 2)) - want).max(axis=(1, 2, 3)) / peak).max()
-                 for name, e in (("default", default), ("centroids", centroids))}
-        assert error["default"] < 5e-4
-        assert error["centroids"] > 5.0 * error["default"]
+        error = (np.abs(engine.tent_field(v, x, y, z, components=(0, 1, 2)) - want).max(axis=(1, 2, 3)) / peak).max()
+        assert error < 5e-4

@@ -22,12 +22,9 @@ dependencies:
   - rioxarray
   - pyproj
   - matplotlib
-  # Optional [layered]: EDGRN/EDCMP needs a Fortran compiler to build.
-  - gfortran
   # Optional [dev]
   - pytest
   - pytest-xdist
   - pip
   - pip:
-      - pygrnwang
       - cutde

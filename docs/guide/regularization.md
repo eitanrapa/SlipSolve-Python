@@ -53,12 +53,12 @@ independence without relying on a fitted noise model.
 from slipsolve import blocked_cv_curve
 
 curve = blocked_cv_curve(inversion, [0.03, 0.1, 0.3, 1.0, 3.0], n_folds=8,
-                         polarity=(-1, 0, 0), method="active_set")
+                         polarity=(-1, 0, 0))
 print(curve.attrs["best_smoothing"], curve.attrs["best_rank"], curve.attrs["interior"])
 ```
 
 - Extra keyword arguments go to `solve`; use the same bounds and ratios as the
-  final solve. `method="active_set"` makes the many solves cheap.
+  final solve. The default solver (`method="active_set"`) makes the many solves cheap.
 - **Check `interior`.** A minimum at the end of the sweep has run out of weights,
   not chosen one; extend the sweep.
 - Folds are cut at equal widths along the samples' principal axis (`direction=` to

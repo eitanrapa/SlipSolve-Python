@@ -1,12 +1,12 @@
 """Triangular dislocations in a layered half-space, exact near the element.
 
-`slipsolve.layered.LayeredPointSource` cuts an element into point sources
-and looks each up in EDGRN's tables. That is accurate a few element sizes away and
-fails close in, where the point sources' `1/r**2` field has to be resolved by the
-tables and the quadrature both: within a few hundred metres of a shallow fault the
-tabulated field can be tens of percent low. It also has no field at depth and no
-opening source, which the exact bimaterial solve (`slipsolve.bimaterial`) needs for
-every element.
+A layered crust has no closed form. Cutting an element into point sources and
+looking each up in tables of the whole layered field is accurate a few element sizes
+away and fails close in, where the point sources' `1/r**2` field has to be resolved
+by the tables and the quadrature both: within a few hundred metres of a shallow
+fault the tabulated field can be tens of percent low. Such tables, computed at one
+receiver depth for slip sources, also give no field at depth and no opening, which
+the exact bimaterial solve (`slipsolve.bimaterial`) needs for every element.
 
 This engine splits the layered field instead:
 
@@ -37,7 +37,7 @@ from ._tde import (STRAIN_STEP, _element_basis, tde_disp_hs, tde_disp_hs_unit,
 from ._tde import barycentric as _barycentric
 from ._tde import distance_to_triangle as _distance_to_triangle
 from .greens import _as_points, _require_finite
-from .layered import _QUADRATURE_CONSTANT, _QUADRATURE_SAFETY, _triangle_quadrature
+from ._quadrature import _QUADRATURE_CONSTANT, _QUADRATURE_SAFETY, _triangle_quadrature
 from .wavenumber import TABLE_KEYS
 
 #: Relative accuracy the remainder's quadrature aims for, per piece and receiver.
@@ -190,13 +190,11 @@ class LayeredTDE:
     """
 
     name = "layered_tde"
-    #: Nodal columns are integrated over each tent itself (`tent_field`), as
-    #: `slipsolve.layered.LayeredPointSource` integrates them, rather than
-    #: projected from element means.
+    #: Nodal columns are integrated over each tent itself (`tent_field`) rather
+    #: than projected from element means.
     supports_basis = True
 
-    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR, quadratic=True,
-                 far_rule="gauss"):
+    def __init__(self, tables, tolerance=REMAINDER_TOLERANCE, max_order=MAX_ORDER, far=FAR, far_rule="gauss"):
         self.tables = tables
         self.tolerance = float(tolerance)
         self.max_order = int(max_order)
@@ -206,13 +204,11 @@ class LayeredTDE:
         self.far = None if far is None or not tables.has_surface else float(far)
         #: `strain`'s far path, at any depth; it needs no surface field.
         self.strain_far = None if far is None else float(far)
-        #: Integrate the displacement's remainder (and its far path) with the rule exact for
-        #: quadratics (`_rule_quadratic`) instead of sub-triangle centroids; strain always
-        #: does. The centroids split an element's remainder among its tents with an error
-        #: first order in size / distance (about 1e-3 of a nodal column, up to 1e-2 for a
-        #: single tent); this rule's error is second order (about 1e-5), at the same cost.
-        #: `quadratic=False` keeps the centroid rule.
-        self.quadratic = bool(quadratic)
+        # The displacement's remainder (and its far path) is integrated with the rule exact
+        # for quadratics (`_rule_quadratic`), as the strain is: sub-triangle centroids would
+        # split an element's remainder among its tents with an error first order in
+        # size / distance (about 1e-3 of a nodal column, up to 1e-2 for a single tent),
+        # where this rule's is second order (about 1e-5), at the same cost.
         if far_rule not in ("gauss", "composite"):
             raise ValueError(f"far_rule must be 'gauss' or 'composite', got {far_rule!r}")
         #: The rule `strain`'s far path integrates its point sources with: a collapsed
@@ -573,10 +569,9 @@ class LayeredTDE:
             size = np.sqrt(2.0 * area)
             orders = (self._point_orders(tri, size, x, y, z) if whole
                       else self._orders(tri, size, x, y, z))
-            # The rule exact for quadratics: the sub-triangle centroids split an element's
-            # remainder among its tents with an error first order in size / distance
-            # (_rule_quadratic). Displacement takes the centroids only with quadratic=False.
-            kind = np.full(n, int(self.quadratic))                   # 0 centroids, 1 quadratic
+            # The rule exact for quadratics (_rule_quadratic): sub-triangle centroids would split
+            # an element's remainder among its tents with an error first order in size / distance.
+            kind = np.full(n, 1)                                     # the rule exact for quadratics
             rec, points, weights = [], [], []
             key = 3 * orders + kind                       # displacement: the orders alone
             for k in np.unique(key):
@@ -684,7 +679,7 @@ class LayeredTDE:
         return np.clip(n, TRIANGLE_FAR_MIN_ORDER, self.max_order).astype(int)
 
     def _point_orders(self, tri, size, x, y, z, tolerance=None):
-        """The point-source rule of `slipsolve.layered.LayeredPointSource` for the whole field."""
+        """The point-source rule for the whole field: the order that brings `C (k L / r)**-2` to the tolerance."""
         centroid = tri.mean(axis=0)
         distance = np.sqrt((x - centroid[0]) ** 2 + (y - centroid[1]) ** 2 + (z - centroid[2]) ** 2)
         tolerance = self.tolerance if tolerance is None else tolerance
@@ -696,7 +691,7 @@ class LayeredTDE:
         """Quadrature order per receiver, from the length the remainder varies over.
 
         The point-source rule's `C (k L / l)**-2` error model
-        (`slipsolve.layered._QUADRATURE_CONSTANT`), with `l` the larger of
+        (`slipsolve._quadrature._QUADRATURE_CONSTANT`), with `l` the larger of
         the receiver's distance and, for a receiver in the piece's own layer, the
         distance to the nearest image across that layer's interfaces -- the
         remainder is smooth on that scale even at the source. A receiver in another
@@ -730,9 +725,9 @@ def _combine(values, azimuth, packing):
     """East, north and up of each tabulated pair for each moment packing: `(npairs, ncomp, 3)`.
 
     `values` are the ten table columns at each pair and `azimuth` the direction
-    from source to receiver, clockwise from north. The azimuthal factors are the
-    ones `slipsolve.layered.LayeredPointSource` puts back, plus the
-    explosion's, which is axisymmetric like the CLVD.
+    from source to receiver, clockwise from north. The azimuthal factors are
+    `sin 2 phi` and `cos 2 phi` for `ss`, `cos phi` and `sin phi` for `ds`, and
+    none for the CLVD and the explosion, which are axisymmetric.
     """
     cos1, sin1 = np.cos(azimuth), np.sin(azimuth)
     cos2, sin2 = np.cos(2.0 * azimuth), np.sin(2.0 * azimuth)
@@ -842,7 +837,7 @@ def engine_pool(engine, workers):
     from concurrent.futures import ProcessPoolExecutor
 
     options = dict(tolerance=engine.tolerance, max_order=engine.max_order, far=engine.strain_far,
-                   quadratic=engine.quadratic, far_rule=engine.far_rule)
+                   far_rule=engine.far_rule)
     return ProcessPoolExecutor(int(workers), initializer=_start_worker, initargs=(str(path), options))
 
 
@@ -1154,7 +1149,7 @@ _RULES = {}
 
 
 def _rule(order):
-    """`slipsolve.layered._triangle_quadrature`'s rule as barycentric rows, cached.
+    """`slipsolve._quadrature._triangle_quadrature`'s rule as barycentric rows, cached.
 
     The same points (sub-triangle centroids) and equal weights, built once per order:
     building them for every piece and receiver group is a sizeable share of an
@@ -1170,7 +1165,7 @@ def _rule(order):
 def _rule_quadratic(order):
     """`order**2` equal sub-triangles, each with the three-point rule exact for quadratics: barycentric rows.
 
-    The strain's rule, and the displacement's with `quadratic=True` (`LayeredTDE._remainder`).
+    The rule of the strain and of the displacement's remainder (`LayeredTDE._remainder`).
     The sub-triangle centroids of `_rule` integrate a tent times a smooth kernel with an
     error first order in `size / distance`: at one point each tent gets a third of the
     element, its first moment wrong, and a tent's error is about ten times the element's.

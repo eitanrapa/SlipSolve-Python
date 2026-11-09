@@ -14,11 +14,11 @@ import pytest
 from slipsolve import FaultMesh, FaultTrace, HalfSpaceTDE
 from slipsolve import wavenumber as wn
 from slipsolve.basis import make_basis
-from slipsolve.edgrn import VelocityModel
+from slipsolve.crust import VelocityModel
 from slipsolve.inversion import assemble_design
 from slipsolve.relaxation import (COMPONENTS, GRAVITY, RELAXATION_K_RANGE, RELAXATION_N_K, SECONDS_PER_DAY,
-                                  RelaxationTables, Rheology, _layers, _talbot, relaxation_history, relaxation_pattern,
-                                  shear_modulus)
+                                  RelaxationTables, Rheology, _Grid, _layers, _stencil, _talbot, relaxation_history,
+                                  relaxation_pattern, shear_modulus)
 
 DAYS_PER_YEAR = 365.25
 
@@ -260,3 +260,48 @@ def test_the_axis_is_exact():
             values = table[kind][comp]
             step = np.abs(values[1] - values[2]).max()                       # the change over 100 m
             assert np.abs(values[0] - values[1]).max() < 2.0 * step + 1e-6 * np.abs(values).max(), (kind, comp)
+
+
+# -- the tables' stencil ------------------------------------------------------------------------------------------------
+
+def _lookup(grid, values, distance, depth):
+    i0, i1, j0, j1, ti, tj = _stencil(grid, np.asarray(distance, float), np.asarray(depth, float))
+    return ((1 - ti) * (1 - tj) * values[i0, j0] + ti * (1 - tj) * values[i1, j0]
+            + (1 - ti) * tj * values[i0, j1] + ti * tj * values[i1, j1])
+
+
+def test_the_stencil_is_exact_on_a_ramp_and_clamps_outside():
+    r, z = np.linspace(0.0, 50e3, 6), np.linspace(1e3, 5e3, 5)
+    rr, zz = np.meshgrid(r, z, indexing="ij")
+    grid = _Grid(r, z)
+    values = 3.0 + 2.0e-4 * rr - 1.0e-3 * zz
+    probe_r, probe_z = np.array([0.0, 12345.0, 50e3]), np.array([1e3, 2345.0, 5e3])
+    np.testing.assert_allclose(_lookup(grid, values, probe_r, probe_z),
+                               3.0 + 2.0e-4 * probe_r - 1.0e-3 * probe_z, rtol=1e-12)
+    edge = _lookup(grid, values, [50e3], [5e3])
+    np.testing.assert_allclose(_lookup(grid, values, [1e9], [1e9]), edge)
+
+
+def test_the_stencil_never_blends_layers():
+    """Per unit potency a table steps by the rigidity ratio at an interface: the stencil stays in the query's layer.
+
+    A depth profile linear within each layer must come back exactly, both for an interface between two nodes and for
+    one lying on a node (which belongs to neither layer; a query at an interface depth belongs to the layer below). The
+    plain stencil must not manage it, or this tests nothing.
+    """
+    r = np.linspace(0.0, 10e3, 3)
+    z = np.linspace(500.0, 5000.0, 10)                  # nodes every 500 m
+    cuts = (2250.0, 3500.0)                             # between nodes; on a node
+
+    def exact(depth):
+        depth = np.asarray(depth, float)
+        return np.where(depth < cuts[0], 1.0 + 1e-4 * depth,
+                        np.where(depth < cuts[1], 5.0 + 2e-4 * depth, 20.0 - 1e-4 * depth))
+
+    values = np.broadcast_to(exact(z)[None, :], (r.size, z.size)).copy()
+    depth = np.array([2100.0, 2240.0, 2250.0, 2400.0, 3400.0, 3499.0, 3500.0, 3700.0])
+    distance = np.full(depth.size, 5e3)
+    np.testing.assert_allclose(_lookup(_Grid(r, z, cuts), values, distance, depth), exact(depth), rtol=1e-12)
+    blended = _lookup(_Grid(r, z), values, distance, depth)
+    assert np.max(np.abs(blended - exact(depth)) / exact(depth)) > 0.1
+

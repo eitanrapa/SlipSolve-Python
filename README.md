@@ -15,8 +15,8 @@ translation of, and extension to, the MATLAB package
 - Faults built from a surface trace: vertical, a dip per segment, a digitised bottom
   edge or a fitted surface; slip per element or per node; graded or unstructured meshes.
 - Triangular dislocations (Nikkhoo & Walter 2015), layered Green's functions from the
-  package's own wavenumber-domain tables or from EDGRN, 3-D heterogeneity on voxels,
-  rigidity contrasts across the fault, and topography by the elevation shift.
+  package's own wavenumber-domain tables, 3-D heterogeneity on voxels, rigidity
+  contrasts across the fault, and topography by the elevation shift.
 - Quadtree sampling of LOS grids, driven by the data, a model's prediction or model
   resolution; pixel offsets and GNSS as further tracks; correlated noise models.
 - Smoothing, zero-slip edges, bounds and slip polarity, and per-track ramps solved
@@ -37,8 +37,8 @@ pip install "slipsolve-python @ git+https://github.com/eitanrapa/SlipSolve-Pytho
 ```
 
 or, with every optional dependency, `conda env create -f environment.yml` and
-`pip install -e .` in the clone. Extras: `[layered]` (run EDGRN through `pygrnwang`),
-`[dev]` (tests), `[docs]` (this documentation). The import name is `slipsolve`.
+`pip install -e .` in the clone. Extras: `[dev]` (tests) and `[docs]` (this
+documentation). The import name is `slipsolve`.
 
 ## Example
 

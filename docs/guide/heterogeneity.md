@@ -3,7 +3,7 @@
 [`HeterogeneousEngine`](../api/structure.md#slipsolve.heterogeneity.HeterogeneousEngine)
 computes Green's functions in a crust with any elastic moduli
 \(\lambda(\mathbf{x})\), \(\mu(\mathbf{x})\): a layered reference, solved exactly by
-[`LayeredTDE`](elastic-models.md#the-packages-own-tables-layeredtde), plus a
+[`LayeredTDE`](elastic-models.md#layered-crust), plus a
 departure from it held on voxels. It is an engine like the others, so
 `SlipInversion(engine=...)` takes it with either basis.
 

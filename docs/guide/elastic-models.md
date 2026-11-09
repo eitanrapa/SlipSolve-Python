@@ -9,7 +9,6 @@ takes any of them and nothing else changes.
 |---|---|---|
 | [`HalfSpaceTDE`](../api/elastic-models.md#slipsolve.greens.HalfSpaceTDE) | homogeneous half-space | closed form; the default |
 | [`LayeredTDE`](../api/elastic-models.md#slipsolve.layered_tde.LayeredTDE) | layered half-space | the package's own tables; exact near the fault, fields at depth |
-| [`LayeredPointSource`](../api/elastic-models.md#slipsolve.layered.LayeredPointSource) | layered half-space | EDGRN tables, as EDCMP uses them |
 | [`HeterogeneousEngine`](heterogeneity.md) | any \(\lambda(\mathbf{x}), \mu(\mathbf{x})\) | voxels on a layered reference |
 | [`Bimaterial`](bimaterial.md) | two blocks of different rigidity | wraps another engine |
 
@@ -30,9 +29,8 @@ Poisson's ratio; rigidity cancels and enters only through the moment.
 
 A uniform crust gives the shallow, soft layers the rigidity of the deep crust, so
 the same surface displacement then needs less shallow slip and more deep slip.
-Two layered engines are available.
-
-### The package's own tables: `LayeredTDE`
+`LayeredTDE` computes a layered crust's Green's functions from tables the package
+builds itself.
 
 ```python
 from slipsolve import LayeredTDE, RemainderTables, VelocityModel
@@ -60,24 +58,10 @@ an opening source, which the [exact bimaterial solve](bimaterial.md) and the
   where the remainder is not smooth. Avoid putting mesh levels exactly on an
   interface; a triangle that crosses one is cut into pieces, one per layer.
 
-### EDGRN tables: `LayeredPointSource`
-
-```python
-from slipsolve import EdgrnTables, LayeredPointSource, run_edgrn
-
-tables = EdgrnTables.from_input_file("edgrn.inp")    # tables from your own EDGRN run
-tables = run_edgrn(crust, "edgrn_work")              # or run EDGRN (needs [layered])
-engine = LayeredPointSource(tables)
-```
-
-The approach of EDCMP and SlipSolve-Curve: each element is cut into point sources,
-each looked up in Rongjiang Wang's EDGRN tables (Wang, Lorenzo-Martin & Roth 2003)
-and summed. The quadrature order is chosen per element and observation from the
-observation's distance in units of the element's size, rather than fixed. Point
-sources are accurate a few element sizes from the fault and degrade close to it, and
-the tables give no field at depth and no opening source. `write_edgrn_input` writes
-the input file for a velocity model, and `EdgrnTables.homogeneous` synthesises the
-tables of a uniform medium for testing without Fortran.
+Why not tables of the whole field, summed as point sources (EDGRN's, as EDCMP and
+SlipSolve-Curve use them)? Point sources are accurate a few element sizes from the
+fault and degrade close to it, and such tables are blurred to their own grid spacing
+near the source; they also give no field at depth and no opening source.
 
 ## Topography
 

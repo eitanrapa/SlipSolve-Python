@@ -29,12 +29,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# pygrnwang bundles Rongjiang Wang's EDGRN/EDCMP Fortran and builds it with
-# gfortran, which is how slipsolve.edgrn.run_edgrn generates layered Green's
-# function tables from a velocity model. Optional because the reference
-# workflow has the user run EDGRN themselves and hand over the tables, and
-# because a Fortran toolchain is not something to require of every install.
-layered = ["pygrnwang"]
 # cutde is a TEST ORACLE ONLY -- an independent implementation of the same
 # Nikkhoo & Walter triangular dislocation that slipsolve._tde ports, used to
 # cross-check it. tests/test_slip_tde.py skips when it is absent.

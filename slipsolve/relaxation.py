@@ -36,14 +36,13 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
 from . import wavenumber as wn
-from .edgrn import EdgrnTables
-from .layered import _moment_components, _slip_directions, _tent, _triangle_quadrature
+from ._quadrature import _moment_components, _slip_directions, _tent, _triangle_quadrature
 from .patterns import Pattern
 from .temporal import TimeBasis
 
 __all__ = ["Rheology", "RelaxationTables", "shear_modulus", "relaxation_history", "relaxation_pattern"]
 
-#: The tables a shear dislocation needs, as `slipsolve.edgrn` names them: no explosion, and no tangential CLVD.
+#: The tables a shear dislocation needs, named as `slipsolve.wavenumber` names them: no explosion, and no tangential CLVD.
 COMPONENTS = {"ss": ("uz", "ur", "ut"), "ds": ("uz", "ur", "ut"), "cl": ("uz", "ur")}
 SECONDS_PER_DAY = 86400.0
 #: Terms of Talbot's method (Abate & Valkó's fixed contour); about 0.6 significant digits each, until rounding.
@@ -259,8 +258,8 @@ class RelaxationTables:
     `coseismic[kind][component]` is `(nr, nz)`: the elastic response less the source layer's half-space; the relaxation
     uses only the postseismic part.
     `postseismic[kind][component]` is `(nt, nr, nz)`: the response at each time less the coseismic, 0 at `times[0]`.
-    Kinds are `ss`, `ds`, `cl`. Components are `uz` (positive down), `ur` and `ut`, as `slipsolve.edgrn.EdgrnTables`
-    has them: per unit potency, the azimuthal factor stripped. `interfaces` are the depths no interpolation crosses.
+    Kinds are `ss`, `ds`, `cl`. Components are `uz` (positive down), `ur` and `ut`, as in `slipsolve.wavenumber`'s
+    tables: per unit potency, the azimuthal factor stripped. `interfaces` are the depths no interpolation crosses.
     """
 
     def __init__(self, r, z, times, coseismic, postseismic, interfaces=(), attrs=None):
@@ -273,14 +272,13 @@ class RelaxationTables:
         self.postseismic = postseismic
         self.interfaces = np.unique(np.asarray(interfaces, dtype=float))
         self.attrs = dict(attrs or {})
-        self._grid = EdgrnTables(self.r, self.z, self._edgrn_dict(lambda kind, comp: coseismic[kind][comp]),
-                                 interfaces=self.interfaces)
+        self._grid = _Grid(self.r, self.z, self.interfaces)
 
     @classmethod
     def compute(cls, model, rheology=(), *, r_max=300e3, nr=301, z_min=500.0, z_max=29500.0, nz=30, times=None,
                 window_days=365.25, nt=48, first_day=None, terms=TALBOT_TERMS, k_range=RELAXATION_K_RANGE,
                 n_k=RELAXATION_N_K, gravity=GRAVITY, workers=None):
-        """Our own tables for a `slipsolve.edgrn.VelocityModel` with a `Rheology` per depth range.
+        """Our own tables for a `slipsolve.crust.VelocityModel` with a `Rheology` per depth range.
 
         - Distances are uniform from 0 to `r_max` (`nr`) and source depths from `z_min` to `z_max` (`nz`), all in
           elastic layers and off every interface, receivers at the surface.
@@ -325,28 +323,10 @@ class RelaxationTables:
                  "k_range": list(k_range), "n_k": int(n_k), "gravity": float(gravity)}
         return cls(r, z, times, coseismic, postseismic, interfaces=tops[1:], attrs=attrs)
 
-    def _edgrn_dict(self, values):
-        out = {}
-        for kind, comps in COMPONENTS.items():
-            out[kind] = {comp: values(kind, comp) for comp in comps}
-            if "ut" not in out[kind]:
-                out[kind]["ut"] = np.zeros((self.r.size, self.z.size))
-        return out
-
     def rescaled(self, factor):
         """The tables of the same structure with every viscosity times `factor`: the times scale with it."""
         return type(self)(self.r, self.z, self.times * float(factor), self.coseismic, self.postseismic,
                            self.interfaces, dict(self.attrs, viscosity_factor=self.attrs.get("viscosity_factor", 1.0) * factor))
-
-    def at(self, day):
-        """The postseismic part at `day` as `slipsolve.edgrn.EdgrnTables`, linear between the stored times."""
-        k = int(np.clip(np.searchsorted(self.times, day), 1, self.times.size - 1))
-        t0, t1 = self.times[k - 1], self.times[k]
-        w = 0.0 if not np.isfinite(t1) else float(np.clip((day - t0) / (t1 - t0), 0.0, 1.0))
-        return EdgrnTables(self.r, self.z,
-                           self._edgrn_dict(lambda kind, comp: (1 - w) * self.postseismic[kind][comp][k - 1]
-                                            + w * self.postseismic[kind][comp][k]),
-                           interfaces=self.interfaces)
 
     def modes(self, tolerance=1e-4, max_modes=16, until=None):
         """`(times, functions, stacks)`: the postseismic tables as a few functions of time times a few tables.
@@ -427,8 +407,72 @@ class _Sources:
         self.moments = np.hstack(moments)
 
 
+class _Grid:
+    """The tables' `(r, z)` grid, and the interfaces no depth interpolation crosses.
+
+    A table value steps by about the rigidity ratio where the source crosses an interface, because the moment carries
+    the source layer's `mu`; a stencil across one would blend the two layers. A node on an interface belongs to
+    neither layer.
+    """
+
+    def __init__(self, r, z, interfaces=()):
+        self.r = np.asarray(r, dtype=float).ravel()
+        self.z = np.asarray(z, dtype=float).ravel()
+        self.interfaces = np.unique(np.asarray(interfaces, dtype=float).ravel())
+        self._layers = self._layer_stencils()
+
+    def _layer_stencils(self):
+        """The depth intervals that straddle an interface, and each layer's nodes; `None` without an interface inside."""
+        z = self.z
+        if z.size < 2:
+            return None
+        cuts = self.interfaces[(self.interfaces > z[0]) & (self.interfaces < z[-1])]
+        if cuts.size == 0:
+            return None
+        dz = (z[-1] - z[0]) / (z.size - 1)
+        on = (np.abs(z[:, None] - cuts[None, :]) <= 1e-6 * dz).any(axis=1)
+        layer = np.searchsorted(cuts, z, side="right")
+        straddles = on[:-1] | on[1:] | (layer[:-1] != layer[1:])
+        nodes = [np.nonzero((layer == k) & ~on)[0] for k in range(cuts.size + 1)]
+        return cuts, straddles, nodes
+
+    def _within_layers(self, fj, dz, j0, j1, tj):
+        """Replace the depth stencil of the queries that straddle an interface by their own layer's two nodes.
+
+        Between a layer's last node and the interface the stencil extrapolates linearly from the nearest two; a query
+        exactly at an interface depth belongs to the layer below.
+        """
+        cuts, straddles, nodes = self._layers
+        k = np.flatnonzero(straddles[j0])
+        if k.size == 0:
+            return j0, j1, tj
+        shape = np.shape(tj)
+        j0, j1, tj = (np.array(a, ndmin=1).reshape(-1) for a in (j0, j1, tj))
+        z = self.z
+        d = z[0] + np.ravel(fj)[k] * dz                  # the clamped query depth
+        layer = np.searchsorted(cuts, d, side="right")
+        for which in np.unique(layer):
+            usable = nodes[which]
+            if usable.size == 0:
+                continue
+            m = layer == which
+            if usable.size == 1:
+                j0[k[m]] = j1[k[m]] = usable[0]
+                tj[k[m]] = 0.0
+                continue
+            pos = np.clip(np.searchsorted(z[usable], d[m]), 1, usable.size - 1)
+            lo, hi = usable[pos - 1], usable[pos]
+            j0[k[m]], j1[k[m]] = lo, hi
+            tj[k[m]] = (d[m] - z[lo]) / (z[hi] - z[lo])
+        return j0.reshape(shape), j1.reshape(shape), tj.reshape(shape)
+
+
 def _stencil(grid, distance, depth):
-    """`EdgrnTables.interpolate`'s bilinear stencil, never across an interface: `(i0, i1, j0, j1, ti, tj)`."""
+    """The bilinear stencil in `(r, z)`, never across an interface: `(i0, i1, j0, j1, ti, tj)`.
+
+    Outside the tables it takes the edge cell. A query whose depth interval straddles an interface, or ends on one,
+    takes its two depth nodes from its own layer (`_Grid`).
+    """
     r, z = grid.r, grid.z
     nr, nz = r.size, z.size
     dr = (r[-1] - r[0]) / (nr - 1)
@@ -454,7 +498,7 @@ def _evaluate(sources, stacks, grid, x, y, budget=4e6):
     z_lo, z_hi = grid.z[0], grid.z[-1]
     depth_all = -sources.points[:, 2]
     spacing = grid.z[1] - grid.z[0]
-    # Within one spacing of the table's first or last depth a source takes that row, as EdgrnTables clamps.
+    # Within one spacing of the table's first or last depth a source takes that row, as the stencil clamps.
     if depth_all.min() < z_lo - spacing or depth_all.max() > z_hi + spacing:
         raise ValueError(f"the sources lie at {depth_all.min() / 1e3:.2f}-{depth_all.max() / 1e3:.2f} km, the tables "
                          f"at {z_lo / 1e3:.2f}-{z_hi / 1e3:.2f} km")

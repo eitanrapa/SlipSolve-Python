@@ -64,7 +64,7 @@ near a change of ratio along strike it is a poor approximation. Use it to explor
 fault, its continuation (`extend`, in units of the fault's depth extent), the
 across-strike boundaries at the breaks and the horizontal boundaries at the depth
 breaks. It needs each element's field at depth with opening as well as slip, which
-the half-space engine and `LayeredTDE` provide and EDGRN's tables do not. The
+the half-space engine and `LayeredTDE` provide. The
 interface solve is dense, \((3N)^2\) for \(N\) interface elements, and is done once
 per mesh; after that each Green's matrix costs one engine matrix over the interface.
 With `LayeredTDE` both cost several times the half-space's. Quote a dip, a ratio or

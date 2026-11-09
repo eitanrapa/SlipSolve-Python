@@ -12,17 +12,16 @@ keeps SlipSolve-Curve's copyright notice.
 
 The design follows SlipSolve-Curve: a fault built from a surface trace and a dip
 per deep segment, joined by a smooth fitted surface (a port of the `gridfit`
-gridder it uses); triangular dislocations (Nikkhoo & Walter 2015); layered Green's
-functions from EDGRN tables, superposed as EDCMP does; quadtree sampling; smoothing,
-zero-slip edges and bounds stacked into one bounded least-squares problem. Several
-of its conventions can be reproduced exactly:
+gridder it uses); triangular dislocations (Nikkhoo & Walter 2015); a layered crust
+(through EDGRN's tables there, superposed as EDCMP does; through the package's own
+tables here, see [Elastic models](guide/elastic-models.md)); quadtree sampling;
+smoothing, zero-slip edges and bounds stacked into one bounded least-squares
+problem. Several of its conventions can be reproduced exactly:
 
 - `LocalFrame(..., ellps="clrk66")` reproduces its `ll2xy.m` projection;
 - `FaultMesh.curved(segments=..., dips=...)` and `bias_w` correspond to its
   segment files, segment dips and `biasW`;
 - `Observations.concat(normalize="count")` reproduces its track weighting;
-- `LayeredPointSource(tables, tolerance=None, max_points=91)` reproduces its fixed
-  91-point quadrature (`slipsolve.layered.REFERENCE_QUADRATURE_POINTS`);
 - `SlipModel.to_text` writes its ten-column element table.
 
 ## What is new
@@ -31,7 +30,8 @@ of its conventions can be reproduced exactly:
 implementations (EDCMP, and SlipSolve-Curve itself) integrate each triangle at a
 fixed order, 91 points in every case. The order a point source needs depends on
 how far the observation is from the element in units of the element's own size,
-so here it is chosen per triangle and observation from an error model. Layered
+so here (in `LayeredTDE`'s point sources away from the fault) it is chosen per
+triangle and observation from an error model. Layered
 assembly then costs about as much as the closed-form half-space, so there is no
 computational reason to accept a uniform crust, which biases the split between
 shallow and deep slip. The layered Green's functions are also evaluated at the

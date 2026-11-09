@@ -262,30 +262,6 @@ def test_slip_edges_refuses_an_element_basis(solved):
         slip_plot.plot_slip_edges(model)
 
 
-def test_quadrature_order_refuses_an_engine_without_one(solved):
-    """The half-space engine is a closed form -- it cuts nothing into points."""
-    from slipsolve import HalfSpaceTDE
-
-    trace, mesh, obs, _, _ = solved
-    with pytest.raises(TypeError, match="needs a LayeredPointSource"):
-        slip_plot.plot_quadrature_order(HalfSpaceTDE(), mesh, obs)
-
-
-def test_quadrature_order_refuses_layered_tde(solved):
-    """`LayeredTDE` has an `_orders` method too, but it takes a triangle, not a centroid.
-
-    Letting it through would give wrong orders or fail inside the loop; it has to be
-    refused up front, by type.
-    """
-    from slipsolve import LayeredTDE
-
-    trace, mesh, obs, _, _ = solved
-    engine = LayeredTDE.__new__(LayeredTDE)          # no tables needed: refused before use
-    assert hasattr(engine, "_orders")
-    with pytest.raises(TypeError, match="needs a LayeredPointSource"):
-        slip_plot.plot_quadrature_order(engine, mesh, obs)
-
-
 # -- the ramp, shown separately from the model it is bundled into -------------
 
 @pytest.fixture(scope="module")

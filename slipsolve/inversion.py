@@ -11,19 +11,17 @@ weights, `L` the smoothing operator normalised by its own row count (so
 `lam` means the same thing as the mesh is refined), and `W_boundary` the
 zero-slip edge rows.
 
-It is *not* assembled as one dense array. `G` is dense and `L`/`W` are
-sparse, so the stack is wrapped in a `scipy.sparse.linalg.LinearOperator`
-that applies each in its natural form: the smoothing block then costs a sparse
-matrix-vector product rather than a dense one, and a dense copy of the whole
-stack never exists. `scipy.optimize.lsq_linear` accepts a `LinearOperator` with
-`lsq_solver="lsmr"`, which is the combination used here by default.
-
-`solve(method="active_set")` solves the same bounded problem in its normal
-equations instead, exactly, by primal-dual active set (`box_qp`); see
-`METHODS` for when that is faster and when it is refused. A refused answer
-falls back to `"lsq_linear_dense"` (the stacked system as a dense matrix, solved to
-within a micron of the minimiser) on problems up to `EXACT_FALLBACK_MAX_PARAMS`
-parameters, and to `"lsq_linear"` above.
+`solve` minimises it in its normal equations, exactly, by primal-dual active set
+(`box_qp`). `G'G` and `G'd` do not depend on the regularization, so they are
+formed once and a sweep over smoothing weights pays one small factorization per
+weight. Normal equations square the condition number, so an answer that cannot
+be trusted is refused (see `METHODS`), and the stacked system is solved instead:
+as a dense matrix, to within a micron of the minimiser (`"lsq_linear_dense"`), on
+problems up to `EXACT_FALLBACK_MAX_PARAMS` parameters, and above that by
+`scipy.optimize.lsq_linear` with `lsq_solver="lsmr"` on a
+`scipy.sparse.linalg.LinearOperator` (`"lsq_linear"`). That operator applies
+each block in its natural form -- `G` dense, `L` and `W` sparse -- so a dense
+copy of the whole stack never exists.
 
 Solver honesty matters more than usual in this problem. Runtime depends far more
 on conditioning than on size, and an iteration-capped solve returns a
@@ -114,9 +112,10 @@ class _MissingEngine:
     def _refuse(self, *_, **__):
         raise RuntimeError(
             f"This model was solved with the {self.name!r} engine, whose Green's "
-            "functions come from EDGRN tables that are not stored in a saved "
-            "model. Rebuild the engine (LayeredPointSource with the same tables) "
-            "and construct a fresh SlipInversion to forward-model with it."
+            "functions come from tables that are not stored in a saved model. "
+            "Rebuild the engine (for a layered crust, LayeredTDE on the same "
+            "RemainderTables) and construct a fresh SlipInversion to forward-model "
+            "with it."
         )
 
     forward = displacement = los_matrix = _refuse
@@ -478,8 +477,8 @@ DEFAULT_MAX_ITER = 400
 #:
 #: The win is not uniform in the smoothing weight: the adaptive tolerance loses
 #: at both ends of a sweep and wins by about 2x in the middle, a modest net gain
-#: over the whole `SlipInversion.l_curve` sweep, which is why it stays the
-#: default. Judge it over a sweep, never at one weight. Outer iteration count is
+#: over a whole sweep under `method="lsq_linear"`, which is why it is that
+#: solver's default. Judge it over a sweep, never at one weight. Outer iteration count is
 #: the wrong meter: `"auto"` solves each sub-problem loosely, so it routinely
 #: takes *more* outer steps while doing less total work.
 #:
@@ -492,14 +491,15 @@ DEFAULT_LSMR_TOL = "auto"
 #: The solvers `SlipInversion.solve` offers. All minimise the same
 #: objective under the same bounds.
 #:
-#: * `"lsq_linear"`: scipy's trust-region solve of the stacked system, through
-#:   `lsmr` on the operator. The default.
 #: * `"active_set"`: the normal equations `(A'A + S'S + B'B) m = A'b`,
-#:   solved exactly by `box_qp`. `A'A` and `A'b` do not depend on the
-#:   regularization, so they are formed once per inversion and kept; a sweep
+#:   solved exactly by `box_qp`. The default. `A'A` and `A'b` do not depend on
+#:   the regularization, so they are formed once per inversion and kept; a sweep
 #:   over smoothing weights then pays one small factorization per weight
 #:   instead of a trust-region solve over every observation row.
 #:   `slipsolve.sweep.DipSweep` uses the same solve.
+#: * `"lsq_linear"`: scipy's trust-region solve of the stacked system, through
+#:   `lsmr` on the operator. The fallback on large problems; it can stop short of
+#:   the minimiser, by more as the smoothing weakens.
 #: * `"lsq_linear_dense"`: the stacked system as a dense matrix, `lsq_linear`
 #:   with exact inner solves (`lsq_solver="exact"`) to `EXACT_FALLBACK_TOL`,
 #:   which ends within a micron of the minimiser (a trust region nears a bound
@@ -514,7 +514,7 @@ DEFAULT_LSMR_TOL = "auto"
 #: cycles or runs out. The fallback is `"lsq_linear_dense"` on
 #: problems up to `EXACT_FALLBACK_MAX_PARAMS` parameters and
 #: `"lsq_linear"` above.
-METHODS = ("lsq_linear", "active_set", "lsq_linear_dense")
+METHODS = ("active_set", "lsq_linear_dense", "lsq_linear")
 
 #: Largest 1-norm condition number an active-set solve's free block may have.
 #: The answer's relative error is bounded by about this times machine epsilon.
@@ -598,7 +598,7 @@ class SlipInversion:
         for is **moment**: `sum(mu * area * slip)` needs a rigidity, and without
         one every reported `Mw` silently assumes
         `DEFAULT_SHEAR_MODULUS` = 30 GPa. Pass the same
-        `slipsolve.edgrn.VelocityModel` you built the tables from
+        `slipsolve.crust.VelocityModel` you built the tables from
         and every statistic -- `moment`, `moment_magnitude`, `to_text`,
         `repr` -- uses the rigidity of the layered crust instead.
 
@@ -863,14 +863,14 @@ class SlipInversion:
               polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0),
               max_iter=DEFAULT_MAX_ITER, tol=1e-10,
               lsmr_tol=DEFAULT_LSMR_TOL, smooth_weighting="uniform", verbose=0,
-              method="lsq_linear"):
+              method="active_set"):
         """Solve for slip at one smoothing weight; returns a `SlipModel`.
 
-        `method` is `"lsq_linear"` (the default), `"active_set"` or
-        `"lsq_linear_dense"`; see `METHODS`. All solve the same bounded
-        problem. `max_iter` caps the trust-region iterations of the first and the
-        active-set steps of the second; the dense solve takes at least
-        `50 x parameters`. `tol` and `lsmr_tol` are `lsq_linear`'s alone. The
+        `method` is `"active_set"` (the default) or one of its fallbacks,
+        `"lsq_linear_dense"` and `"lsq_linear"`; see `METHODS`. All solve the
+        same bounded problem. `max_iter` caps the active-set steps and the
+        trust-region iterations of `"lsq_linear"`; the dense solve takes at least
+        `50 x parameters`. `tol` and `lsmr_tol` are `"lsq_linear"`'s alone. The
         model's `options["method"]` records the solver that produced it: when an
         active-set answer was refused, `"lsq_linear_dense"` up to
         `EXACT_FALLBACK_MAX_PARAMS` parameters and `"lsq_linear"` above.
@@ -1071,9 +1071,9 @@ class SlipInversion:
         is better conditioned and converges in fewer iterations, and the sweep's
         total cost is dominated by its roughest end.
 
-        `method="active_set"` (see `METHODS`) forms the data half of the
-        normal equations once for the whole sweep, and each weight starts from
-        the previous weight's active set.
+        The default solver, `method="active_set"` (see `METHODS`), forms the
+        data half of the normal equations once for the whole sweep, and each
+        weight starts from the previous weight's active set.
 
         The sweep is serial on purpose; a worker pool gains almost nothing, for
         two reasons:
@@ -1082,13 +1082,13 @@ class SlipInversion:
           most expensive is usually one that runs to `DEFAULT_MAX_ITER` -- whose
           result is meaningless (`converged` is False) and should be dropped,
           not parallelised.
-        * **Threads cannot overlap the solver.** scipy's `lsmr` is pure Python,
-          so its iteration loop holds the GIL between matrix-vector products,
-          and the dense products already use multi-threaded BLAS.
+        * **Threads cannot overlap the solver.** The dense products already use
+          multi-threaded BLAS, and under `method="lsq_linear"` scipy's `lsmr` is
+          pure Python, so its iteration loop holds the GIL between products.
 
-        What makes a sweep faster is `DEFAULT_LSMR_TOL` and dropping the weights
-        that never converge. Green's assembly is serial too; see
-        `slipsolve.greens`.
+        What makes a sweep faster is the active set's warm start (under
+        `"lsq_linear"`, `DEFAULT_LSMR_TOL`) and dropping the weights that never
+        converge. Green's assembly is serial too; see `slipsolve.greens`.
         """
         import xarray as xr
 
@@ -1333,7 +1333,7 @@ class SlipModel:
         """Scalar seismic moment, `integral(mu * |slip|) dA`, in newton-metres.
 
         `shear_modulus` may be a scalar, one value per parameter, or a
-        `slipsolve.edgrn.VelocityModel`; `None` takes the inversion's own
+        `slipsolve.crust.VelocityModel`; `None` takes the inversion's own
         velocity model, else 30 GPa. That is the point of a layered inversion
         reaching this far: a uniform 30 GPa overstates the rigidity of the shallow
         crust, so it overstates the moment of shallow slip.
@@ -1342,7 +1342,7 @@ class SlipModel:
 
         * `"integrated"` (default) -- over the slip field the model holds. A
           velocity model's rigidity is averaged **exactly** over each piece
-          (`slipsolve.edgrn.VelocityModel.triangle_mean`, steps included);
+          (`slipsolve.crust.VelocityModel.triangle_mean`, steps included);
           the slip magnitude, which a tent field makes nonlinear inside an element,
           is taken at the centroids of `order**2` sub-triangles per element. For
           element-constant slip that is exact and `order` is ignored. One value per
@@ -1393,7 +1393,7 @@ class SlipModel:
                 mu = mu * factor
             return float(np.sum(mu * areas * np.hypot(*self.element_slip.T)))
 
-        from .layered import _sub_triangles
+        from ._quadrature import _sub_triangles
 
         pieces = _sub_triangles(order)
         centroid = pieces.mean(axis=1)
@@ -1434,7 +1434,7 @@ class SlipModel:
             return DEFAULT_SHEAR_MODULUS
         if hasattr(model, "at"):
             return model
-        from .edgrn import VelocityModel
+        from .crust import VelocityModel
 
         return VelocityModel.from_dict(model)
 
@@ -1733,7 +1733,7 @@ class SlipModel:
             if model is None:
                 shear_modulus = DEFAULT_SHEAR_MODULUS
             else:
-                from .edgrn import VelocityModel
+                from .crust import VelocityModel
 
                 shear_modulus = (model if hasattr(model, "at")
                                  else VelocityModel.from_dict(model))
@@ -2011,7 +2011,7 @@ class SlipModel:
         # A stand-in for the inversion: `forward` needs only the engine, and the
         # Green's matrix is deliberately absent (see `save`).
         #
-        # A layered engine is *not* reconstructed: its EDGRN tables are megabytes
+        # A layered engine is *not* reconstructed: its tables are megabytes
         # and are not saved, so `forward` on a loaded layered model would silently
         # use the homogeneous half-space instead of saying so. Refuse, and name
         # what to do about it.

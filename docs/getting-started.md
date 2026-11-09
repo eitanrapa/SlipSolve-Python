@@ -162,8 +162,7 @@ for name, scene in scenes.items():
 obs = Observations.concat(parts)
 
 inversion = SlipInversion(mesh, obs, ramp="quadratic", basis="node")
-curve = blocked_cv_curve(inversion, np.geomspace(0.03, 30, 9), polarity=(-1, 0, 0),
-                         method="active_set")
+curve = blocked_cv_curve(inversion, np.geomspace(0.03, 30, 9), polarity=(-1, 0, 0))
 model = inversion.solve(smoothing=curve.attrs["best_smoothing"], polarity=(-1, 0, 0))
 ```
 

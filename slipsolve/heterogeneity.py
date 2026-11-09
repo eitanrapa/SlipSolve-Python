@@ -60,7 +60,7 @@ import numpy as np
 from ._okada92 import point_source_enu
 from ._tde import STRAIN_COMPONENTS, _element_basis, tde_disp_hs_unit, tde_strain_hs_unit
 from .greens import _as_points
-from .layered import _QUADRATURE_CONSTANT, _QUADRATURE_SAFETY
+from ._quadrature import _QUADRATURE_CONSTANT, _QUADRATURE_SAFETY
 from .layered_tde import (STRAIN_TENT_GAIN, STRAIN_TENT_MIN_POINTS, _combine,
                           _gauss01, combine_strain, tensor_packing, tent_levelset)
 

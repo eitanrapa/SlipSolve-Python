@@ -6,7 +6,7 @@ import pytest
 from slipsolve import FaultMesh, FaultTrace
 from slipsolve import wavenumber as wn
 from slipsolve.crust1 import Crust1
-from slipsolve.edgrn import VelocityModel
+from slipsolve.crust import VelocityModel
 from slipsolve.heterogeneity import VoxelModel
 
 TWO_LAYERS = VelocityModel([0.0, 2000.0, 2000.0, 60e3],

@@ -127,7 +127,7 @@ def test_a_point_on_the_triangle_has_no_strain():
 from scipy.special import gamma  # noqa: E402
 
 from slipsolve import wavenumber as wn  # noqa: E402
-from slipsolve.edgrn import VelocityModel  # noqa: E402
+from slipsolve.crust import VelocityModel  # noqa: E402
 
 #: The test crusts of ``test_slip_wavenumber.py``: a soft 2 km layer (Poisson 0.315) over a
 #: half-space (0.255), and a uniform one.
@@ -232,7 +232,7 @@ def test_the_radial_columns_are_the_derivatives_of_the_columns(remainder):
 
 
 # -- the strain of a point moment source (slipsolve.layered_tde.combine_strain) ----------
-from slipsolve.edgrn import _point_dislocation  # noqa: E402
+from slip_synthetic import point_dislocation  # noqa: E402
 from slipsolve.layered_tde import combine_strain, moment_packing, tensor_packing  # noqa: E402
 
 #: (normal, slip direction) in east/north/up; ``None`` slip is an opening.
@@ -255,7 +255,7 @@ def _unit_pair(name):
 def _cutde_point_strain(n, d, z_s, x, y, z, size=1.0):
     """The strain per unit potency of a 1 m triangle, by ``cutde``'s closed form, ``(npts, 6)``."""
     hs = pytest.importorskip("cutde.halfspace")
-    p1, p2, p3, comp = _point_dislocation(n, d, z_s, size)
+    p1, p2, p3, comp = point_dislocation(n, d, z_s, size)
     tri = np.array([p1, p2, p3])
     matrix = hs.strain_matrix(np.column_stack([x, y, z]), tri[None], float(ONE_LAYER.poisson()))
     return np.einsum("pcs,s->pc", matrix[:, :, 0, :], np.array(comp)) / (0.5 * size ** 2)
@@ -389,7 +389,7 @@ def test_strain_tables_survive_a_round_trip(strain_tables, tmp_path):
 
 # -- the strain of fault elements and tents at depth (LayeredTDE.strain): the operator E ----
 from slipsolve._tde import _element_basis  # noqa: E402
-from slipsolve.layered import _triangle_quadrature  # noqa: E402
+from slipsolve._quadrature import _triangle_quadrature  # noqa: E402
 from slipsolve.layered_tde import LayeredTDE, split_by_layers  # noqa: E402
 
 #: ``test_slip_layered_tde.py``'s triangles: one crossing the 2 km interface, one below it.

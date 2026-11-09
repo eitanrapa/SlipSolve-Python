@@ -332,8 +332,8 @@ def test_lsmr_tol_auto_is_the_default_and_cuts_work(recovery, monkeypatch):
     Summed over two weights, because the win is not uniform in the weight. On
     this fixture `None` needs about twice the products of `"auto"` at lam 0.3 to
     1.0, but fewer at lam 2.0 and 0.05 -- the adaptive tolerance loses at both
-    ends. Over a whole sweep it still comes out ahead, which is how `l_curve`
-    uses it.
+    ends. Over a whole sweep it still comes out ahead. It is `"lsq_linear"`'s alone,
+    so that solver is asked for by name: the default is the active set.
     """
     _, _, _, inversion = recovery
     weights = (1.0, 0.3)
@@ -342,7 +342,7 @@ def test_lsmr_tol_auto_is_the_default_and_cuts_work(recovery, monkeypatch):
     work, models = {}, {}
     for tol in ("auto", None):
         n[0] = 0
-        models[tol] = [inversion.solve(smoothing=lam, polarity=(-1, 0, 0),
+        models[tol] = [inversion.solve(smoothing=lam, polarity=(-1, 0, 0), method="lsq_linear",
                                        lsmr_tol=tol) for lam in weights]
         work[tol] = n[0]
 
@@ -492,7 +492,7 @@ def test_a_refused_active_set_answer_falls_back_to_lsq_linear(recovery, monkeypa
     import slipsolve.inversion as module
 
     _, _, _, inversion = recovery
-    ref = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    ref = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="lsq_linear")
     exact = _bvls(inversion, 0.3)
 
     def cycles(*_, **__):

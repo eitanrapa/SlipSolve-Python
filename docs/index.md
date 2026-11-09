@@ -42,8 +42,8 @@ LOS grids, offsets, GNSS ──> Observations ┘
   fully unstructured meshes; several faults in one inversion.
 - **Elastic models.** Triangular dislocations in a homogeneous half-space (Nikkhoo
   & Walter 2015); a layered crust through the package's own wavenumber-domain tables
-  (`RemainderTables`, `LayeredTDE`), exact near the fault and at depth; EDGRN/EDCMP
-  tables (`LayeredPointSource`); fully 3-D heterogeneity on voxels
+  (`RemainderTables`, `LayeredTDE`), exact near the fault and at depth; fully 3-D
+  heterogeneity on voxels
   (`HeterogeneousEngine`); a rigidity contrast across the fault (`Bimaterial`).
 - **Data.** Quadtree sampling of gridded LOS products, optionally driven by a
   model's predicted field (Wang & Fialko 2015) or by model resolution; one offset

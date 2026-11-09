@@ -22,8 +22,8 @@ pytest tests/test_slip_greens.py -q
 Every test is synthetic: the data are forward-modelled from planted slip, so no
 data files, downloads or environment variables are needed. A few tests cross-check
 the triangular dislocation against `cutde`, an independent implementation, and are
-skipped when it is not installed. No test runs EDGRN: the layered tests synthesise
-their tables, for a uniform medium or by the package's own wavenumber integration.
+skipped when it is not installed. The layered tests build their tables by the
+package's own wavenumber integration, on small crusts.
 
 Some tests deserve a note when changing the code:
 

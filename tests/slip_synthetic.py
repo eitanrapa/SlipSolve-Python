@@ -314,3 +314,60 @@ class Workspace:
         ds.attrs["params_hash"] = json.dumps(params, sort_keys=True, default=str)
         ds.to_zarr(target, mode="w", consolidated=False)
         return xr.open_zarr(target, consolidated=False).load()
+
+
+# -- point sources for the layered-table tests (`test_slip_wavenumber`, `test_slip_strain`) ----------------------------
+# Dislocation geometry for each canonical point source, in ENU. `normal` is the fault plane's unit normal and `slip`
+# the unit slip direction of the hanging wall:
+#   ss  m12 = m21: plane normal north, slip east   (a vertical east-striking fault)
+#   ds  m13 = m31: plane normal north, slip down
+#   tx/ty/tz     : unit tensile sources, combined into the CLVD
+SOURCE_GEOMETRY = (
+    ("ss", (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)),
+    ("ds", (0.0, 1.0, 0.0), (0.0, 0.0, -1.0)),
+    ("tx", (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)),      # normal north -> x(x)x in NED
+    ("ty", (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)),      # normal east  -> y(x)y in NED
+    ("tz", (0.0, 0.0, 1.0), (0.0, 0.0, 1.0)),      # normal up    -> z(x)z in NED
+)
+
+
+def point_dislocation(normal, slip, depth, size):
+    """A tiny triangle with the requested normal, and its `(ss, ds, ts)`.
+
+    Solving for the slip components rather than naming them avoids the sign trap in the triangular-dislocation basis:
+    `Vstrike = cross(eZ, Vnorm)` can come out anti-parallel to the direction meant, and the moment tensor is then the
+    negative of the one intended. Projecting the desired slip vector onto the element's own orthonormal basis is right
+    whatever that basis turns out to be.
+    """
+    from slipsolve._tde import _element_basis
+
+    n = np.asarray(normal, dtype=float)
+    n = n / np.linalg.norm(n)
+    # Any orthonormal pair (u, v) with u x v = n makes cross(P2-P1, P3-P1) = n.
+    helper = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(helper, n)
+    u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+
+    centre = np.array([0.0, 0.0, -abs(depth)])
+    p1 = centre - size * (u + v) / 3.0
+    p2 = p1 + size * u
+    p3 = p1 + size * v
+
+    vnorm, vstrike, vdip = _element_basis(p1, p2, p3)
+    d = np.asarray(slip, dtype=float)
+    d = d / np.linalg.norm(d)
+    return p1, p2, p3, (float(d @ vstrike), float(d @ vdip), float(d @ vnorm))
+
+
+def project_azimuth(values, phi, kind, component):
+    """Strip a table's azimuthal factor: order 2 for `ss`, 1 for `ds`, 0 for `cl`; `values` is `(nr, nphi)`.
+
+    `ut` carries the quadrature partner of the `uz`/`ur` factor, as the tables' recombination puts them back.
+    """
+    if kind == "cl":
+        return np.zeros(values.shape[0]) if component == "ut" else values.mean(axis=1)
+    order = 2 if kind == "ss" else 1
+    basis = (np.cos(order * phi) if (kind == "ss") == (component == "ut")
+             else np.sin(order * phi))
+    return 2.0 * (values * basis).mean(axis=1)

@@ -23,10 +23,10 @@ is, and can be degrees wrong when it is not. The bootstrap reports how far the
 weighted and unweighted estimates disagree; a large disagreement is the sign of
 that failure.
 
-**Why it is affordable.** Both engines build a node's Green's function as a sum
+**Why it is affordable.** Every engine builds a node's Green's function as a sum
 over the elements around it, each element computed from its own vertices alone
-(`slipsolve.layered.LayeredPointSource._columns`; the half-space engine
-projects per-element columns onto the tents). With a node column on every segment
+(`slipsolve.layered_tde.LayeredTDE.tent_field` integrates each tent; the half-space
+engine projects per-element columns onto the tents). With a node column on every segment
 boundary no element straddles one, so the design matrix of any combination is a
 sum of per-segment blocks, each depending on one segment's geometry:
 

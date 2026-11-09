@@ -8,7 +8,7 @@ pages are organised by module.
 |---|---|
 | [Geometry](geometry.md) | `slipsolve.trace`, `slipsolve.frame`, `slipsolve.mesh`, `slipsolve.surface`, `slipsolve.layout`, `slipsolve.basis` |
 | [Observations](observations.md) | `slipsolve.sampling`, `LosGrid` and `read_grd`, `slipsolve.resample`, `slipsolve.diagnostics`, `slipsolve.covariance` |
-| [Elastic models](elastic-models.md) | `slipsolve.greens`, `slipsolve.edgrn`, `slipsolve.layered`, `slipsolve.wavenumber`, `slipsolve.layered_tde` |
+| [Elastic models](elastic-models.md) | `slipsolve.greens`, `slipsolve.crust`, `slipsolve.wavenumber`, `slipsolve.layered_tde` |
 | [Contrasts and 3-D structure](structure.md) | `slipsolve.bimaterial`, `slipsolve.heterogeneity`, `slipsolve.fault_cells`, `slipsolve.voxel_solve`, `slipsolve.crust1` |
 | [Inversion](inversion.md) | `slipsolve.inversion`, `slipsolve.regularize`, `slipsolve.predict` |
 | [Resolution and calibration](resolution.md) | `slipsolve.resolution`, `slipsolve.calibrate` |

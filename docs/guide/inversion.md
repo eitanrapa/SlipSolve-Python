@@ -124,19 +124,20 @@ prediction.
 
 `solve(method=...)` offers three solvers of the same bounded problem:
 
-- `"lsq_linear"` (default): scipy's trust-region solver on the stacked system,
-  applied as an operator, so the sparse smoothing rows are never densified.
-- `"active_set"`: the normal equations solved exactly by a primal-dual active-set
-  method (`box_qp`). The data block of the normal equations is formed once per
-  inversion and each solve starts from the last, so a sweep over weights is much
-  faster. It reaches the minimum where `lsq_linear` can stop slightly short of it.
-  Because the normal equations square the condition number, an answer that is badly
-  conditioned or fails its optimality check is refused with a warning and the
-  problem is re-solved by `lsq_linear` (by `"lsq_linear_dense"` for up to 1000
-  parameters). `model.options["method"]` records what ran.
+- `"active_set"` (default): the normal equations solved exactly by a primal-dual
+  active-set method (`box_qp`). The data block of the normal equations is formed
+  once per inversion and each solve starts from the last, so a sweep over weights
+  is fast, and it reaches the minimum. Because the normal equations square the
+  condition number, an answer that is badly conditioned or fails its optimality
+  check is refused with a warning and the problem is re-solved by one of the other
+  two: `"lsq_linear_dense"` for up to 1000 parameters, `"lsq_linear"` above.
+  `model.options["method"]` records what ran.
 - `"lsq_linear_dense"`: the stacked system as a dense matrix with exact inner
   solves. Accurate, but its cost grows with rows times parameters squared, so it is
   for small problems.
+- `"lsq_linear"`: scipy's trust-region solver on the stacked system, applied as an
+  operator, so the sparse smoothing rows are never densified. It can stop short of
+  the minimum, by more as the smoothing weakens.
 
 Check `model.converged`. A solve stopped by the iteration cap returns a plausible
 model whose statistics mean nothing, and the text exports refuse it; raise

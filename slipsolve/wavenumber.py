@@ -1,8 +1,9 @@
 """Static Green's functions of a layered half-space, by wavenumber integration.
 
-`slipsolve.edgrn` reads what Rongjiang Wang's EDGRN computes. This module
-computes the same kind of table itself, because the exact bimaterial solve
-(`slipsolve.bimaterial`) needs three things EDGRN does not give:
+This module computes the tables of a layered half-space's point sources itself,
+rather than reading those of Rongjiang Wang's EDGRN, because the layered engine
+(`slipsolve.layered_tde`) and the exact bimaterial solve (`slipsolve.bimaterial`)
+need three things EDGRN's tables do not give:
 
 * **Receivers at depth.** An EDGRN run tabulates one receiver depth, and ours are at
   the surface. The interface solve needs the field on the fault itself, at every
@@ -48,20 +49,20 @@ matrix stays well conditioned at any `k h` -- the global-matrix method of Schmid
 and Tango (1986). A point source is a jump in `(U, V, R, S)` and `(W, T)` at its
 depth, derived from the equivalent body force `-M grad delta`.
 
-Checked three ways (`tests/test_slip_wavenumber.py`):
+Checked three ways, the first two in `tests/test_slip_wavenumber.py`:
 
 * **Homogeneous half-space against the analytic point source** (tiny triangular
-  dislocations through `slipsolve._tde.tde_disp_hs`, the way
-  `slipsolve.edgrn.EdgrnTables.homogeneous` builds its tables): all four
+  dislocations through `slipsolve._tde.tde_disp_hs`): all four
   sources, all three components, receivers at the surface and at depth, within
   1.7e-5 of each component's peak over 100 m - 200 km.
 * **Reciprocity of point forces across a layered crust**:
   `G_zz`, `G_xx`, `G_yy` and `G_xz = G_zx` between depths in different layers
   agree to 1e-14 - 1e-17. A wrong layer matrix or interface condition breaks it.
-* **Against fine EDGRN tables** at the surface: 1e-6 - 1e-3 of each component's
-  peak beyond 10 km. Inside 10 km the differences are EDGRN's: its small components
-  have sign-flipping artefacts between its nodes near the epicentre, where the field
-  cannot vary on that scale.
+* **Against EDGRN's tables** on a five-layer crust: within 1.7e-4 of each source's
+  peak displacement, once EDGRN's own two approximations are applied to these -- it
+  blurs every table with a Gaussian about its grid spacing wide, and interpolates its
+  Bessel functions linearly from zero argument, which near a deep source's epicentre
+  is off by up to a quarter of the peak.
 """
 
 from pathlib import Path
@@ -106,7 +107,7 @@ _TWO_PI = 2.0 * np.pi
 
 # -- the layer stack ---------------------------------------------------------------
 def layer_stack(model):
-    """`(tops, lam, mu)` of a piecewise-constant `slipsolve.edgrn.VelocityModel`.
+    """`(tops, lam, mu)` of a piecewise-constant `slipsolve.crust.VelocityModel`.
 
     The last layer is the half-space. Rows at one depth are a step; two rows at
     different depths with the same properties are one layer, and consecutive
@@ -782,7 +783,7 @@ class RemainderTables:
     @classmethod
     def compute(cls, model, z=None, r=None, k_range=K_RANGE, n_k=N_WAVENUMBERS,
                 z_max=200e3, surface_z=None, surface_r=None, workers=None, strain=False):
-        """Tabulate the remainder for `model` (a `slipsolve.edgrn.VelocityModel`).
+        """Tabulate the remainder for `model` (a `slipsolve.crust.VelocityModel`).
 
         `z` defaults to `depth_grid` to `z_max` and `r` to
         `distance_grid`; the surface tables to `surface_depth_grid` and

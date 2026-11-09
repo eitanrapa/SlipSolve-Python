@@ -911,29 +911,6 @@ def test_the_gcv_curve_reports_jri_and_its_own_minimum(setup):
         float(curve["effective_rank"].values[best]))
 
 
-def test_condition_number_falls_when_the_problem_is_regularized(setup):
-    """Regularisation exists to bound the smallest singular value."""
-    _, _, _, inversion = setup
-    raw = R.condition_number(inversion)
-    damped = R.condition_number(inversion, 1.0)
-    assert raw["condition_number"] > damped["condition_number"]
-    assert raw["regularized"] is False and damped["regularized"] is True
-    # The stacked operator has the smoothing and boundary rows on top.
-    assert damped["n_rows"] > raw["n_rows"]
-    assert damped["n_columns"] == raw["n_columns"]
-
-
-def test_condition_number_matches_a_direct_svd(setup):
-    """No shortcut: it is sigma_1 / sigma_n of the design the solver sees."""
-    _, _, _, inversion = setup
-    got = R.condition_number(inversion)
-    values = np.linalg.svd(R.weighted_design(inversion), compute_uv=False)
-    assert got["sigma_max"] == pytest.approx(float(values[0]), rel=1e-12)
-    assert got["sigma_min"] == pytest.approx(float(values[-1]), rel=1e-12)
-    assert got["condition_number"] == pytest.approx(
-        float(values[0] / values[-1]), rel=1e-12)
-
-
 # -- blocked cross-validation ----------------------------------------------
 def test_blocked_folds_partition_the_data_into_equal_width_blocks(setup):
     """Every observation in exactly one fold, and the cuts are equal *width*.

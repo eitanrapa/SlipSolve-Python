@@ -28,7 +28,7 @@ flat or vertical, or the reference homogeneous: with a layered reference the sam
 holds layer by layer, since both blocks scale it by a constant. `Bimaterial`
 with `exact=True` solves it with the half-space engine, or with
 `slipsolve.layered_tde.LayeredTDE` for a layered crust. Both give the
-field at depth with opening as well as slip; EDGRN's tables give neither.
+field at depth with opening as well as slip.
 
 **The scaled mode is its first term.** Dropping `Fbar` leaves:
 
@@ -369,8 +369,7 @@ class Bimaterial:
                                or hasattr(self.engine, "element_field")):
             raise NotImplementedError(
                 "exact=True needs each element's field at depth, with opening as well as "
-                "slip: the half-space engine, or LayeredTDE for a layered crust. "
-                "EDGRN's tables (LayeredPointSource) have neither.")
+                "slip: the half-space engine, or LayeredTDE for a layered crust.")
         self.extend = {**EXTEND, **(extend or {})}
         self.growth = float(growth)
         self.first = float(first)

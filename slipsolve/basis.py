@@ -36,7 +36,7 @@ import scipy.sparse as sp
 #: shared by six sub-triangles, an edge node by three, a corner by one), so equal
 #: weights make that rule first order. We take the centroids of `13**2 = 169`
 #: sub-triangles instead: the same order of work, and second order, since centroids
-#: are never shared. See `slipsolve.layered._triangle_quadrature`.
+#: are never shared. See `slipsolve._quadrature._triangle_quadrature`.
 DEFAULT_SUBDIVISION = 13
 
 
@@ -139,7 +139,7 @@ class NodeBasis:
         it is the definition the projection approximates, and the check that the
         weights sum to the node's lumped area is what pins that.
         """
-        from .layered import _triangle_quadrature
+        from ._quadrature import _triangle_quadrature
 
         if len(self._incident[index]) == 0:
             raise ValueError(

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from slipsolve import wavenumber as wn
-from slipsolve.edgrn import VelocityModel
+from slipsolve.crust import VelocityModel
 from slipsolve.heterogeneity import HeterogeneousEngine, VoxelModel, strain_operator
 from slipsolve.layered_tde import LayeredTDE
 from slipsolve.voxel_solve import ConvolutionGamma, StrainSystem, gmres

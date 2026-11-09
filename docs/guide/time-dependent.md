@@ -517,7 +517,7 @@ obs, model, history = iterate_sampling(
   elastic signal. The plain `SlipInversion` keeps geographic looks, as every coseismic model has.
 - The zero-slip rows are scaled by the median row weight (`pinned_edges`), so an edge is pinned
   in m/yr as it is in metres. A plain `SlipInversion` sets `boundary_ratio` by hand.
-- `solve` defaults to `method="active_set"`. Limits whose two ends coincide fix a parameter. An
+- `solve` uses `method="active_set"`, as every inversion does by default. Limits whose two ends coincide fix a parameter. An
   active set that cycles, as it can at weak smoothing with most parameters on their limits, goes
   on by projected Newton steps and stays exact; only if that fails too does it fall back to
   `lsq_linear`.

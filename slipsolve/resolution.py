@@ -1354,48 +1354,6 @@ def blocked_cv_curve(inversion, weights, n_folds=8, direction="auto",
     return out
 
 
-def condition_number(inversion, smoothing=None, ss_ratio=1.0, ds_ratio=3.0,
-                     boundary_ratio=1.0, sides=("bottom", "left", "right"),
-                     smooth_weighting="uniform"):
-    """`sigma_1 / sigma_n` of the design -- Magen et al. (2021)'s criterion.
-
-    They discretise by minimising the condition number rather than by reading
-    resolution, alternating a model-space refinement against a data-space one,
-    and argue the point directly: an inverse problem can have a resolution matrix
-    close to unity and still map small data errors into large model errors, since
-    `m_err = A^-g d_err = V S^-1 U' d_err` is governed by the *smallest*
-    singular value. It is a *stability* criterion, not a resolution one, and
-    they say so.
-
-    `smoothing=None` scores the whitened design `Cd^-1/2 [G | ramp]` alone,
-    which is what their discretisation algorithm operates on. Passing a weight
-    scores the full stacked operator that `SlipInversion.solve` builds,
-    smoothing and boundary rows included.
-
-    Only the first is a discretisation criterion. Regularisation exists to
-    bound the smallest singular value, so the conditioning of the stacked operator
-    falls monotonically as the weight rises and has no interior minimum -- it
-    cannot choose a weight. Magen et al. vary the *discretisation* at fixed
-    regularisation, and that is the comparison this reproduces.
-    """
-    from .inversion import regularization_blocks
-    from .regularize import scale_smoothing
-
-    design = weighted_design(inversion)
-    if smoothing is not None:
-        # The same blocks `_normal_equations` assembles, kept as rows rather
-        # than squared up, so the singular values are the operator's own.
-        smooth, boundary = regularization_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio,
-                                                 sides, smooth_weighting)
-        smooth = scale_smoothing(smooth, smoothing)
-        design = np.vstack([design, smooth.toarray(), boundary.toarray()])
-    values = np.linalg.svd(design, compute_uv=False)
-    smallest = float(values[-1])
-    return {"condition_number": float(values[0] / max(smallest, 1e-300)),
-            "sigma_max": float(values[0]), "sigma_min": smallest,
-            "n_rows": int(design.shape[0]), "n_columns": int(design.shape[1]),
-            "regularized": smoothing is not None}
-
 def resolution_report(inversion, smoothing, ss_ratio=1.0, ds_ratio=3.0,
                       boundary_ratio=1.0, sides=("bottom", "left", "right"),
                       smooth_weighting="uniform"):
@@ -1710,8 +1668,9 @@ def element_resolution(inversion, resolution):
 def element_size(mesh):
     """The equivalent square edge of each element, `sqrt(2 * area)`.
 
-    The same length `layered._orders` uses to price a triangle against its
-    distance to an observation, so "element size" means one thing in the package.
+    The same length the point-source quadrature (`slipsolve.layered_tde`) uses to
+    price a triangle against its distance to an observation, so "element size"
+    means one thing in the package.
     """
     return np.sqrt(2.0 * np.asarray(mesh.areas, dtype=float))
 

@@ -12,7 +12,7 @@ pip install "slipsolve-python @ git+https://github.com/eitanrapa/SlipSolve-Pytho
 With optional extras (see below):
 
 ```bash
-pip install "slipsolve-python[layered] @ git+https://github.com/eitanrapa/SlipSolve-Python.git"
+pip install "slipsolve-python[dev] @ git+https://github.com/eitanrapa/SlipSolve-Python.git"
 ```
 
 The distribution is called `slipsolve-python`; the package you import is
@@ -25,7 +25,7 @@ import slipsolve
 ## With conda
 
 The repository carries an environment file with every dependency, including the
-optional ones and a Fortran compiler for EDGRN:
+optional ones:
 
 ```bash
 git clone https://github.com/eitanrapa/SlipSolve-Python.git
@@ -48,7 +48,6 @@ processing stack.
 
 | Extra or package | What it enables |
 |---|---|
-| `[layered]` (`pygrnwang`) | `run_edgrn`, which writes an EDGRN input file, runs Rongjiang Wang's EDGRN and reads the tables back. It uses an `edgrn` executable you name or have on the `PATH`, else the copy `pygrnwang` bundles and builds with `gfortran`. Not needed if you run EDGRN yourself and read its tables with `EdgrnTables.from_input_file`, nor for the package's own layered engine (`RemainderTables` and `LayeredTDE`), which needs no Fortran. |
 | `h5py` | Reading GMT 6 `.grd` files, which are netCDF-4 (HDF5) files, in `read_grd` and `LosGrid.from_grd`. Included in the conda environment. Other `.grd` flavours are read through whichever xarray backend is installed (`netcdf4`, `h5netcdf`, `scipy` or `rasterio`). |
 | `[dev]` (`pytest`, `pytest-xdist`, `cutde`) | The test suite. `cutde` is an independent implementation of the triangular dislocation, used only as a cross-check; the tests that need it are skipped without it. |
 | `[docs]` (`mkdocs-material`, `mkdocstrings[python]`) | Building this documentation. |

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from slipsolve import wavenumber as wn
-from slipsolve.edgrn import VelocityModel
+from slipsolve.crust import VelocityModel
 from slipsolve.heterogeneity import (VoxelModel, VoxelSource, compliance, from_voigt,
                                      stiffness_block, to_voigt, unit_moments)
 from slipsolve.layered_tde import LayeredTDE

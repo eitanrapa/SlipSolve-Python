@@ -225,7 +225,7 @@ def test_moment_accepts_a_velocity_model(scene):
     A crust that is softer at the top gives the same shallow slip a smaller
     moment than a uniform 30 GPa does.
     """
-    from slipsolve.edgrn import VelocityModel
+    from slipsolve.crust import VelocityModel
 
     mesh, _, obs = scene
     model = SlipInversion(mesh, obs).solve(smoothing=0.3, polarity=(-1, 0, 0))
@@ -398,7 +398,7 @@ def test_integrated_moment_converges_and_matches_brute_force(scene):
     centroids per element: first order in the rigidity steps, so it is the
     loose, independent reference.
     """
-    from slipsolve.layered import _triangle_quadrature
+    from slipsolve._quadrature import _triangle_quadrature
 
     mesh, _, obs = scene
     crust = _crust()
@@ -426,22 +426,6 @@ def test_moment_takes_one_rigidity_per_parameter(scene):
         model.moment(np.full(mesh.n_elements, 30e9))
     with pytest.raises(ValueError, match="rule"):
         model.moment(rule="centroid")
-
-
-def test_layered_engine_ignores_nu(scene):
-    """The tables carry the elastic structure; nu is provenance only.
-
-    Worth pinning because the argument exists and looks like it should matter --
-    it does for the half-space engine, where it is the only material parameter.
-    """
-    from slipsolve import EdgrnTables, LayeredPointSource
-
-    mesh, _, obs = scene
-    tables = EdgrnTables.homogeneous(r=np.linspace(0.0, 300e3, 151),
-                                     z=np.linspace(250.0, 30e3, 60), n_azimuth=12)
-    a = SlipInversion(mesh, obs, engine=LayeredPointSource(tables, nu=0.25))
-    b = SlipInversion(mesh, obs, engine=LayeredPointSource(tables, nu=0.40))
-    np.testing.assert_array_equal(a.g, b.g)
 
 
 # -- the two edge-weight families must share a scale ------------------------

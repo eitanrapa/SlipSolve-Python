@@ -16,7 +16,7 @@ import pytest
 from slipsolve import (Bimaterial, DipSweep, FaultMesh, FaultTrace, HalfSpaceTDE,
                        Observations, RigidityContrast, SlipInversion, SlipModel)
 from slipsolve import wavenumber as wn
-from slipsolve.edgrn import VelocityModel
+from slipsolve.crust import VelocityModel
 from slipsolve.layered_tde import LayeredTDE
 
 import slip_synthetic as ss

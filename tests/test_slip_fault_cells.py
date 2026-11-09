@@ -5,7 +5,7 @@ import pytest
 
 from slipsolve import FaultMesh, FaultTrace
 from slipsolve import wavenumber as wn
-from slipsolve.edgrn import VelocityModel
+from slipsolve.crust import VelocityModel
 from slipsolve.fault_cells import FaultCells, PrismSource
 from slipsolve.heterogeneity import HeterogeneousEngine, VoxelSource, from_voigt, to_voigt
 from slipsolve.layered_tde import LayeredTDE
