@@ -108,6 +108,7 @@ from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
 from .patterns import Pattern, poroelastic_pattern, separate_history
 from .psgrn import PsgrnTables, run_psgrn
 from .relaxation import RelaxationTables, Rheology, relaxation_history, relaxation_pattern
+from .regional import RegionalModel, fit_frame_rotation
 from .predict import (iterate_sampling, model_rms_min, predicted_los,
                       sample_slip)
 from .resolution import (
@@ -172,6 +173,7 @@ __all__ = [
     "Observations",
     "Pattern",
     "PsgrnTables",
+    "RegionalModel",
     "RelaxationTables",
     "RemainderTables",
     "Rheology",
@@ -207,6 +209,7 @@ __all__ = [
     "empirical_variogram",
     "epic_prior",
     "fit_covariance",
+    "fit_frame_rotation",
     "fit_reml",
     "fit_trajectory",
     "frame_lattice",

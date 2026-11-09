@@ -14,4 +14,6 @@
 
 ::: slipsolve.psgrn
 
+::: slipsolve.regional
+
 ::: slipsolve.tsurf
