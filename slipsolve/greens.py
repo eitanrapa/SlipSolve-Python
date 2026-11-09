@@ -24,7 +24,21 @@ To make it faster, evaluate many elements per numpy call; do not add threads.
 
 import numpy as np
 
-from ._tde import tde_disp_hs
+from ._tde import tde_disp_hs, tde_disp_hs_unit_many  # noqa: F401  (tde_disp_hs: kept for importers)
+
+
+#: Bytes of triangle fields `HalfSpaceTDE` holds at once (it evaluates elements in chunks of this size).
+CHUNK_BYTES = 200e6
+
+
+def _element_fields(mesh, x, y, z, nu):
+    """`(elements, unit)` chunks: each element's field of unit strike-, dip- and tensile slip at the points,
+    `(chunk, 3, 3, n_points)`, all of a chunk's triangles in one vectorised pass."""
+    vertices = np.asarray(mesh.vertices, dtype=float)
+    per = max(1, int(CHUNK_BYTES // (72.0 * max(x.size, 1))))
+    for start in range(0, vertices.shape[0], per):
+        chunk = np.arange(start, min(start + per, vertices.shape[0]))
+        yield chunk, tde_disp_hs_unit_many(x, y, z, vertices[chunk], nu)
 
 
 class HalfSpaceTDE:
@@ -49,16 +63,12 @@ class HalfSpaceTDE:
         third axis.
         """
         x, y, z = _as_points(x, y, z)
-        vertices = mesh.vertices
-        out = np.zeros((x.size, 3, 2 * mesh.n_elements))
-        for k in range(mesh.n_elements):
-            p1, p2, p3 = vertices[k]
-            for comp, slip in ((0, (1.0, 0.0, 0.0)), (1, (0.0, 1.0, 0.0))):
-                ue, un, uv = tde_disp_hs(x, y, z, p1, p2, p3, *slip, self.nu)
-                col = k + comp * mesh.n_elements
-                out[:, 0, col] = ue
-                out[:, 1, col] = un
-                out[:, 2, col] = uv
+        n = mesh.n_elements
+        out = np.zeros((x.size, 3, 2 * n))
+        for chunk, unit in _element_fields(mesh, x, y, z, self.nu):
+            # unit: (elements, slip, component, points); columns are strike slip then dip slip.
+            out[:, :, chunk] = np.transpose(unit[:, 0], (2, 1, 0))
+            out[:, :, n + chunk] = np.transpose(unit[:, 1], (2, 1, 0))
         _require_finite(out, mesh, x, y, z)
         return out
 
@@ -76,15 +86,13 @@ class HalfSpaceTDE:
         if not (look_e.size == look_n.size == look_u.size == x.size):
             raise ValueError("Look-vector components must match the observation count")
 
-        vertices = mesh.vertices
-        g = np.zeros((x.size, 2 * mesh.n_elements))
-        for k in range(mesh.n_elements):
-            p1, p2, p3 = vertices[k]
-            for comp, slip in ((0, (1.0, 0.0, 0.0)), (1, (0.0, 1.0, 0.0))):
-                ue, un, uv = tde_disp_hs(x, y, z, p1, p2, p3, *slip, self.nu)
-                g[:, k + comp * mesh.n_elements] = (
-                    ue * look_e + un * look_n + uv * look_u
-                )
+        n = mesh.n_elements
+        g = np.zeros((x.size, 2 * n))
+        look = np.stack([look_e, look_n, look_u])
+        for chunk, unit in _element_fields(mesh, x, y, z, self.nu):
+            projected = np.einsum("esct,ct->est", unit[:, :2], look)        # (elements, slip, points)
+            g[:, chunk] = projected[:, 0].T
+            g[:, n + chunk] = projected[:, 1].T
         _require_finite(g, mesh, x, y, z)
         return g
 

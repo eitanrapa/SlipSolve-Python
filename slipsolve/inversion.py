@@ -216,7 +216,16 @@ def pinned_edges(weights):
     return EDGE_PIN * float(np.median(weights))
 
 
-def assemble_design(engine, mesh, basis, points):
+#: The spacing (m) of the elevation levels the Green's functions with topography are evaluated on.
+TOPOGRAPHY_STEP = 50.0
+
+
+def obs_elevation(obs):
+    """Each row's height above the model's free surface (m), or None when the observations carry none."""
+    return None if "elevation" not in obs.ds else np.asarray(obs.ds["elevation"].values, dtype=float)
+
+
+def assemble_design(engine, mesh, basis, points, elevation=None, step=TOPOGRAPHY_STEP):
     """The Green's matrix of `mesh` in `basis` at `points` (`x, y, look_e, look_n, look_u`).
 
     An engine that can integrate a basis function directly is given the basis, so a
@@ -224,7 +233,39 @@ def assemble_design(engine, mesh, basis, points):
     triangular dislocation, which is defined on a patch of *constant* slip -- assembles
     per element and has the basis projected on afterwards. Both preserve the moment
     exactly; only the first gets the near-field shape of a linearly varying slip patch right.
+
+    **Topography.** `elevation` (m, one per point, above the model's free surface) moves each point's free surface to
+    its own height, the source deeper below it by as much (Williams & Wadge 1998). Points are evaluated on levels
+    `step` apart, the fault lowered by each level (`FaultMesh.lowered`), and each point interpolated linearly between
+    the two levels around its elevation, which is exact on a level and second order between. A layered engine keeps
+    its layers under the surface, so they move with it; an engine whose structure would stay put (its
+    `supports_topography` false, as for voxels) is refused.
     """
+    if elevation is None or not np.any(np.asarray(elevation, dtype=float)):
+        return _assemble(engine, mesh, basis, points)
+    if not getattr(engine, "supports_topography", True):
+        raise NotImplementedError(f"{type(engine).__name__} holds structure that would not move with the fault, so the "
+                                  "elevation shift does not apply to it yet")
+    elevation = np.asarray(elevation, dtype=float).ravel()
+    points = [np.asarray(p, dtype=float).ravel() for p in points]
+    if elevation.size != points[0].size or not np.all(np.isfinite(elevation)):
+        raise ValueError("elevation needs one finite value per point")
+    step = float(step)
+    position = elevation / step
+    low = np.floor(position)
+    above = position - low                                       # the share of the upper level, in [0, 1)
+    out = None
+    for level in np.unique(np.concatenate([low, (low + 1.0)[above > 0]])):
+        weight = np.where(low == level, 1.0 - above, 0.0) + np.where((low + 1.0 == level) & (above > 0), above, 0.0)
+        rows = np.flatnonzero(weight > 0)
+        g = _assemble(engine, mesh.lowered(level * step), basis, [p[rows] for p in points])
+        if out is None:
+            out = np.zeros((elevation.size, g.shape[1]))
+        out[rows] += weight[rows, None] * g
+    return out
+
+
+def _assemble(engine, mesh, basis, points):
     if getattr(engine, "supports_basis", False):
         return engine.los_matrix(mesh, *points, basis=basis)
     element_g = engine.los_matrix(mesh, *points)
@@ -620,7 +661,7 @@ class SlipInversion:
         if g is None:
             points = (ds["x"].values, ds["y"].values,
                       ds["look_e"].values, ds["look_n"].values, ds["look_u"].values)
-            self.g = assemble_design(self.engine, mesh, self.basis, points)
+            self.g = assemble_design(self.engine, mesh, self.basis, points, elevation=obs_elevation(obs))
         else:
             self.g = np.asarray(g, dtype=float)
             if self.g.shape != (obs.n, self.basis.n_param):

@@ -1241,6 +1241,8 @@ class HeterogeneousEngine:
     """
 
     supports_basis = True
+    #: Its voxels stay where they are when the fault is lowered, so the elevation shift does not apply yet.
+    supports_topography = False
 
     def __init__(self, base, voxels, order="full", log=None, workers=None, solver="dense", h_chunk=H_CHUNK):
         if not base.tables.has_strain:

@@ -228,11 +228,13 @@ class TrackSeries:
 
     `ramp` is the nuisance on each pair, a `slipsolve.regularize.ramp_columns`
     kind: free on every pair. Use one name per track; `"none"` series may share a name,
-    and so GNSS stations do.
+    and so GNSS stations do. `elevation` (m) is each cell's height above `datum`, as
+    `Observations.from_los` records it.
     """
 
     def __init__(self, x, y, look, values, t0, t1, sigma, name="track", ramp="none", frame=None,
-                 noise="dates", cell_weight=None, region=None, cell_size=None, count=None, random_walk=0.0):
+                 noise="dates", cell_weight=None, region=None, cell_size=None, count=None, random_walk=0.0,
+                 elevation=None, datum=0.0):
         if frame is None:
             raise ValueError("TrackSeries needs the frame the mesh was built in")
         self.x = np.asarray(x, dtype=float).ravel()
@@ -272,6 +274,19 @@ class TrackSeries:
         self.region = None if region is None else np.asarray(region, dtype=np.int64).ravel()
         self.cell_size = np.zeros(n) if cell_size is None else np.asarray(cell_size, dtype=float).ravel()
         self.count = np.ones(n) if count is None else np.asarray(count, dtype=float).ravel()
+        self.elevation = None
+        if elevation is not None:
+            self.elevation = np.broadcast_to(np.asarray(elevation, dtype=float), (n,)).copy()
+            if not np.all(np.isfinite(self.elevation)):
+                raise ValueError(f"series {name!r} has non-finite elevations")
+        self.datum = float(datum)
+
+    def _with_heights(self, obs):
+        """`obs` (rows over this series' cells) with their heights."""
+        if self.elevation is not None:
+            obs.ds["elevation"] = ("obs", self.elevation)
+            obs.ds.attrs["datum"] = self.datum
+        return obs
 
     @classmethod
     def from_los(cls, stack, t0, t1, sigma, name="track", frame=None, trace=None, ramp="none",
@@ -303,7 +318,9 @@ class TrackSeries:
                    np.stack([row["los"].values for row in rows]), t0, t1, sigma, name=name, ramp=ramp,
                    frame=Observations(first).frame, noise=noise,
                    region=first["region"].values if "region" in first else None,
-                   cell_size=first["cell_size"].values, count=first["count"].values)
+                   cell_size=first["cell_size"].values, count=first["count"].values,
+                   elevation=first["elevation"].values if "elevation" in first else None,
+                   datum=first.attrs.get("datum", 0.0))
 
     @property
     def n_cells(self):
@@ -405,7 +422,7 @@ class TrackSeries:
         out.ds["count"] = ("obs", self.count)
         if self.region is not None:
             out.ds["region"] = ("obs", self.region)
-        return out
+        return self._with_heights(out)
 
     def __repr__(self):
         return (f"<TrackSeries {self.name!r} {self.n_cells} cells x {self.n_pairs} pairs, "
@@ -485,7 +502,7 @@ class TimeDependentInversion(SlipInversion):
                 row.ds["count"] = ("obs", s.count)
                 if s.region is not None:
                     row.ds["region"] = ("obs", s.region)
-                parts.append(row)
+                parts.append(s._with_heights(row))
                 weights.append(np.tile(T[j], (s.n_cells, 1)))
                 row_cell.append(offset + cells)
                 ramp[name] = s.ramp
@@ -545,12 +562,17 @@ class TimeDependentInversion(SlipInversion):
     @staticmethod
     def _cell_greens(series, engine, mesh, basis, use_frame_looks):
         """The Green's matrix at every series' cells, `(sum cells, 2 n)`, one engine call."""
-        points = np.concatenate([np.column_stack([s.x, s.y, s.look]) for s in series])
+        with_heights = [s.elevation is not None for s in series]
+        if any(with_heights) and not all(with_heights):
+            raise ValueError("some series carry elevations and some do not: give every one, or none")
+        heights = [s.elevation if s.elevation is not None else np.zeros(s.n_cells) for s in series]
+        points = np.concatenate([np.column_stack([s.x, s.y, s.look, h]) for s, h in zip(series, heights)])
         unique, inverse = np.unique(points, axis=0, return_inverse=True)
-        x, y, le, ln, lu = unique.T
+        x, y, le, ln, lu, elevation = unique.T
         if use_frame_looks:
             le, ln, lu = frame_looks(series[0].frame, x, y, le, ln, lu)
-        return assemble_design(engine, mesh, basis, (x, y, le, ln, lu))[inverse.ravel()]
+        return assemble_design(engine, mesh, basis, (x, y, le, ln, lu),
+                               elevation=elevation if all(with_heights) else None)[inverse.ravel()]
 
     @property
     def n_fields(self):

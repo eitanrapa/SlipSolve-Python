@@ -90,13 +90,17 @@ def read_tenv3(path):
 
 
 def gnss_observations(lon, lat, east, north, up, sigma_e, sigma_n, sigma_u, frame, name="gnss",
-                      components="enu", scale=1.0, floor=0.0):
+                      components="enu", scale=1.0, floor=0.0, elevation=None, datum=0.0):
     """Stations' displacements or velocities as observation rows, one per component.
 
     `sigma_*` are multiplied by `scale` and raised to `floor`, in the data's units. A
     typical choice for displacements is `scale=3`, `floor=0.005`; MIDAS's sigmas for a
     long record reach 0.2 mm/yr, which is not the model error, so floor those too.
     `components` is any of `"enu"`: horizontal only for `"en"`.
+
+    `elevation` (m, one per station) puts each station's free surface at its height above `datum`, as
+    `Observations.from_los` does for a DEM. Use the DEM's datum: a GNSS height is usually ellipsoidal, tens of metres
+    from a DEM's orthometric one.
     """
     lon, lat = np.atleast_1d(np.asarray(lon, dtype=float)), np.atleast_1d(np.asarray(lat, dtype=float))
     values = {"e": east, "n": north, "u": up}
@@ -110,14 +114,20 @@ def gnss_observations(lon, lat, east, north, up, sigma_e, sigma_n, sigma_u, fram
                      np.maximum(np.broadcast_to(np.asarray(sigmas[c], dtype=float), lon.shape) * float(scale),
                                 float(floor))))
     stacked = [np.concatenate([r[i] for r in rows]) for i in range(5)]
-    return Observations.from_points(*stacked, name=name, frame=frame)
+    heights = None
+    if elevation is not None:
+        heights = np.tile(np.broadcast_to(np.asarray(elevation, dtype=float), lon.shape), len(rows))
+    return Observations.from_points(*stacked, name=name, frame=frame, elevation=heights, datum=datum)
 
 
-def velocity_observations(table, frame, name="gnss", components="enu", scale=1.0, floor=0.0):
-    """Observation rows from a `read_midas` table, in m/yr."""
+def velocity_observations(table, frame, name="gnss", components="enu", scale=1.0, floor=0.0, elevation=None,
+                          datum=0.0):
+    """Observation rows from a `read_midas` table, in m/yr; `elevation` as in `gnss_observations` (the table's
+    `height` is ellipsoidal)."""
     return gnss_observations(table["lon"].values, table["lat"].values, table["ve"].values, table["vn"].values,
                              table["vu"].values, table["se"].values, table["sn"].values, table["su"].values,
-                             frame, name=name, components=components, scale=scale, floor=floor)
+                             frame, name=name, components=components, scale=scale, floor=floor, elevation=elevation,
+                             datum=datum)
 
 
 def screen_velocities(table, max_vertical=0.01, max_from_neighbours=0.01, neighbours=6, apart=2e3, groups=None):
@@ -156,7 +166,7 @@ def screen_velocities(table, max_vertical=0.01, max_from_neighbours=0.01, neighb
 
 
 def gnss_series(lon, lat, t, east, north, up, sigma_e, sigma_n, sigma_u, frame, name="gnss",
-                components="enu", reference=0, random_walk=(0.0, 0.0, 0.0)):
+                components="enu", reference=0, random_walk=(0.0, 0.0, 0.0), elevation=None, datum=0.0):
     """One station's positions as a `TrackSeries` per component.
 
     `t` is days from the time basis's origin; `east`, `north`, `up` metres, each
@@ -167,7 +177,8 @@ def gnss_series(lon, lat, t, east, north, up, sigma_e, sigma_n, sigma_u, frame, 
     simply absent; a NaN in one component drops that day there.
 
     The series are named `{name}_e`, `_n` and `_u`, so
-    `TimeDependentInversion.series_fit` pools each component over the stations.
+    `TimeDependentInversion.series_fit` pools each component over the stations. `elevation` (m) is the station's
+    height, above `datum`, as in `gnss_observations`.
     """
     from .temporal import TrackSeries
 
@@ -186,7 +197,8 @@ def gnss_series(lon, lat, t, east, north, up, sigma_e, sigma_n, sigma_u, frame, 
         others = np.arange(days.size) != anchor
         out.append(TrackSeries([x], [y], _COMPONENTS[c], (positions[others] - positions[anchor])[:, None],
                                np.full(int(others.sum()), times[anchor]), times[others], float(sigma),
-                               name=f"{name}_{c}", ramp="none", frame=frame, random_walk=float(walk)))
+                               name=f"{name}_{c}", ramp="none", frame=frame, random_walk=float(walk),
+                               elevation=None if elevation is None else [float(elevation)], datum=datum))
     return out
 
 
@@ -339,10 +351,10 @@ class StationSeries:
         self.sigma = tuple(float(v) for v in sigma)
         self.random_walk = tuple(float(v) for v in random_walk)
 
-    def track_series(self, frame, name="gnss", components="enu"):
-        """The `TrackSeries` of each component, referred to the first day."""
+    def track_series(self, frame, name="gnss", components="enu", elevation=None, datum=0.0):
+        """The `TrackSeries` of each component, referred to the first day; `elevation` as in `gnss_series`."""
         return gnss_series(self.lon, self.lat, self.t, self.east, self.north, self.up, *self.sigma, frame, name=name,
-                           components=components, random_walk=self.random_walk)
+                           components=components, random_walk=self.random_walk, elevation=elevation, datum=datum)
 
     def __repr__(self):
         return (f"<StationSeries {self.name} {self.t.size} days, sigma {tuple(round(1e3 * v, 2) for v in self.sigma)} mm, "

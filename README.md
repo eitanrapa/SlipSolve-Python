@@ -16,7 +16,7 @@ translation of, and extension to, the MATLAB package
   edge or a fitted surface; slip per element or per node; graded or unstructured meshes.
 - Triangular dislocations (Nikkhoo & Walter 2015), layered Green's functions from the
   package's own wavenumber-domain tables or from EDGRN, 3-D heterogeneity on voxels,
-  and rigidity contrasts across the fault.
+  rigidity contrasts across the fault, and topography by the elevation shift.
 - Quadtree sampling of LOS grids, driven by the data, a model's prediction or model
   resolution; pixel offsets and GNSS as further tracks; correlated noise models.
 - Smoothing, zero-slip edges, bounds and slip polarity, and per-track ramps solved

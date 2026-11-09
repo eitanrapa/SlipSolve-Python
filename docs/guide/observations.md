@@ -70,6 +70,10 @@ sample on the trace gives a non-finite Green's function, which the inversion
 refuses with a message naming the offending samples. A cell should not straddle
 the trace, so use at least `width_min / 2`.
 
+`elevation=` (a DEM on the stack's grid) and `datum=` record each sample's height,
+the DEM averaged over the cell's valid pixels, for the Green's functions with
+topography ([Elastic models](elastic-models.md#topography)).
+
 ### Measuring the sampling parameters
 
 Each parameter is a statement about the data, and a wrong value produces a symptom

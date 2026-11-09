@@ -52,7 +52,7 @@ class Observations:
     def from_los(cls, los_stack, pair=0, name="track", frame=None, trace=None,
                  rms_min=0.005, width_min=1000.0, width_max=20000.0,
                  min_valid_fraction=0.5, exclude_within=0.0, stat="mean",
-                 field=None, refine_within=0.0, regions=None):
+                 field=None, refine_within=0.0, regions=None, elevation=None, datum=0.0):
         """Quadtree-downsample one pair of a gridded LOS product.
 
         `rms_min` is the within-cell standard deviation (metres) below which a
@@ -104,6 +104,12 @@ class Observations:
         regions: a mixed cell keeps splitting, and one that reaches `width_min`
         is reduced over its majority region's pixels only. Each sample records its
         label in `region`. `None` (the default) treats the scene as one region.
+
+        **Topography.** `elevation` is an optional `(ny, nx)` DEM on the stack's grid, metres above sea level (or any
+        datum, the same for every data set). It is averaged over each cell's valid pixels, as the look vectors are,
+        ignoring pixels where it is not finite, and each sample records its height above `datum`, the elevation the
+        model's free surface stands for, in `elevation`. The Green's functions then put each sample's free surface at
+        that height (`slipsolve.inversion.assemble_design`).
         """
         if stat not in ("mean", "median"):
             raise ValueError("stat must be 'mean' or 'median'")
@@ -182,8 +188,13 @@ class Observations:
                 "Quadtree produced no samples; loosen rms_min or min_valid_fraction"
             )
 
+        dem = None
+        if elevation is not None:
+            dem = np.asarray(elevation.values if hasattr(elevation, "values") else elevation, dtype=float)
+            if dem.shape != los.shape:
+                raise ValueError(f"elevation has shape {dem.shape}, but the stack's grid is {los.shape}")
         rows = _reduce_cells(cells, los, look, valid, x_native, y_native, stat,
-                             regions=region_map, min_valid_fraction=min_valid_fraction)
+                             regions=region_map, min_valid_fraction=min_valid_fraction, elevation=dem)
 
         # Native grid metres -> the shared local frame. Averaging in the native
         # projection and transforming once is exact to well under a metre over a
@@ -215,6 +226,12 @@ class Observations:
         )
         if region_map is not None:
             out["region"] = ("obs", rows["region"][keep].astype(np.int64))
+        if dem is not None:
+            heights = rows["elevation"][keep]
+            if not np.all(np.isfinite(heights)):
+                raise ValueError(f"{int((~np.isfinite(heights)).sum())} samples have no finite elevation in their cell")
+            out["elevation"] = ("obs", heights - float(datum))
+            out.attrs["datum"] = float(datum)
         quadtree = {
             "rms_min": float(rms_min),
             "width_min": float(width_min),
@@ -247,7 +264,7 @@ class Observations:
         return cls(out)
 
     @classmethod
-    def from_points(cls, x, y, values, look, std, name="gnss", frame=None, epsg=4326):
+    def from_points(cls, x, y, values, look, std, name="gnss", frame=None, epsg=4326, elevation=None, datum=0.0):
         """Observations that are already points: GNSS components, or any point measurement.
 
         `x`, `y` are station coordinates in `epsg` (lon/lat by default), or local
@@ -264,6 +281,8 @@ class Observations:
         `concat` keeps with `normalize="none"`. Under `"sqrt_count"` the track's
         total influence is rescaled as for any other track and the relative station
         weights survive. `cell_size` is 0 and `count` 1, since nothing was averaged.
+
+        `elevation` (m, one per row or one for all) is each row's height, recorded above `datum` as in `from_los`.
         """
         if frame is None:
             raise ValueError("from_points needs the frame the mesh was built in")
@@ -300,6 +319,12 @@ class Observations:
             }
         )
         out.attrs.update(frame=frame.to_dict(), epsg=epsg, tracks=[name], source_epsg=epsg)
+        if elevation is not None:
+            heights = np.broadcast_to(np.asarray(elevation, dtype=float), (n,)).copy()
+            if not np.all(np.isfinite(heights)):
+                raise ValueError("every elevation must be finite")
+            out["elevation"] = ("obs", heights - float(datum))
+            out.attrs["datum"] = float(datum)
         return cls(out)
 
     @classmethod
@@ -347,6 +372,15 @@ class Observations:
                     factor[track == track_name] *= float(weights.get(str(track_name), 1.0))
             ds["weight"] = ("obs", ds["weight"].values * factor)
             parts.append(ds)
+        # Heights go in for every track or for none: a track without them would sit on the datum without saying so.
+        with_heights = ["elevation" in p for p in parts]
+        if any(with_heights) and not all(with_heights):
+            missing = [str(item.ds.attrs.get("tracks")) for item, has in zip(items, with_heights) if not has]
+            raise ValueError(f"some tracks carry elevations and some do not ({', '.join(missing)}): give every one, "
+                             "or none")
+        datums = {float(p.attrs.get("datum", 0.0)) for p in parts if "elevation" in p}
+        if len(datums) > 1:
+            raise ValueError(f"the tracks' elevations are above different datums: {sorted(datums)}")
         # A track sampled without `regions` is one region (label 0) beside those
         # that were; `xr.concat` would refuse the missing variable.
         if any("region" in p for p in parts):
@@ -619,7 +653,7 @@ def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
 
 
 def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=None,
-                  min_valid_fraction=0.0):
+                  min_valid_fraction=0.0, elevation=None):
     """Collapse each surviving cell to one sample.
 
     Every quantity is averaged over the same valid pixels: the cell is an
@@ -637,6 +671,8 @@ def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=Non
     out["keep"] = np.ones(n, dtype=bool)
     if regions is not None:
         out["region"] = np.zeros(n, dtype=np.int64)
+    if elevation is not None:
+        out["elevation"] = np.full(n, np.nan)
     dx = abs(float(np.diff(x_native)[0]))
     dy = abs(float(np.diff(y_native)[0]))
 
@@ -664,6 +700,11 @@ def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=Non
         out["y"][i] = y_native[r0:r1][rr].mean()
         for k, name in enumerate(("look_e", "look_n", "look_u")):
             out[name][i] = look[k, r0:r1, c0:c1][m].mean()
+        if elevation is not None:
+            heights = elevation[r0:r1, c0:c1][m]
+            heights = heights[np.isfinite(heights)]
+            if heights.size:
+                out["elevation"][i] = heights.mean()
         out["cell_size"][i] = 0.5 * ((r1 - r0) * dy + (c1 - c0) * dx)
 
     # Averaging three components of a unit vector shortens it slightly; renormalise

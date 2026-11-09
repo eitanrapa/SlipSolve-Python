@@ -61,7 +61,7 @@ import numpy as np
 
 from .basis import make_basis
 from .greens import HalfSpaceTDE
-from .inversion import SlipInversion, SlipModel, _far_enough, assemble_design, pinned_edges
+from .inversion import SlipInversion, SlipModel, _far_enough, assemble_design, obs_elevation, pinned_edges
 from .patterns import PREFIX as PATTERN_PREFIX
 from .patterns import amplitudes
 from .regularize import slip_bounds
@@ -387,7 +387,7 @@ class InterseismicInversion(SlipInversion):
         if frame_looks:
             ds = obs.ds
             g = assemble_design(engine, mesh, make_basis(mesh, basis),
-                                (ds["x"].values, ds["y"].values, *obs.frame_looks()))
+                                (ds["x"].values, ds["y"].values, *obs.frame_looks()), elevation=obs_elevation(obs))
         self.use_frame_looks = bool(frame_looks)
         super().__init__(mesh, obs, engine=engine, ramp=ramp, basis=basis, velocity_model=velocity_model,
                          covariance=covariance, extra_columns=extra, nuisance_prior=nuisance_prior, g=g)

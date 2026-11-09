@@ -154,6 +154,30 @@ class FaultMesh:
         return FaultMesh(moved(self.nodes), self.triangles, self.params, frame=frame, attrs=self.attrs,
                          centres=moved(self.centres), centre_params=self.centre_params)
 
+    def lowered(self, depth):
+        """This mesh moved down by `depth` metres (up for a negative one): the same fault under a higher surface.
+
+        Nodes, cell centres and the parameter-space depths all move, and nothing else changes, so a slip vector on
+        this mesh is one on that. The Green's functions with topography use it (`slipsolve.inversion.assemble_design`).
+        """
+        depth = float(depth)
+        if depth == 0.0:
+            return self
+
+        def moved(points, column):
+            if points is None:
+                return None
+            out = np.array(points, dtype=float)
+            out[:, column] -= depth
+            return out
+
+        if np.max(self.nodes[:, 2]) - depth > 0:
+            raise ValueError(f"raising the fault by {-depth:.0f} m would put its top {np.max(self.nodes[:, 2]) - depth:.0f} m "
+                             "above the free surface: a receiver lies below the datum by more than the fault's top "
+                             "depth. Lower the datum.")
+        return FaultMesh(moved(self.nodes, 2), self.triangles, moved(self.params, 1), frame=self.frame,
+                         attrs=self.attrs, centres=moved(self.centres, 2), centre_params=moved(self.centre_params, 1))
+
     # -- construction ------------------------------------------------------
     @classmethod
     def join(cls, meshes):

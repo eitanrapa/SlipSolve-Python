@@ -79,6 +79,47 @@ the tables give no field at depth and no opening source. `write_edgrn_input` wri
 the input file for a velocity model, and `EdgrnTables.homogeneous` synthesises the
 tables of a uniform medium for testing without Fortran.
 
+## Topography
+
+Every engine puts the receivers on a flat free surface at \(z = 0\). Where the ground
+stands high, as on a range beside a fault, the observations can carry their heights and
+the Green's functions then use the elevation shift of Williams & Wadge (1998): each
+observation is computed as if the free surface passed through it, the fault deeper below
+it by its height above the model's surface (the datum).
+
+```python
+dem = ...                                        # (ny, nx) on the stack's grid, metres above sea level
+obs = Observations.from_los(stack, frame=frame, trace=trace, exclude_within=2e3, elevation=dem, datum=0.0)
+gnss = gnss_observations(lon, lat, ve, vn, vu, se, sn, su, frame, elevation=heights, datum=0.0)
+inversion = SlipInversion(mesh, Observations.concat([obs, gnss]), engine=engine)
+```
+
+- **The heights.** `Observations.from_los` averages the DEM over each cell's valid pixels,
+  as it averages the look vectors; GNSS rows take their stations' heights
+  (`gnss_observations`, `gnss_series`, `velocity_observations`). Each sample stores its
+  height above `datum`, the elevation the model's \(z = 0\) stands for: the trace's, or sea
+  level on a coastal fault. Give heights to every data set or to none, in one datum (a GNSS
+  height is usually ellipsoidal, tens of metres from a DEM's).
+- **The Green's functions.** Rows are evaluated on elevation levels 50 m apart
+  (`TOPOGRAPHY_STEP`), the fault lowered by each level (`FaultMesh.lowered`), and each row is
+  interpolated between the two levels around its height. That is exact on a level and within
+  about 1e-4 of the largest entry between levels for receivers 2 km from the fault. Every
+  inversion takes them: `SlipInversion`, `InterseismicInversion`, `TimeDependentInversion`
+  (each series' cells carry their heights).
+- **Which engines.** The half-space, layered and bimaterial engines: a layered engine keeps its
+  layers under the local surface, so they move with it. A voxel model (`HeterogeneousEngine`)
+  refuses heights for now, since lowering the fault alone would move it against its voxels.
+- **What it is.** A first-order correction: it moves the surface, not its slope. It is good
+  where slopes are moderate and the relief is small against the distance to the slip
+  (Williams & Wadge 1998; Cayol & Cornet 1998 compared it with full topography). Steep relief
+  next to shallow slip needs a boundary- or finite-element model.
+- **What it moves.** On a coseismic model whose samples stand up to 2.3 km high beside the
+  fault (median 450 m) it changed the predictions by 5 mm rms (about 3% of the signal above
+  100 m), and re-solved it moved Mw by -0.007 and the peak slip by +11%, with a slightly better
+  fit.
+- Forward maps (`SlipModel.surface_displacement`, `predicted_los`) and the patterns beside the
+  slip are computed on the flat surface.
+
 ## Rigidity in the moment
 
 The engines do not decide the moment's rigidity. Pass the velocity model to the

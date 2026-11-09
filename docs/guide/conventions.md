@@ -56,7 +56,9 @@ zones, and their coordinates are then metres from two different central meridian
 The free surface is \(z = 0\) and the fault lies at \(z \le 0\): node and centroid
 `z` values are negative below the surface. Arguments that describe a depth
 (`max_depth`, `top_depth`, `depths=`, `depth_breaks=`, voxel `z_edges`, the depths
-of a `VelocityModel`) are positive metres below the surface.
+of a `VelocityModel`) are positive metres below the surface. With topography the
+observations carry their heights above a datum, the elevation \(z = 0\) stands for
+([Elastic models](elastic-models.md#topography)).
 
 The mesh is parameterized by \((s, z)\): \(s\) is arc length along the trace in
 metres from its first vertex, and \(z\) is the (negative) vertical coordinate.
