@@ -211,6 +211,70 @@ def _psv_columns(zt, zb, lam, mu, half):
     return np.stack(cols, -1)
 
 
+def _sinhc(x):
+    """`sinh(x) / x`, also for small and complex `x`."""
+    x = np.asarray(x)
+    small = np.abs(x) < 1e-3
+    safe = np.where(small, 1.0, x)
+    x2 = x * x
+    return np.where(small, 1.0 + x2 / 6.0 + x2 * x2 / 120.0, np.sinh(safe) / safe)
+
+
+def _psv_columns_gravity(k, dz_top, dz_bottom, lam, mu, buoyancy, half):
+    """P-SV solutions with buoyancy as columns, rows `(U, V, R / (k MU_SCALE), S / (k MU_SCALE))`.
+
+    The layer equations gain the terms of a hydrostatically prestressed layer under gravity `g` (Wang,
+    Lorenzo-Martin & Roth 2006, eq. 10: buoyancy, with the Adams-Williamson density gradient `rho^2 g / kappa` and
+    without self-gravitation), `buoyancy = rho g`:
+
+        R' = k S - rho g k V + (rho g)^2 U / kappa      S' = ... - rho g k U
+
+    The solutions are `v(p) e^{p z}` for `p = +-m_1, +-m_2`, `m^2 = k^2 + (2/3)(k_g^2 +- k_g sqrt(k_g^2 - k^2))` with
+    `k_g^2 = (rho g)^2 / ((4/3) kappa (lam + 2 mu))`, and the eigenvector `v(p)` is a polynomial in `p`
+    (`U = (lam + 2 mu) k^2 - mu p^2`, `V = k ((lam + mu) p + rho g)`). Each family is written as `v(p_1) e^{p_1 z}`
+    and the divided difference over `(p_1, p_2)`, so it stays independent as gravity vanishes and the two exponents
+    merge into the elastic `e^{kz}` and `kz e^{kz}`. `dz_top = z - top >= 0` and `dz_bottom = z - bottom <= 0` (m).
+    """
+    k = np.asarray(k, dtype=float)
+    alpha, c = lam + 2.0 * mu, lam + mu
+    kappa = lam + 2.0 * mu / 3.0
+    kg2 = buoyancy ** 2 / ((4.0 / 3.0) * kappa * alpha)
+    root = np.sqrt(kg2 * (kg2 - k * k) + 0j)
+    m1 = np.sqrt(k * k + (2.0 / 3.0) * (kg2 + root) + 0j)
+    m2 = np.sqrt(k * k + (2.0 / 3.0) * (kg2 - root) + 0j)
+    mean = 0.5 * (m1 + m2)
+    half_gap = -(2.0 / 3.0) * root / (m1 + m2)                      # (m2 - m1) / 2, without the cancellation
+    norm = np.abs(alpha) * k * k + np.abs(mu) * np.abs(mean) ** 2 + k * np.abs(buoyancy)
+    traction = k * MU_SCALE
+
+    def family(sign, dz):
+        p1, pm, d = sign * m1, sign * mean, sign * half_gap
+        p2 = p1 + 2.0 * d
+        e1, e2 = np.exp(p1 * dz), np.exp(p2 * dz)
+        apart = np.abs(d * dz) > 1.0                                  # then the plain difference keeps its digits
+        safe_d = np.where(apart, d, 1.0)
+        de = np.where(apart, (e2 - e1) / (2.0 * safe_d), dz * np.exp(pm * dz) * _sinhc(np.where(apart, 0.0, d * dz)))
+
+        def poly(p):
+            return (alpha * k * k - mu * p * p, k * (c * p + buoyancy),
+                    -lam * k * k * buoyancy + (alpha * alpha - lam * c) * k * k * p - alpha * mu * p ** 3,
+                    mu * k * (alpha * k * k + buoyancy * p + lam * p * p))
+
+        v1, v2 = poly(p1), poly(p2)
+        dv = (-mu * (p1 + p2), k * c + 0.0 * p1,
+              (alpha * alpha - lam * c) * k * k - alpha * mu * (p1 * p1 + p1 * p2 + p2 * p2),
+              mu * k * (buoyancy + lam * (p1 + p2)))
+        scale = (1.0, 1.0, 1.0 / traction, 1.0 / traction)
+        first = [v * e1 * s / norm for v, s in zip(v1, scale)]
+        second = [(w * e2 + v * de) * s * np.abs(mean) / norm for v, w, s in zip(v1, dv, scale)]
+        return np.stack(first, -1), np.stack(second, -1)
+
+    cols = list(family(-1.0, dz_top))
+    if not half:
+        cols += list(family(1.0, dz_bottom))
+    return np.stack(cols, -1)
+
+
 def _sh_columns(zt, zb, mu, half):
     """SH solutions as columns, rows `(W, T / (k MU_SCALE))`."""
     s = mu / MU_SCALE
@@ -265,10 +329,11 @@ class _Solution:
 
     A layer's `lam` and `mu` are numbers, or arrays along the wavenumber axis (`(n_layers, n_k)`), and may be
     complex: the viscoelastic tables (`slipsolve.relaxation`) solve it at complex moduli, many Laplace
-    variables at once, each its own stretch of `k`.
+    variables at once, each its own stretch of `k`. `buoyancy` (`rho g` per layer, Pa/m) adds gravity to the
+    P-SV system (`_psv_columns_gravity`); without it the layers are the elastic ones.
     """
 
-    def __init__(self, k, tops, lam, mu, z_source, psv_jump, sh_jump):
+    def __init__(self, k, tops, lam, mu, z_source, psv_jump, sh_jump, buoyancy=None):
         k = np.asarray(k, dtype=float)
         j = int(_layer_index(tops, z_source))
         if z_source > 0 and np.any(np.isclose(tops, z_source, rtol=0, atol=1e-9)):
@@ -278,7 +343,14 @@ class _Solution:
         self.tops = np.insert(tops, j + 1, z_source)
         self.lam = np.insert(lam, j + 1, lam[j], axis=0)
         self.mu = np.insert(mu, j + 1, mu[j], axis=0)
-        dtype = np.result_type(self.lam, self.mu, np.float64)
+        self.buoyancy = None
+        # With gravity the layer solutions are complex even for real moduli (two exponents conjugate), but the field
+        # is real: `at` returns its real part then.
+        self._real = not (np.iscomplexobj(self.lam) or np.iscomplexobj(self.mu))
+        if buoyancy is not None and np.any(np.asarray(buoyancy) != 0):
+            buoyancy = np.asarray(buoyancy, dtype=float)
+            self.buoyancy = np.insert(buoyancy, j + 1, buoyancy[j])
+        dtype = np.result_type(self.lam, self.mu, np.float64, complex if self.buoyancy is not None else np.float64)
         self.k = k
         n_layers = self.tops.size
         thick = np.diff(self.tops)
@@ -299,17 +371,15 @@ class _Solution:
         # The free surface: no traction.
         half = n_layers == 1
         below = zero if half else -k * thick[0]
-        a[:, 0:2, self._col[0]] = _psv_columns(zero, below, self.lam[0], self.mu[0], half)[:, 2:4]
+        a[:, 0:2, self._col[0]] = self._psv(0, zero, zero if half else np.full(nk, -thick[0]), half)[:, 2:4]
         b[:, 0:1, self._cols[0]] = _sh_columns(zero, below, self.mu[0], half)[:, 1:2]
         # Every interface: continuity, or the source's jump.
         for i in range(n_layers - 1):
             half = i + 1 == n_layers - 1
             below = zero if half else -k * thick[i + 1]
             rows = slice(2 + 4 * i, 6 + 4 * i)
-            a[:, rows, self._col[i]] = -_psv_columns(k * thick[i], zero, self.lam[i],
-                                                     self.mu[i], False)
-            a[:, rows, self._col[i + 1]] = _psv_columns(zero, below, self.lam[i + 1],
-                                                        self.mu[i + 1], half)
+            a[:, rows, self._col[i]] = -self._psv(i, np.full(nk, thick[i]), zero, False)
+            a[:, rows, self._col[i + 1]] = self._psv(i + 1, zero, zero if half else np.full(nk, -thick[i + 1]), half)
             rows_sh = slice(1 + 2 * i, 3 + 2 * i)
             b[:, rows_sh, self._cols[i]] = -_sh_columns(k * thick[i], zero, self.mu[i], False)
             b[:, rows_sh, self._cols[i + 1]] = _sh_columns(zero, below, self.mu[i + 1], half)
@@ -318,6 +388,13 @@ class _Solution:
                 rhs_sh[:, rows_sh, :] = sh_jump.T[None]
         self.c = np.linalg.solve(a, rhs)
         self.c_sh = np.linalg.solve(b, rhs_sh)
+
+    def _psv(self, layer, dz_top, dz_bottom, half):
+        """Layer `layer`'s P-SV columns at depths `dz_top = z - top` and `dz_bottom = z - bottom` (m)."""
+        if self.buoyancy is None:
+            return _psv_columns(self.k * dz_top, self.k * dz_bottom, self.lam[layer], self.mu[layer], half)
+        return _psv_columns_gravity(self.k, dz_top, dz_bottom, self.lam[layer], self.mu[layer], self.buoyancy[layer],
+                                    half)
 
     def at(self, z_receiver, derivatives=False):
         """`U`, `V`, `W` at the receiver depths: each `(n_z, n_k, n_sources)`.
@@ -340,7 +417,13 @@ class _Solution:
             zt = k[None, :] * (z - self.tops[which])
             zb = (np.zeros_like(zt) if half
                   else k[None, :] * (z - self.tops[which + 1]))
-            e = _psv_columns(zt, zb, self.lam[which], self.mu[which], half)
+            if self.buoyancy is None:
+                e = _psv_columns(zt, zb, self.lam[which], self.mu[which], half)
+            else:
+                dz_top = np.broadcast_to(z - self.tops[which], zt.shape)
+                dz_bottom = np.zeros_like(zt) if half else np.broadcast_to(z - self.tops[which + 1], zt.shape)
+                e = _psv_columns_gravity(k[None, :], dz_top, dz_bottom, self.lam[which], self.mu[which],
+                                         self.buoyancy[which], half)
             uv = np.einsum("zkri,kis->rzks", e[:, :, 0:2, :], self.c[:, self._col[which], :])
             out[0, pick], out[1, pick] = uv[0], uv[1]
             e_sh = _sh_columns(zt, zb, self.mu[which], half)
@@ -355,6 +438,9 @@ class _Solution:
                 out[3, pick] = kk * (MU_SCALE * rs[0] + lam * uv[1]) / (lam + 2.0 * mu)
                 out[4, pick] = kk * (MU_SCALE * rs[1] / mu - uv[0])
                 out[5, pick] = kk * MU_SCALE * t / mu
+        if self.buoyancy is not None and self._real:
+            self.imaginary = float(np.abs(out.imag).max() / max(np.abs(out.real).max(), 1e-300))
+            out = out.real
         return tuple(out)
 
 
@@ -476,6 +562,28 @@ def transform(U, V, W, k, dln, r, radial=False):
         h(u["ep"], 0), -h(v["ep"], 1),
     ]
     return np.stack(columns, axis=-1)
+
+
+def on_axis(U, V, W, k, dln):
+    """`transform`'s ten components at `r = 0`, exactly: `(..., 10)`.
+
+    On the axis only the order-0 Bessel function survives (`J_0(0) = 1`, `J_m(0) = 0` otherwise), so each component
+    is zero or a plain integral `int f(k) k dk`, here the trapezoid rule in `log k`. `transform` itself takes FFTLog's
+    first node there, which is at the edge of its range and unreliable when the wavenumbers stop short of the source's
+    own scale.
+    """
+    weights = np.full(k.size, dln)
+    weights[[0, -1]] *= 0.5
+
+    def integral(f):
+        return np.sum(f * (k * k * weights), axis=-1)
+
+    u = {name: U[..., i] for i, name in enumerate(SOURCE_TYPES)}
+    v = {name: V[..., i] for i, name in enumerate(SOURCE_TYPES)}
+    w = {name: W[..., i] for i, name in enumerate(SOURCE_TYPES)}
+    zero = np.zeros(U.shape[:-2])
+    ds = 0.5 * integral(v["ds"] + w["ds"])
+    return np.stack([zero, zero, zero, zero, ds, -ds, integral(u["cl"]), zero, integral(u["ep"]), zero], axis=-1)
 
 
 def transform_over_r(U, V, W, k, dln, r):

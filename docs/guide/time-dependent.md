@@ -24,8 +24,8 @@ patterns beside the slip, each with an amplitude \(\alpha_p\) and its own time f
 \(g_p\). The \(K\) fields are \(K\) copies of the fault joined into one mesh, so smoothing,
 bounds, cross-validation and resolution work as for one earthquake, and a series of any length
 reduces exactly to at most \(K\) virtual pairs per set of cells. The patterns come from the
-coseismic model itself: poroelastic rebound, and viscoelastic relaxation of a layered crust
-from tables this package computes (or PSGRN's, which add gravity).
+coseismic model itself: poroelastic rebound, and viscoelastic relaxation of a layered crust under
+gravity, from tables this package computes.
 
 **Interseismic.** Velocities are the rigid rotation of the block each point lies in, plus the
 elastic effect of the slip the faults are not taking:
@@ -186,9 +186,9 @@ monte_carlo(result, n=60).apply(lambda m: m.pattern_amplitudes["poroelastic"])
 
 ## Viscoelastic flow
 
-Viscoelastic relaxation of a layered crust goes in beside the afterslip as one pattern with one
-amplitude. `RelaxationTables.compute` makes the tables: the response of point sources at the
-surface, at any set of times after a step dislocation, per unit potency.
+Viscoelastic relaxation of a layered crust under gravity goes in beside the afterslip as one pattern
+with one amplitude. `RelaxationTables.compute` makes the tables: the response of point sources at
+the surface, at any set of times after a step dislocation, per unit potency.
 
 ```python
 from slipsolve import RelaxationTables, Rheology, TimeBasis, TimeDependentInversion, relaxation_pattern
@@ -211,10 +211,16 @@ inversion = TimeDependentInversion(mesh, series, TimeBasis.log_decay(1.0), engin
 - **Rheologies:** Maxwell (`eta_maxwell`), a Standard Linear Solid (`eta_kelvin` and `alpha`) or
   Burgers (both), in shear; the bulk modulus stays elastic. A Standard Linear Solid relaxes
   stress with the time `eta_kelvin (1 - alpha) / mu`. Sources must lie in elastic layers.
-- **No gravity.** Buoyancy matters for dip-slip relaxation over several relaxation times, where it
-  resists vertical motion. PSGRN (Wang, Lorenzo-Martín & Roth 2006) has it, and `run_psgrn` runs it
-  into the same tables (`PsgrnTables`), so `relaxation_pattern` takes either. Use a build of
-  PSGRN's 2020 release with the three time-domain corrections `slipsolve.psgrn` describes.
+- **Gravity** (on by default, `gravity=9.82` m/s^2; `gravity=0` leaves it out). The layers are
+  hydrostatically prestressed, so buoyancy resists vertical motion where density steps, at the
+  surface and between layers. The equations are the reduced viscoelastic-gravitational ones of
+  Wang, Lorenzo-Martín & Roth (2006, their eq. 10): buoyancy, with an adiabatic density gradient
+  inside each layer that keeps a compressible layer neutrally stable, and without self-gravitation
+  (a correction of order `2 pi G rho / (g k)`, 0.2% of the buoyancy at 100 km wavelength). Each
+  layer's solutions are exponentials in closed form, written so that they merge smoothly into the
+  elastic ones as gravity vanishes. Over a Maxwell mantle of 1e19 Pa s below a 30 km crust, it
+  takes 7% off a 14 km deep dip-slip source's relaxed uplift 60 km away after 10 years (11% after
+  100), under 1% within 10 km, and moves a strike-slip source's field by under 1%.
 - **Viscosity scales time:** multiply every viscosity by `c` and every time by `c`
   (`RelaxationTables.rescaled`), so one table set per profile shape serves a whole scan of
   uniform levels.
@@ -229,9 +235,13 @@ inversion = TimeDependentInversion(mesh, series, TimeBasis.log_decay(1.0), engin
     Maxwell half-space, read at its middle: 0.1-0.2% of the relaxation near the fault, with the
     fault's finite length the rest (0.3% at 80 km for a 4800 km fault);
   - a fully relaxed Standard Linear Solid equals the elastic solution with its relaxed modulus;
-  - against corrected PSGRN without gravity, 0.04-0.2% wherever PSGRN's time steps are fine
-    enough; its earliest samples are its least accurate, while each of these times is inverted
-    alone;
+  - against PSGRN (its 2020 release with three time-domain corrections), 0.04-0.2% of each
+    component's peak with or without gravity, wherever PSGRN's time steps are fine enough and,
+    with gravity, its wavenumber accuracy is tightened (its default leaves up to 3%); its earliest
+    samples are its least accurate, while each of these times is inverted alone;
+  - with gravity, each layer solution satisfies the layer equations to rounding, and the whole
+    solution matches a matrix-exponential solution of the same equations to 1e-12;
+  - at the axis (`r = 0`) the tables are the exact limits, not the transform's end;
   - the split into modes rebuilds the history to its `tolerance`.
 
 ## Interseismic: rigid blocks plus back-slip

@@ -1,8 +1,9 @@
 """`slipsolve.relaxation`: our own viscoelastic tables, by the correspondence principle and Talbot's method.
 
 Oracles: Talbot's method on transforms whose inverses are known; the fully relaxed state of a Standard Linear Solid,
-which our elastic code computes directly; Savage & Prescott's (1978) solution for a long strike-slip fault in an elastic
-layer over a Maxwell half-space; the exact scaling of time with viscosity; and PSGRN, when an executable is found.
+which our elastic code computes directly, with and without gravity; Savage & Prescott's (1978) solution for a long
+strike-slip fault in an elastic layer over a Maxwell half-space; the exact scaling of time with viscosity; and, for
+gravity, the layer equations themselves and the elastic limit as `g` vanishes.
 """
 
 import types
@@ -15,8 +16,9 @@ from slipsolve import wavenumber as wn
 from slipsolve.basis import make_basis
 from slipsolve.edgrn import VelocityModel
 from slipsolve.inversion import assemble_design
-from slipsolve.relaxation import (COMPONENTS, RELAXATION_K_RANGE, RELAXATION_N_K, SECONDS_PER_DAY, RelaxationTables,
-                                  Rheology, _talbot, relaxation_history, relaxation_pattern, shear_modulus)
+from slipsolve.relaxation import (COMPONENTS, GRAVITY, RELAXATION_K_RANGE, RELAXATION_N_K, SECONDS_PER_DAY,
+                                  RelaxationTables, Rheology, _layers, _talbot, relaxation_history, relaxation_pattern,
+                                  shear_modulus)
 
 DAYS_PER_YEAR = 365.25
 
@@ -57,12 +59,13 @@ def test_shear_modulus_limits():
     assert abs(1.0 / shear_modulus(maxwell, mu, np.array([s * (1 + 1e-9)]))[0]) < 1e-6 / mu
 
 
-def test_relaxed_standard_linear_solid_is_the_relaxed_elastic_field():
+@pytest.mark.parametrize("gravity", [0.0, GRAVITY])
+def test_relaxed_standard_linear_solid_is_the_relaxed_elastic_field(gravity):
     """Long after its relaxation time a Standard Linear Solid is an elastic body with the modulus alpha mu."""
     alpha, eta = 0.5, 1e19
     late = 1e4 * eta * (1 - alpha) / (3400.0 * 4620.0 ** 2) / SECONDS_PER_DAY        # 1e4 relaxation times, days
     tables = RelaxationTables.compute(crust(), [Rheology(30e3, None, eta_kelvin=eta, alpha=alpha)], times=[late],
-                                      **GRID)
+                                      gravity=gravity, **GRID)
     vp, vs, rho = 8000.0, 4620.0, 3400.0
     mu = rho * vs ** 2
     kappa = rho * vp ** 2 - 4.0 / 3.0 * mu
@@ -73,10 +76,12 @@ def test_relaxed_standard_linear_solid_is_the_relaxed_elastic_field():
     k, dln = wn.wavenumbers(RELAXATION_K_RANGE, RELAXATION_N_K)
 
     def whole(model, zs, r):
-        tops, lam, mu_ = wn.layer_stack(model)
+        tops, lam, mu_, rho_, _ = _layers(model)
         j = int(wn._layer_index(tops, zs))
         psv, sh = wn.source_jumps(lam[j], mu_[j])
-        return wn.transform(*wn._Solution(k, tops, lam, mu_, zs, psv, sh).at(np.array([0.0])), k, dln, r)[0]
+        buoyancy = rho_ * gravity if gravity else None
+        return wn.transform(*wn._Solution(k, tops, lam, mu_, zs, psv, sh, buoyancy=buoyancy).at(np.array([0.0])),
+                            k, dln, r)[0]
 
     keys = [(kind, comp) for kind, comps in COMPONENTS.items() for comp in comps]
     r = tables.r[1:]
@@ -121,7 +126,7 @@ def test_savage_prescott_long_fault():
     tau_days = 2.0 * eta / mu / SECONDS_PER_DAY
     ratios = np.array([0.5, 1.0, 2.0])
     tables = RelaxationTables.compute(uniform, [Rheology(layer, None, eta_maxwell=eta)], times=ratios * tau_days,
-                                      r_max=2500e3, nr=2501, z_min=250.0, z_max=19750.0, nz=40)
+                                      r_max=2500e3, nr=2501, z_min=250.0, z_max=19750.0, nz=40, gravity=0.0)
     half_length = 2400e3 / 111.2e3
     trace = FaultTrace(np.array([30.0, 30.0]), np.array([-half_length, half_length]), name="long")
     frame = trace.local_frame()
@@ -184,20 +189,74 @@ def test_sources_must_be_elastic_and_off_interfaces():
                                  r_max=10e3, nr=11, z_min=8e3, z_max=16e3, nz=2)
 
 
-def test_against_psgrn_late_samples(tmp_path):
-    """Against PSGRN without gravity, from its 64th sample on, where its early-time error has gone."""
-    from slipsolve.psgrn import find_psgrn, run_psgrn
+def _layer_system(k, lam, mu, buoyancy):
+    """The P-SV layer equations with buoyancy, `Y' = A Y` for `Y = (U, V, R, S)`, written out here."""
+    alpha, c, kappa = lam + 2 * mu, lam + mu, lam + 2 * mu / 3
+    A = np.zeros((4, 4), dtype=complex)
+    A[0, 1], A[0, 2] = lam * k / alpha, 1 / alpha
+    A[1, 0], A[1, 3] = -k, 1 / mu
+    A[2, 0], A[2, 1], A[2, 3] = buoyancy ** 2 / kappa, -buoyancy * k, k
+    A[3, 0], A[3, 1], A[3, 2] = -buoyancy * k, 4 * k * k * mu * c / alpha, -k * lam / alpha
+    return A
 
-    try:
-        find_psgrn()
-    except FileNotFoundError:
-        pytest.skip("no PSGRN executable")
+
+@pytest.mark.parametrize("lam, mu", [(3e10, 3e10), (3e10 + 2e10j, 1e8 - 3e8j), (5e10 - 1e7j, 1e3 + 1e3j)])
+def test_gravity_layer_solutions_satisfy_the_layer_equations(lam, mu):
+    """Every column, growing and decaying, elastic and nearly relaxed, against fourth-order finite differences."""
+    buoyancy = 3300.0 * GRAVITY
+    for k in (1e-9, 3e-7, 1e-6, 1e-4, 1e-2):
+        A = _layer_system(k, lam, mu, buoyancy)
+        for z0 in (0.3 / k, 2.0 / k):
+            def columns(z):
+                e = wn._psv_columns_gravity(np.array([k]), np.array([z]), np.array([z - 5.0 / k]), lam, mu, buoyancy,
+                                            False)[0]
+                e[2:4] *= k * wn.MU_SCALE                                    # undo the traction rows' scaling
+                return e
+            h = 1e-2 / k
+            slope = (-columns(z0 + 2 * h) + 8 * columns(z0 + h) - 8 * columns(z0 - h) + columns(z0 - 2 * h)) / (12 * h)
+            expected = A @ columns(z0)
+            assert np.abs(slope - expected).max() < 1e-7 * (np.abs(expected).max() + np.abs(slope).max()), (k, z0)
+
+
+def test_gravity_vanishes_into_the_elastic_field():
+    """Without gravity the propagator is the elastic one; with it the coseismic field moves little, linearly in `g`."""
+    tops, lam, mu, rho, _ = _layers(crust())
+    k, dln = wn.wavenumbers(RELAXATION_K_RANGE, 1024)
+    r = np.array([1e3, 5e3, 20e3, 50e3, 100e3])
+    psv, sh = wn.source_jumps(lam[0], mu[0])
+
+    def field(g):
+        buoyancy = rho * g if g else None
+        return wn.transform(*(a[0] for a in wn._Solution(k, tops, lam, mu, 8e3, psv, sh, buoyancy=buoyancy)
+                              .at(np.array([0.0]))), k, dln, r)
+
+    plain = field(0.0)
+    small, full = field(1e-3) - plain, field(GRAVITY) - plain
+    assert np.abs(full).max() < 5e-3 * np.abs(plain).max()
+    scaled = full * 1e-3 / GRAVITY
+    assert np.abs(small - scaled).max() < 1e-2 * np.abs(small).max()
+
+
+def test_gravity_resists_dip_slip_relaxation():
+    """Buoyancy holds back the vertical relaxation of a dip-slip source and barely touches a strike-slip one."""
     rheo = [Rheology(30e3, None, eta_maxwell=1e19)]
-    theirs = run_psgrn(crust(), rheo, tmp_path, nt=256, window_days=10 * DAYS_PER_YEAR, gravity=0.0, **GRID)
-    pick = np.array([64, 128, 255])
-    ours = RelaxationTables.compute(crust(), rheo, times=theirs.times[pick], **GRID)
-    for kind, comps in COMPONENTS.items():
-        for comp in comps:
-            a = theirs.postseismic[kind][comp][pick][:, 1:]
-            b = ours.postseismic[kind][comp][1:][:, 1:]
-            assert np.abs(a - b).max() < 5e-3 * np.abs(a).max(), (kind, comp)
+    late = [10 * DAYS_PER_YEAR]
+    on = RelaxationTables.compute(crust(), rheo, times=late, **GRID)
+    off = RelaxationTables.compute(crust(), rheo, times=late, gravity=0.0, **GRID)
+    uplift_on, uplift_off = (abs(t.postseismic["ds"]["uz"][1][-1, -1]) for t in (on, off))     # 60 km away
+    assert uplift_on < 0.97 * uplift_off
+    strike_on, strike_off = (t.postseismic["ss"]["ur"][1] for t in (on, off))
+    assert np.abs(strike_on - strike_off).max() < 0.02 * np.abs(strike_off).max()
+
+
+def test_the_axis_is_exact():
+    """At `r = 0` a strike-slip source's displacement vanishes, and the other columns join their neighbours."""
+    tables = RelaxationTables.compute(crust(), [Rheology(30e3, None, eta_maxwell=1e19)], times=[10 * DAYS_PER_YEAR],
+                                      r_max=6e3, nr=61, z_min=2000.0, z_max=14000.0, nz=4)
+    for table in (tables.coseismic, {kind: {c: v[1] for c, v in comps.items()} for kind, comps in tables.postseismic.items()}):
+        for comp in ("uz", "ur", "ut"):
+            assert np.all(table["ss"][comp][0] == 0.0)
+        for kind, comp in (("ds", "ur"), ("ds", "ut"), ("cl", "uz")):
+            values = table[kind][comp]
+            step = np.abs(values[1] - values[2]).max()                       # the change over 100 m
+            assert np.abs(values[0] - values[1]).max() < 2.0 * step + 1e-6 * np.abs(values).max(), (kind, comp)

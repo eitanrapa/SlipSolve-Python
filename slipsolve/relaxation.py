@@ -11,9 +11,12 @@ Talbot's method (Talbot 1979, on the fixed contour of Abate & Valkó 2004) bring
 - What is inverted is the postseismic part alone, the response less the coseismic, for each output time on its own
   contour. So the times need not be uniform, and the half-space part of the source's field, which does not change with
   time, never enters.
-- There is no gravity. It matters for dip-slip relaxation over long times, where the buoyancy of the surface and of
-  density steps resists vertical motion. `slipsolve.psgrn` runs PSGRN (Wang, Lorenzo-Martín & Roth 2006), which has it,
-  into the same tables.
+- **Gravity** (on by default, `gravity=` in m/s^2): the layers are hydrostatically prestressed, so buoyancy resists
+  vertical motion where density steps, at the surface and between layers. This is the reduced viscoelastic-gravitational
+  problem of Wang, Lorenzo-Martín & Roth (2006, their eq. 10, after Rundle 1982): buoyancy with an adiabatic density
+  gradient `rho^2 g / kappa` inside each layer, which keeps a compressible layer neutrally stable, and no
+  self-gravitation (a correction of order `2 pi G rho / (g k)`: 0.2% of the buoyancy at 100 km wavelength). It matters
+  for dip-slip relaxation over long times; the strike-slip field barely moves.
 
 The rest does not depend on where the tables came from:
 
@@ -22,7 +25,8 @@ The rest does not depend on where the tables came from:
   relaxation goes into the postseismic mode as a `slipsolve.patterns.Pattern` with one amplitude.
 
 **Accuracy.** Against Savage & Prescott's (1978) solution for a long strike-slip fault in an elastic layer over a Maxwell
-half-space, and against the fully relaxed state of a Standard Linear Solid computed elastically, as the tests check.
+half-space, and against the fully relaxed state of a Standard Linear Solid computed elastically, as the tests check;
+gravity's layer solutions satisfy the layer equations to rounding, and vanish into the elastic ones with `g`.
 Talbot's method with the default 16 terms is good to about 1e-9 of each table; the tables' distance and depth spacing
 limit the integration over a mesh, as for any point-source tables.
 """
@@ -50,6 +54,8 @@ RELAXATION_K_RANGE = (1e-10, 1.0)
 RELAXATION_N_K = 2048
 #: How many Laplace variables one propagator solve carries at once (each a stretch of `n_k` wavenumbers).
 _LAPLACE_CHUNK = 4
+#: The acceleration of gravity in the buoyancy terms (m/s^2), as Wang et al. (2006) take it.
+GRAVITY = 9.82
 
 
 class Rheology:
@@ -62,7 +68,8 @@ class Rheology:
     - `eta_kelvin=None` (or `alpha=1`) is Maxwell;
     - `eta_maxwell=None` is a Standard Linear Solid.
 
-    `alpha` is the fully relaxed over the unrelaxed modulus of the Kelvin part, `mu_K / (mu_K + mu)` in PSGRN's terms.
+    `alpha` is the fully relaxed over the unrelaxed modulus of the Kelvin part, `mu_K / (mu_K + mu)` (as in Wang et al.
+    2006).
     A Standard Linear Solid relaxes stress with the time `eta_kelvin (1 - alpha) / mu` and creeps with
     `eta_kelvin (1 - alpha) / (alpha mu)`. A Maxwell body relaxes stress with `eta_maxwell / mu`. The bulk modulus
     stays elastic.
@@ -86,8 +93,8 @@ class Rheology:
         """Whether `depth` lies in `[top, bottom)`."""
         return depth >= self.top and (self.bottom is None or depth < self.bottom)
 
-    def psgrn(self):
-        """PSGRN's `eta1 eta2 alpha` (Kelvin, Maxwell, alpha), with 0 for infinite."""
+    def _key(self):
+        """`(eta_kelvin, eta_maxwell, alpha)`, with 0 for infinite: equal keys, equal rheologies."""
         return (0.0 if self.eta_kelvin is None else self.eta_kelvin,
                 0.0 if self.eta_maxwell is None else self.eta_maxwell,
                 self.alpha)
@@ -169,7 +176,7 @@ def _elastic(rheology):
 
 
 def _layers(model, rheology=()):
-    """`(tops, lam, mu, rheologies)`: constant layers, cut wherever an elastic property or the rheology changes.
+    """`(tops, lam, mu, rho, rheologies)`: constant layers, cut wherever an elastic property or the rheology changes.
 
     The last is the half-space. A rheology is `None` where the layer is elastic.
     """
@@ -186,7 +193,7 @@ def _layers(model, rheology=()):
     cuts = sorted(c for c in cuts if c >= 0.0)
     if cuts[0] != 0.0:
         cuts = [0.0] + cuts
-    tops, lams, mus, flows = [], [], [], []
+    tops, lams, mus, rhos, flows = [], [], [], [], []
     for top in cuts:
         _, vp, vs, rho = [layer for layer in layers if layer[0] <= top][-1]
         mu = rho * vs ** 2
@@ -194,27 +201,37 @@ def _layers(model, rheology=()):
         flow = next((r for r in rheology if r.contains(top)), None)
         flow = None if _elastic(flow) else flow
         same = (tops and np.isclose(lams[-1], lam, rtol=1e-12) and np.isclose(mus[-1], mu, rtol=1e-12)
+                and np.isclose(rhos[-1], rho, rtol=1e-12)
                 and (flows[-1] is flow or (flows[-1] is not None and flow is not None
-                                           and flows[-1].psgrn() == flow.psgrn())))
+                                           and flows[-1]._key() == flow._key())))
         if same:
             continue
         tops.append(top)
         lams.append(lam)
         mus.append(mu)
+        rhos.append(rho)
         flows.append(flow)
-    return np.array(tops), np.array(lams), np.array(mus), flows
+    return np.array(tops), np.array(lams), np.array(mus), np.array(rhos), flows
 
 
 def _one_depth(task):
     """One source depth's coseismic `(nr, 8)` and postseismic `(nt, nr, 8)` rows, in `COMPONENTS` order."""
-    tops, lam, mu, flows, z_source, seconds, r, k_range, n_k, terms = task
+    tops, lam, mu, rho, flows, gravity, z_source, seconds, r, k_range, n_k, terms = task
     k, dln = wn.wavenumbers(k_range, n_k)
     j = int(wn._layer_index(tops, z_source))
     psv, sh = wn.source_jumps(lam[j], mu[j])
     surface = np.array([0.0])
-    elastic = wn._Solution(k, tops, lam, mu, z_source, psv, sh).at(surface)
+    buoyancy = rho * float(gravity) if gravity else None
+    elastic = wn._Solution(k, tops, lam, mu, z_source, psv, sh, buoyancy=buoyancy).at(surface)
     half = wn._Solution(k, tops[:1], lam[j:j + 1], mu[j:j + 1], z_source, psv, sh).at(surface)
-    coseismic = wn.transform(*(a[0] - b[0] for a, b in zip(elastic, half)), k, dln, r)[:, :8]
+    axis = r == 0.0
+
+    def to_space(U, V, W):
+        out = wn.transform(U, V, W, k, dln, r)[:, :8]
+        out[axis] = wn.on_axis(U[None], V[None], W[None], k, dln)[0, :8]
+        return out
+
+    coseismic = to_space(*(a[0] - b[0] for a, b in zip(elastic, half)))
     bulk = lam + 2.0 * mu / 3.0
     post = np.zeros((seconds.size, r.size, 8))
     for i, t in enumerate(seconds):
@@ -228,19 +245,19 @@ def _one_depth(task):
             mu_s = np.array([shear_modulus(flow, m, s) for flow, m in zip(flows, mu)])        # (n_layers, n_s)
             lam_s = bulk[:, None] - 2.0 * mu_s / 3.0
             fields = wn._Solution(np.tile(k, s.size), tops, np.repeat(lam_s, k.size, axis=1),
-                                  np.repeat(mu_s, k.size, axis=1), z_source, psv, sh).at(surface)
+                                  np.repeat(mu_s, k.size, axis=1), z_source, psv, sh, buoyancy=buoyancy).at(surface)
             for acc, field, still in zip(total, fields, elastic):
                 change = field[0].reshape(s.size, k.size, -1) - still[0][None]
                 acc += np.real(np.einsum("j,jkc->kc", w, change))
-        post[i] = wn.transform(*total, k, dln, r)[:, :8]
+        post[i] = to_space(*total)
     return coseismic, post
 
 
 class RelaxationTables:
     """Displacement tables of a layered viscoelastic half-space, on a uniform `(r, z)` grid at `times` (days, the first 0).
 
-    `coseismic[kind][component]` is `(nr, nz)`: the elastic response less a half-space, the source layer's (`compute`)
-    or the receiver layer's (PSGRN); the relaxation uses only the postseismic part.
+    `coseismic[kind][component]` is `(nr, nz)`: the elastic response less the source layer's half-space; the relaxation
+    uses only the postseismic part.
     `postseismic[kind][component]` is `(nt, nr, nz)`: the response at each time less the coseismic, 0 at `times[0]`.
     Kinds are `ss`, `ds`, `cl`. Components are `uz` (positive down), `ur` and `ut`, as `slipsolve.edgrn.EdgrnTables`
     has them: per unit potency, the azimuthal factor stripped. `interfaces` are the depths no interpolation crosses.
@@ -262,19 +279,19 @@ class RelaxationTables:
     @classmethod
     def compute(cls, model, rheology=(), *, r_max=300e3, nr=301, z_min=500.0, z_max=29500.0, nz=30, times=None,
                 window_days=365.25, nt=48, first_day=None, terms=TALBOT_TERMS, k_range=RELAXATION_K_RANGE,
-                n_k=RELAXATION_N_K, workers=None):
+                n_k=RELAXATION_N_K, gravity=GRAVITY, workers=None):
         """Our own tables for a `slipsolve.edgrn.VelocityModel` with a `Rheology` per depth range.
 
         - Distances are uniform from 0 to `r_max` (`nr`) and source depths from `z_min` to `z_max` (`nz`), all in
           elastic layers and off every interface, receivers at the surface.
         - `times` (days) are the output times. By default 0, then `nt - 1` log-spaced from `first_day` (default
           `window_days / 1000`) to `window_days`; any times work, each is inverted alone.
+        - `gravity` (m/s^2) is the acceleration of the buoyancy terms; 0 leaves them out.
         - `terms` is the number of Talbot terms; `workers` runs the source depths in that many processes.
 
-        Depths outside every `Rheology` are elastic. The tables follow PSGRN's (`slipsolve.psgrn`), so either can go
-        to `relaxation_pattern`.
+        Depths outside every `Rheology` are elastic. The tables are laid out as Wang et al.'s (2006).
         """
-        tops, lam, mu, flows = _layers(model, rheology)
+        tops, lam, mu, rho, flows = _layers(model, rheology)
         r = np.linspace(0.0, float(r_max), int(nr))
         z = np.linspace(float(z_min), float(z_max), int(nz))
         for depth in z:
@@ -291,8 +308,8 @@ class RelaxationTables:
             times = np.concatenate([[0.0], times])
         if np.any(np.diff(times) <= 0.0):
             raise ValueError("times must increase")
-        tasks = [(tops, lam, mu, flows, depth, times * SECONDS_PER_DAY, r, tuple(k_range), int(n_k), int(terms))
-                 for depth in z]
+        tasks = [(tops, lam, mu, rho, flows, float(gravity), depth, times * SECONDS_PER_DAY, r, tuple(k_range), int(n_k),
+                  int(terms)) for depth in z]
         if workers and int(workers) > 1:
             with ProcessPoolExecutor(int(workers)) as pool:
                 rows = list(pool.map(_one_depth, tasks))
@@ -305,7 +322,7 @@ class RelaxationTables:
             coseismic[kind][comp] = np.stack([row[0][:, c] for row in rows], axis=-1)
             postseismic[kind][comp] = np.stack([row[1][:, :, c] for row in rows], axis=-1)
         attrs = {"source": "slipsolve.relaxation", "rheology": [repr(f) for f in rheology], "terms": int(terms),
-                 "k_range": list(k_range), "n_k": int(n_k)}
+                 "k_range": list(k_range), "n_k": int(n_k), "gravity": float(gravity)}
         return cls(r, z, times, coseismic, postseismic, interfaces=tops[1:], attrs=attrs)
 
     def _edgrn_dict(self, values):

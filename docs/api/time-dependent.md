@@ -12,8 +12,6 @@
 
 ::: slipsolve.relaxation
 
-::: slipsolve.psgrn
-
 ::: slipsolve.regional
 
 ::: slipsolve.tsurf

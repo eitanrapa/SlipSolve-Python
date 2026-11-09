@@ -106,7 +106,6 @@ from .layout import MeshLayout, graded_layout, lloyd_layout, triangulate
 from .mesh import FaultMesh
 from .resample import ARCSEC_10, frame_lattice, resample_all, resample_to_frame
 from .patterns import Pattern, poroelastic_pattern, separate_history
-from .psgrn import PsgrnTables, run_psgrn
 from .relaxation import RelaxationTables, Rheology, relaxation_history, relaxation_pattern
 from .regional import RegionalModel, celeri_inputs, fit_frame_rotation, mesh_edges, west_first
 from .predict import (iterate_sampling, model_rms_min, predicted_los,
@@ -172,7 +171,6 @@ __all__ = [
     "NodeBasis",
     "Observations",
     "Pattern",
-    "PsgrnTables",
     "RegionalModel",
     "RelaxationTables",
     "RemainderTables",
@@ -233,7 +231,6 @@ __all__ = [
     "poroelastic_pattern",
     "relaxation_history",
     "relaxation_pattern",
-    "run_psgrn",
     "predicted_los",
     "prepare_stations",
     "ramp_content",
