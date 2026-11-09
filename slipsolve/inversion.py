@@ -2027,7 +2027,7 @@ class SlipModel:
         engine_name = str(model.attrs.get("engine", HalfSpaceTDE.name))
         nu = float(model.attrs.get("engine_nu", 0.25))
         described = options.get("bimaterial")
-        if described and described.get("engine") == HalfSpaceTDE.name:
+        if described and described.get("engine") == HalfSpaceTDE.name and "curvature" not in described:
             from .bimaterial import Bimaterial
 
             # A contrast round the closed-form engine is pure arithmetic: rebuild it.

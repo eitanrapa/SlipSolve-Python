@@ -82,6 +82,7 @@ from .covariance import (
     whitening_factors,
 )
 from .crust import VelocityModel
+from .curvature import Curvature, CurvatureTables
 from .diagnostics import (
     cell_size_ladder,
     noise_floor,
@@ -147,6 +148,8 @@ __all__ = [
     "Bimaterial",
     "BootstrapResult",
     "CovarianceModel",
+    "Curvature",
+    "CurvatureTables",
     "DipSweep",
     "ElementBasis",
     "Ensemble",

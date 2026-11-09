@@ -11,6 +11,7 @@ takes any of them and nothing else changes.
 | [`LayeredTDE`](../api/elastic-models.md#slipsolve.layered_tde.LayeredTDE) | layered half-space | the package's own tables; exact near the fault, fields at depth |
 | [`HeterogeneousEngine`](heterogeneity.md) | any \(\lambda(\mathbf{x}), \mu(\mathbf{x})\) | voxels on a layered reference |
 | [`Bimaterial`](bimaterial.md) | two blocks of different rigidity | wraps another engine |
+| [`Curvature`](#earths-curvature-and-gravity) | the same layers on a sphere, with gravity | wraps another engine; the far field |
 
 ## Homogeneous half-space
 
@@ -107,6 +108,68 @@ inversion = SlipInversion(mesh, Observations.concat([obs, gnss]), engine=engine)
   fit.
 - Forward maps (`SlipModel.surface_displacement`, `predicted_los`) and the patterns beside the
   slip are computed on the flat surface.
+
+## Earth's curvature and gravity
+
+Every engine is flat and non-gravitating. Near a fault that costs little, but by a few
+hundred kilometres both the sphere and gravity change the field by several percent.
+`Curvature` wraps any engine and adds the difference, from tables computed once per crust:
+
+```python
+from slipsolve import Curvature, CurvatureTables, LayeredTDE
+
+far = CurvatureTables.compute(crust, r_max=800e3, z_max=30.5e3, workers=6)  # once per crust; about a minute
+far.save("crust_far_field.npz")                                            # CurvatureTables.load(...) later
+engine = Curvature(LayeredTDE(tables), far)
+inversion = SlipInversion(mesh, obs, engine=engine, velocity_model=crust)
+```
+
+- **What it adds.** The field of the crust's layers on a sphere of radius 6371 km (the deepest
+  layer filling the ball beneath) less the same layers flat. Then the flat layers' buoyancy: the
+  layers hydrostatically prestressed, as the [relaxation tables](time-dependent.md) have them
+  (Wang, Lorenzo-Martín & Roth 2006). `gravity=0` leaves gravity out.
+- **How large.** The table gives each effect relative to the local field at 100-500 km, for a source
+  at 10 km in a layered crust:
+
+  | One azimuth each | Curvature | Gravity |
+  |---|---|---|
+  | Vertical strike-slip fault, horizontal | 2-10% | under 0.4% |
+  | Vertical strike-slip fault, vertical | 4-12% | 4-9%, of the opposite sign |
+  | 45° thrust, horizontal | 0.3-1.7% | 2-11% |
+  | 45° thrust, vertical | 5-15% | 6-26%, of the same sign |
+
+  Within 50 km both are about 1% of the horizontal field or less. So correct both or neither.
+  Curvature alone over-corrects a strike-slip fault's vertical field, where the two nearly
+  cancel, and leaves out most of a thrust's change.
+- **How it is computed.** The sphere is solved degree by degree. In each shell the solutions are
+  powers of the radius (Love's), handled with the global-matrix method of the flat tables. A point
+  source becomes a displacement jump plus a surface force, which carries the curvature of the source
+  sphere. The sphere and both flat fields share one Gaussian taper in wavenumber, so their common
+  near field cancels. Each difference is then good wherever it is smooth on the taper's length
+  (`1 / k_taper`, 1 km by default), which covers everywhere it is not negligible.
+- **How it was checked.**
+  - As the radius grows, the sphere becomes the flat layers, the difference falling as `1 / R`.
+  - Degree by degree, it satisfies Betti's reciprocal theorem against the same sphere loaded at its
+    surface, to 1e-8.
+  - Its far field agrees with STATIC1D (Pollitz 1996, a non-gravitating sphere) minus the flat engine.
+    For a 240 km strike-slip rupture, at 14 GNSS stations 190-800 km away, the difference is 0.06 mm
+    rms. The correction there is 0.35 mm rms: 4-8% of the horizontal field within 550 km, 7-18% at
+    660-800 km. The differences reach 5% of the field at the farthest stations, more than STATIC1D's
+    own 1-2% spread between truncation degrees there. So this comparison bounds the correction's
+    error, at about a fifth of the correction, more than it tests it finely.
+- **Cost.** A few seconds per source depth for the tables. Adding the correction to 3,300
+  elements and 17,000 points took about 4 minutes in one run (`order=2`: four point sources per
+  element).
+- **With the other options.**
+  - Topography lowers the correction with the fault, as for any engine.
+  - Wrap the outermost engine: `Curvature(HeterogeneousEngine(...), far)`, or around a
+    `Bimaterial`. The correction is computed on the layered reference, so its product with the
+    voxels' or the contrast's effect is left out.
+  - The product of curvature and gravity is left out too, about 1% of the field at 500 km.
+- **Frame.** Distances and azimuths are those of the local frame (a transverse Mercator), whose
+  own distortion is a few tenths of a percent at 500 km. Its grid north also turns away from
+  true north, by about the longitude offset times the sine of the latitude. The time-dependent modes
+  rotate the look vectors for that (`frame_looks`); `SlipInversion` takes them as given.
 
 ## Rigidity in the moment
 
