@@ -237,17 +237,26 @@ def assemble_design(engine, mesh, basis, points, elevation=None, step=TOPOGRAPHY
     its own height, the source deeper below it by as much (Williams & Wadge 1998). Points are evaluated on levels
     `step` apart, the fault lowered by each level (`FaultMesh.lowered`), and each point interpolated linearly between
     the two levels around its elevation, which is exact on a level and second order between. A layered engine keeps
-    its layers under the surface, so they move with it; an engine whose structure would stay put (its
-    `supports_topography` false, as for voxels) is refused.
+    its layers under the surface, so they move with it. An engine with its own way (`native_topography`, as the voxel
+    engine) is handed the elevations; one whose structure would stay put (`supports_topography` false) is refused.
     """
     if elevation is None or not np.any(np.asarray(elevation, dtype=float)):
         return _assemble(engine, mesh, basis, points)
     if not getattr(engine, "supports_topography", True):
         raise NotImplementedError(f"{type(engine).__name__} holds structure that would not move with the fault, so the "
                                   "elevation shift does not apply to it yet")
-    elevation = np.asarray(elevation, dtype=float).ravel()
+    if getattr(engine, "native_topography", False):
+        return engine.los_matrix(mesh, *points, basis=basis, elevation=elevation, step=step)
     points = [np.asarray(p, dtype=float).ravel() for p in points]
-    if elevation.size != points[0].size or not np.all(np.isfinite(elevation)):
+    return _by_levels(elevation, step, points[0].size,
+                      lambda depth, rows: _assemble(engine, mesh.lowered(depth), basis, [p[rows] for p in points]))
+
+
+def _by_levels(elevation, step, n, evaluate):
+    """The elevation shift's matrix: `evaluate(depth, rows)` gives the rows `rows` with the sources lowered by
+    `depth`; each row is evaluated on the levels `step` apart around its elevation and interpolated between them."""
+    elevation = np.asarray(elevation, dtype=float).ravel()
+    if elevation.size != n or not np.all(np.isfinite(elevation)):
         raise ValueError("elevation needs one finite value per point")
     step = float(step)
     position = elevation / step
@@ -257,7 +266,7 @@ def assemble_design(engine, mesh, basis, points, elevation=None, step=TOPOGRAPHY
     for level in np.unique(np.concatenate([low, (low + 1.0)[above > 0]])):
         weight = np.where(low == level, 1.0 - above, 0.0) + np.where((low + 1.0 == level) & (above > 0), above, 0.0)
         rows = np.flatnonzero(weight > 0)
-        g = _assemble(engine, mesh.lowered(level * step), basis, [p[rows] for p in points])
+        g = evaluate(level * step, rows)
         if out is None:
             out = np.zeros((elevation.size, g.shape[1]))
         out[rows] += weight[rows, None] * g

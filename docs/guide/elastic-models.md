@@ -90,9 +90,13 @@ inversion = SlipInversion(mesh, Observations.concat([obs, gnss]), engine=engine)
   about 1e-4 of the largest entry between levels for receivers 2 km from the fault. Every
   inversion takes them: `SlipInversion`, `InterseismicInversion`, `TimeDependentInversion`
   (each series' cells carry their heights).
-- **Which engines.** The half-space, layered and bimaterial engines: a layered engine keeps its
-  layers under the local surface, so they move with it. A voxel model (`HeterogeneousEngine`)
-  refuses heights for now, since lowering the fault alone would move it against its voxels.
+- **Which engines.** All of them. A layered engine keeps its layers under the local surface, so
+  they move with it. In `HeterogeneousEngine` the voxels, like the fault, are fixed beneath the
+  datum, so each point sees both the fault and the voxels' induced moments deeper by its height
+  (a voxel lowered across a layer interface is cut there); the moments are solved once beneath
+  the datum, so topography's effect on them is left out. It is about topography's own effect
+  times the heterogeneity's: beside a 15 km deep fault, with a block 30% softer at 2-8 km and
+  every point 0.4-1 km high, 5% of topography's effect (1% for the block at 10-16 km).
 - **What it is.** A first-order correction: it moves the surface, not its slope. It is good
   where slopes are moderate and the relief is small against the distance to the slip
   (Williams & Wadge 1998; Cayol & Cornet 1998 compared it with full topography). Steep relief

@@ -1157,37 +1157,68 @@ def _los_share(specs, x, y, z, look):
     return _los_columns(worker_engine(), specs, x, y, z, look)
 
 
-def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None):
+def _lowered_specs(voxels, voxel_ids, lower):
+    """`(specs, owner)`: the voxels `voxel_ids` moved down by `lower` (m), each cut where it now crosses one of the
+    reference's interfaces, and the position in `voxel_ids` each piece belongs to."""
+    if lower == 0.0:
+        return [voxels.spec(i) for i in voxel_ids], np.arange(len(voxel_ids))
+    interfaces = np.asarray(voxels.tables.tops[1:], dtype=float)
+    specs, owner = [], []
+    for k, i in enumerate(voxel_ids):
+        spec = voxels.spec(i)
+        if spec[0] != "box":
+            raise NotImplementedError("the elevation shift is built for voxels, not for fault cells")
+        x_range, y_range, (top, bottom) = spec[1]
+        top, bottom = top + lower, bottom + lower
+        if top < 0.0:
+            raise ValueError(f"raising the voxels by {-lower:.0f} m would put one above the free surface; lower the datum")
+        cuts = [top] + [float(c) for c in interfaces if top + 1e-6 < c < bottom - 1e-6] + [bottom]
+        for a, b in zip(cuts[:-1], cuts[1:]):
+            specs.append(("box", (x_range, y_range, (a, b))))
+            owner.append(k)
+    return specs, np.asarray(owner)
+
+
+def los_operator(voxels, engine, x, y, look=None, workers=None, subset=None, lower=0.0):
     """`H`, `(npts, 6 n)`: line of sight at surface points per unit moment density in each voxel.
 
     `look` is `(look_e, look_n, look_u)`; without it, east/north/up, `(npts, 3, 6 n)`.
     `workers` > 1 shares the voxels among that many processes. `subset` (indices of active
     voxels, increasing) gives only their columns, `6 len(subset)` of them, in that order.
+    `lower` (m) moves the voxels down for the elevation shift (`HeterogeneousEngine.los_matrix`); one that then
+    crosses an interface of the reference is cut there, its pieces' fields summed.
     """
     from .layered_tde import engine_pool
 
     x, y, z = _as_points(x, y, None)
-    _refuse_on_faces(voxels, x, y, z)
+    lower = float(lower)
+    if lower == 0.0:
+        _refuse_on_faces(voxels, x, y, z)
     voxel_ids = np.arange(voxels.n_active) if subset is None else np.asarray(subset, dtype=int)
     n = voxel_ids.size
+    specs, owner = _lowered_specs(voxels, voxel_ids, lower)
     if look is not None:
         look = np.stack([np.asarray(v, dtype=float).ravel() for v in look], axis=1)
-        out = np.zeros((x.size, 6 * n))
-    else:
-        out = np.zeros((x.size, 3, 6 * n))
+    pieces = np.zeros((x.size, 6 * len(specs)) if look is not None else (x.size, 3, 6 * len(specs)))
     pool = engine_pool(engine, workers)
     if pool is not None:
         count = pool.pool._max_workers if hasattr(pool, "pool") else int(workers)
-        shares = [s for s in np.array_split(np.arange(n), 4 * count) if s.size]
+        shares = [s for s in np.array_split(np.arange(len(specs)), 4 * count) if s.size]
         from .layered_tde import pool_map
 
         with pool:
-            jobs = ((k, ([voxels.spec(i) for i in voxel_ids[share]], x, y, z, look)) for k, share in enumerate(shares))
+            jobs = ((k, ([specs[i] for i in share], x, y, z, look)) for k, share in enumerate(shares))
             for k, cols_field in pool_map(pool, _los_share, jobs):
                 share = shares[k]
-                out[..., 6 * share[0]:6 * (share[-1] + 1)] = cols_field
+                pieces[..., 6 * share[0]:6 * (share[-1] + 1)] = cols_field
     else:
-        out[...] = _los_columns(engine, [voxels.spec(i) for i in voxel_ids], x, y, z, look)
+        pieces[...] = _los_columns(engine, specs, x, y, z, look)
+    if len(specs) == n:
+        out = pieces
+    else:
+        out = np.zeros(pieces.shape[:-1] + (6 * n,))
+        for piece, k in enumerate(owner):
+            out[..., 6 * k:6 * k + 6] += pieces[..., 6 * piece:6 * piece + 6]
     bad = ~np.isfinite(out.reshape(x.size, -1)).all(axis=1)
     if bad.any():
         raise ValueError(f"{int(bad.sum())} point(s) got a non-finite voxel field, indices "
@@ -1241,8 +1272,9 @@ class HeterogeneousEngine:
     """
 
     supports_basis = True
-    #: Its voxels stay where they are when the fault is lowered, so the elevation shift does not apply yet.
-    supports_topography = False
+    #: Takes `elevation=` itself (`los_matrix`): the voxels go down with the fault.
+    supports_topography = True
+    native_topography = True
 
     def __init__(self, base, voxels, order="full", log=None, workers=None, solver="dense", h_chunk=H_CHUNK):
         if not base.tables.has_strain:
@@ -1365,19 +1397,30 @@ class HeterogeneousEngine:
 
         return sla.lu_solve(self._factor(), e)
 
-    def _surface(self, x, y, look):
-        key = _digest(x, y, *(look if look is not None else ()))
+    def _surface(self, x, y, look, lower=0.0):
+        key = (_digest(x, y, *(look if look is not None else ())), float(lower))
         if key not in self._h:
-            self._h[key] = self._timed(f"H: {np.size(x)} surface points x {self.voxels.n_active} voxels",
+            self._h[key] = self._timed(f"H: {np.size(x)} surface points x {self.voxels.n_active} voxels"
+                                       + (f", {lower:.0f} m down" if lower else ""),
                                        lambda: los_operator(self.voxels, self.base, x, y, look,
-                                                            workers=self._workers()))
+                                                            workers=self._workers(), lower=lower))
         return self._h[key]
 
-    def _apply_h(self, x, y, look, m):
-        """`H @ m`: from the kept `H` (dense), or streamed `h_chunk` voxels at a time (fft)."""
+    def _apply_h(self, x, y, look, m, lower=0.0):
+        """`H @ m`: from the kept `H` (dense), or streamed `h_chunk` voxels at a time (fft); `lower` moves the
+        voxels down by that much (the elevation shift)."""
         if self.solver != "fft":
-            h = self._surface(x, y, look)
+            h = self._surface(x, y, look, lower)
             return h @ m if look is not None else np.einsum("pcv,vk->pck", h, m)
+        if lower:
+            n = self.voxels.n_active
+            out = None
+            for chunk in [c for c in np.array_split(np.arange(n), max(1, -(-n // self.h_chunk))) if c.size]:
+                h = los_operator(self.voxels, self.base, x, y, look, workers=self._workers(), subset=chunk, lower=lower)
+                rows = (6 * chunk[:, None] + np.arange(6)[None, :]).ravel()
+                part = h @ m[rows] if look is not None else np.einsum("pcv,vk->pck", h, m[rows])
+                out = part if out is None else out + part
+            return out
         import time
 
         from .layered_tde import engine_pool
@@ -1416,8 +1459,17 @@ class HeterogeneousEngine:
         return out
 
     # -- the engine protocol ----------------------------------------------------------
-    def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None):
-        """Line-of-sight design matrix, `(npts, 2 * n_parameters)`; surface points only."""
+    def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, basis=None, elevation=None, step=None):
+        """Line-of-sight design matrix, `(npts, 2 * n_parameters)`; surface points only.
+
+        **Topography.** `elevation` (m, one per point, above the datum) applies the elevation shift
+        (`slipsolve.inversion.assemble_design`) to both of the field's parts: each point sees the fault and the voxels'
+        moments deeper by its height, while the layered reference stays under its surface. The moments themselves are
+        solved once beneath the datum, so topography's effect on them, of the order of its effect times the
+        heterogeneity's, is left out. A voxel lowered across an interface of the reference is cut there.
+        """
+        if elevation is not None and np.any(np.asarray(elevation, dtype=float)):
+            return self._los_matrix_topography(mesh, x, y, look_e, look_n, look_u, z, basis, elevation, step)
         if self.voxels.n_active:
             self._surface_only(z)
             _refuse_on_faces(self.voxels, *_as_points(x, y, None))   # before E, Gamma and the solve, not after
@@ -1426,6 +1478,22 @@ class HeterogeneousEngine:
             return g0
         m = self.voxels.stiffness() @ self.voxel_strain(mesh, basis)
         return g0 - self._apply_h(x, y, (look_e, look_n, look_u), m)
+
+    def _los_matrix_topography(self, mesh, x, y, look_e, look_n, look_u, z, basis, elevation, step):
+        from .inversion import TOPOGRAPHY_STEP, _by_levels
+
+        self._surface_only(z)
+        x, y = (np.asarray(v, dtype=float).ravel() for v in (x, y))
+        look = [np.asarray(v, dtype=float).ravel() for v in (look_e, look_n, look_u)]
+        m = self.voxels.stiffness() @ self.voxel_strain(mesh, basis) if self.voxels.n_active else None
+
+        def level(depth, rows):
+            g0 = self.base.los_matrix(mesh.lowered(depth), x[rows], y[rows], *(v[rows] for v in look), basis=basis)
+            if m is None:
+                return g0
+            return g0 - self._apply_h(x[rows], y[rows], tuple(v[rows] for v in look), m, lower=depth)
+
+        return _by_levels(elevation, TOPOGRAPHY_STEP if step is None else step, x.size, level)
 
     def displacement(self, mesh, x, y, z=None, basis=None):
         """East/north/up displacement per unit slip, `(npts, 3, 2 * n_parameters)`; surface points only."""

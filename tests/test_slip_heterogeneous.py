@@ -352,6 +352,65 @@ def test_the_engine_inverts_and_a_saved_model_refuses_to_forward(coarse_tables, 
         back.forward(x, y)
 
 
+def test_topography_lowers_the_voxels_with_the_fault(coarse_tables):
+    """The elevation shift on the voxel engine: each point sees the fault and the voxels' moments deeper by its height,
+    the moments solved once beneath the datum. Checked on one level against the parts built directly: the base engine
+    on the lowered fault, and `H` of a voxel grid built that much deeper."""
+    from slipsolve.heterogeneity import los_operator
+    from slipsolve.inversion import assemble_design
+
+    t = coarse_tables
+    mesh, basis, (cx, cy), x, y, look = _small_problem(t)
+    xe, ye = cx + np.arange(-4e3, 4001.0, 2e3), cy + np.arange(4e3, 8001.0, 2e3)
+    everywhere = lambda x, y, d: np.ones_like(x, bool)                          # noqa: E731
+    v = VoxelModel(t, xe, ye, [5e3, 7e3], _scaled(t, 0.7, 0.7, everywhere))
+    engine, base = HeterogeneousEngine(LayeredTDE(t), v), LayeredTDE(t)
+    flat = engine.los_matrix(mesh, x, y, *look, basis=basis)
+    assert np.array_equal(assemble_design(engine, mesh, basis, (x, y, *look), elevation=np.zeros(x.size)), flat)
+    shifted = assemble_design(engine, mesh, basis, (x, y, *look), elevation=np.full(x.size, 400.0))
+    deeper = VoxelModel(t, xe, ye, [5.4e3, 7.4e3], _scaled(t, 0.7, 0.7, everywhere))
+    assert deeper.n_active == v.n_active
+    m = v.stiffness() @ engine.voxel_strain(mesh, basis)
+    expected = (base.los_matrix(mesh.lowered(400.0), x, y, *look, basis=basis)
+                - los_operator(deeper, base, x, y, look) @ m)
+    assert np.allclose(shifted, expected, rtol=0.0, atol=1e-12 * np.abs(expected).max())
+    assert np.abs(shifted - flat).max() > 1e-3 * np.abs(flat).max()
+
+
+def test_topography_streams_the_same_through_the_fft_solver(coarse_tables):
+    """`solver="fft"` applies the lowered `H` block by block; it gives the dense solver's matrix."""
+    from slipsolve.inversion import assemble_design
+
+    t = coarse_tables
+    mesh, basis, (cx, cy), x, y, look = _small_problem(t)
+    everywhere = lambda x, y, d: np.ones_like(x, bool)                          # noqa: E731
+    v = VoxelModel(t, cx + np.arange(-4e3, 4001.0, 2e3), cy + np.arange(4e3, 8001.0, 2e3), [5e3, 7e3],
+                   _scaled(t, 0.7, 0.7, everywhere))
+    heights = np.random.default_rng(5).uniform(0.0, 300.0, x.size)
+    dense = assemble_design(HeterogeneousEngine(LayeredTDE(t), v), mesh, basis, (x, y, *look), elevation=heights)
+    fft = assemble_design(HeterogeneousEngine(LayeredTDE(t), v, solver="fft", h_chunk=3), mesh, basis, (x, y, *look),
+                          elevation=heights)
+    assert np.allclose(fft, dense, rtol=0.0, atol=1e-6 * np.abs(dense).max())
+
+
+def test_a_lowered_voxel_is_cut_at_an_interface(coarse_tables):
+    """A voxel lowered across the reference's interface (2 km) is the sum of its pieces on either side."""
+    from slipsolve.heterogeneity import los_operator
+
+    t = coarse_tables
+    _, _, (cx, cy), x, y, look = _small_problem(t)
+    xe, ye = cx + np.arange(-2e3, 2001.0, 2e3), cy + np.arange(4e3, 6001.0, 2e3)
+    everywhere = lambda x, y, d: np.ones_like(x, bool)                          # noqa: E731
+    v = VoxelModel(t, xe, ye, [1.0e3, 1.8e3], _scaled(t, 0.7, 0.7, everywhere))
+    pieces = VoxelModel(t, xe, ye, [1.6e3, 2.0e3, 2.4e3], _scaled(t, 0.7, 0.7, everywhere))
+    base = LayeredTDE(t)
+    lowered = los_operator(v, base, x, y, look, lower=600.0)
+    halves = los_operator(pieces, base, x, y, look).reshape(x.size, v.n_active, 2, 6).sum(axis=2)
+    assert np.allclose(lowered, halves.reshape(x.size, -1), rtol=0.0, atol=1e-12 * np.abs(halves).max())
+    with pytest.raises(ValueError, match="above the free surface"):
+        los_operator(v, base, x, y, look, lower=-1.5e3)
+
+
 # -- the arbiter: a layered band recovered from the reference plus voxels ---------------------------
 def _crust(band=None):
     """``TWO_LAYERS``, or with a band ``(top, bottom, mu factor, lam factor)`` cut into its half-space."""
