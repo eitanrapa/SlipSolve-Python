@@ -63,6 +63,10 @@ LOS grids, offsets, GNSS ──> Observations ┘
 - **Geometry search.** Per-segment dip sweeps, including dips that change with
   depth, scored by misfit at fixed effective rank or by the marginal likelihood,
   with bootstrap intervals (`DipSweep`, `GeometryEvidence`).
+- **Production runs.** The whole recipe in checkpointed stages: meshes adapted to the
+  resolution, samples redrawn from the model, each data set weighted by its own noise, and
+  the rank chosen by blocked cross-validation averaged over shifted partitions
+  (`Production`, `NormalSystem`, `choose_rank`).
 - **Postseismic and interseismic.** Slip that changes with time from dated series
   (`TimeDependentInversion`); rigid blocks plus back-slip with coupling bounds from
   velocities (`InterseismicInversion`); and signals beside the slip: viscoelastic

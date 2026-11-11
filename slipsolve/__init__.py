@@ -133,7 +133,9 @@ from .resolution import (
     target_element_size,
     weighted_design,
 )
+from .production import DataSeries, Production, Recipe, Sheet
 from .sampling import Observations
+from .selection import NormalSystem, RankChoice, choose_rank, heldout_residuals, slab_folds
 from .surface import FaultSurface, gridfit
 from .sweep import (BootstrapResult, DipSweep, SweepResult, dip_profile_offsets,
                     geometry_key, segment_breaks)
@@ -269,4 +271,13 @@ __all__ = [
     "west_first",
     "whitening_factors",
     "with_solution",
+    "DataSeries",
+    "NormalSystem",
+    "Production",
+    "RankChoice",
+    "Recipe",
+    "Sheet",
+    "choose_rank",
+    "heldout_residuals",
+    "slab_folds",
 ]

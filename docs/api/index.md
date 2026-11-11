@@ -13,6 +13,7 @@ pages are organised by module.
 | [Inversion](inversion.md) | `slipsolve.inversion`, `slipsolve.regularize`, `slipsolve.predict` |
 | [Resolution and calibration](resolution.md) | `slipsolve.resolution`, `slipsolve.calibrate` |
 | [Geometry search](geometry-search.md) | `slipsolve.sweep`, `slipsolve.evidence` |
+| [Production runs](production.md) | `slipsolve.production`, `slipsolve.selection` |
 | [Plotting](plotting.md) | `slipsolve.plot` |
 | [Postseismic and interseismic](time-dependent.md) | `slipsolve.temporal`, `slipsolve.gnss`, `slipsolve.interseismic`, `slipsolve.uncertainty`, `slipsolve.patterns`, `slipsolve.relaxation`, `slipsolve.regional`, `slipsolve.tsurf` |
 

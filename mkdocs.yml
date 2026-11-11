@@ -79,6 +79,7 @@ nav:
       - The inversion: guide/inversion.md
       - Regularization and resolution: guide/regularization.md
       - Dip sweeps: guide/dip-sweeps.md
+      - Production runs: guide/production.md
       - Bimaterial faults: guide/bimaterial.md
       - 3-D heterogeneity: guide/heterogeneity.md
       - Postseismic and interseismic: guide/time-dependent.md
@@ -91,6 +92,7 @@ nav:
       - Inversion: api/inversion.md
       - Resolution and calibration: api/resolution.md
       - Geometry search: api/geometry-search.md
+      - Production runs: api/production.md
       - Plotting: api/plotting.md
       - Postseismic and interseismic: api/time-dependent.md
   - Relation to SlipSolve-Curve: slipsolve-curve.md
