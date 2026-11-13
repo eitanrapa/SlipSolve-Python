@@ -8,9 +8,9 @@ homogeneous half-space, a layered crust or a 3-D heterogeneous one. It is a Pyth
 translation of, and extension to, the MATLAB package
 [SlipSolve-Curve](https://github.com/x3zou/SlipSolve-Curve).
 
-For academic use, please cite: Rapaport Bruck E. and Fialko Y. 2026, Fast and accurate
-resolution-driven slip inversion on curved fault meshes in heterogeneous elastic media,
-*In Prep*.
+For academic use, please cite: 
+Rapaport Bruck E. and Fialko Y., 2026. Fast and accurate resolution-driven slip inversion
+on curved fault meshes in heterogeneous elastic media, *In Prep*.
 
 **Documentation: <https://eitanrapa.github.io/SlipSolve-Python/>**
 
