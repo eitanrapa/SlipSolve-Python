@@ -61,14 +61,14 @@ from ._geo import LosGrid
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel, _far_enough
 from .layout import MAX_COUNT_RATIO, clip_layout, lloyd_layout
-from .mesh import FaultMesh
+from .mesh import FaultMesh, _arc_length
 from .predict import _fill_nearest
 from .regularize import slip_bounds
 from .sampling import Observations
 from .selection import CV_RANKS, RANK_JITTER, GridEdge, NormalSystem, choose_rank, slab_folds
 
 #: The stages `Production.run` knows, in order.
-STAGES = ("A", "B", "C0", "C", "D", "E", "report")
+STAGES = ("A", "B", "C0", "C", "D", "E", "X", "report")
 #: The degree of each nuisance kind's polynomial.
 RAMP_DEGREE = {"none": None, "offset": 0, "linear": 1, "quadratic": 2, "cubic": 3}
 
@@ -317,6 +317,57 @@ class Sheet:
         return float(self._x[-1] - self._x[0]), float(self._y[-1] - self._y[0])
 
 
+class CurvedSheet(Sheet):
+    """A sheet whose surface is `FaultMesh.curved`'s, each layout carried onto it.
+
+    `FaultMesh.curved` fits its surface on the trace resampled at `edge_length` from the
+    keywords in `curved` (`segments` and `dips`, `uniform_dip`, `bottom_trace`, and their
+    companions; `max_depth` there is the depth the dips are fitted to). The layouts set the
+    sheet's extent, down to `depth`, along the arc length of that resampled trace, which is
+    the sheet's `length`. Use it when the surface must be exactly `FaultMesh.curved`'s, for
+    instance a dip per segment of the trace; a `Sheet` with a `profile` gives a smooth
+    approximation of it.
+
+    A curved sheet cannot end on another sheet, nor be one another sheet ends on.
+
+    Attributes:
+        curved: The `FaultMesh.curved` keywords.
+        edge_length: The trace resampling the surface is fitted on, m.
+    """
+
+    def __init__(self, name, trace, frame, depth=20e3, edge_length=4000.0, bounds=None, **curved):
+        self.name, self.trace, self.frame = str(name), trace, frame
+        self.depth, self.profile, self.edge_length = float(depth), None, float(edge_length)
+        self.curved = dict(curved)
+        dips = self.curved.get("dips")
+        self.dip = float(np.mean(dips)) if dips is not None else float(self.curved.get("uniform_dip", 90.0))
+        self.bounds = dict(bounds) if bounds else None
+        unknown = set(self.bounds or {}) - {"polarity", "strike", "dip"}
+        if unknown:
+            raise ValueError(f"sheet {name}: bounds take polarity, strike and dip, not {sorted(unknown)}")
+        x, y = trace.resample(self.edge_length, frame).to_local(frame)
+        self._x, self._y = np.asarray(x, float), np.asarray(y, float)
+        self._s = _arc_length(self._x, self._y)
+        self.length = float(self._s[-1])
+        self.ends_on, self.meeting = None, None
+
+    def offset(self, s, depth):
+        raise NotImplementedError("a CurvedSheet's surface is FaultMesh.curved's fit, not an offset from the trace")
+
+    def position(self, s, depth):
+        raise NotImplementedError("a CurvedSheet cannot be the sheet another one ends on")
+
+    def meeting_depth(self, host, dz=50.0):
+        raise NotImplementedError("a CurvedSheet cannot end on another sheet")
+
+    def mesh(self, layout):
+        """The `FaultMesh` of a layout, on `FaultMesh.curved`'s surface."""
+        mesh = FaultMesh.curved(self.trace, self.frame, layout=layout, edge_length=self.edge_length, **self.curved)
+        mesh.attrs.update(kind="production", sheet=self.name, max_depth=self.depth, top_depth=0.0,
+                          trace_name=self.name, trace_length=self.length, layout=str(layout.attrs.get("layout", "")))
+        return mesh
+
+
 @dataclass
 class DataSeries:
     """One raster data set on the run's lattice.
@@ -333,7 +384,8 @@ class DataSeries:
         valid: A boolean mask on the lattice of the pixels to use (coherence, a zone to
             leave out), or None.
         first: Overrides of `Recipe.round0` for this series' first, data-driven samples:
-            any of `rms_min`, `sigma` and `width_min`.
+            any of `rms_min`, `sigma` and `width_min`. `sigma` may name a variable of the
+            grid, a per-pixel uncertainty, whose median over the usable pixels is then used.
         regions: Phase only: integer labels on the lattice (0 for none), each with its own
             offset, used as given in place of the connected regions of at least
             `Recipe.min_region_km2` (labels drawn on the native product, a split by hand).
@@ -469,11 +521,15 @@ class Production:
         samples: `Observations` to start from instead of the first data-driven samples.
         constrain: A function `(inversion, meshes) -> inversion` applied to every system
             assembled, for constraints beyond the recipe's (pinned edges, rake limits).
+        correction: A function `(mesh, obs) -> dG`, an array the shape of the Green's
+            functions (`obs.n` rows; strike-slip then dip-slip columns, one per node of the
+            joined mesh), added to them in stage X: an effect the engine leaves out, such as
+            a rigidity contrast across the fault solved exactly. Without it stage X is skipped.
         echo: Print the log as well as writing it.
     """
 
     def __init__(self, out, sheets, series, points=(), engine=None, velocity_model=None, recipe=None, sees=None,
-                 events=None, traces=None, samples=None, constrain=None, echo=True):
+                 events=None, traces=None, samples=None, constrain=None, correction=None, echo=True):
         self.out = Path(out)
         self.sheets = list(sheets)
         self.series = {s.name: s for s in series}
@@ -488,6 +544,7 @@ class Production:
         self.traces = list(traces) if traces is not None else [s.trace for s in self.sheets]
         self.samples = samples
         self.constrain = constrain
+        self.correction = correction
         self.echo = echo
         self.frame = self.sheets[0].frame
         self.direction = self.sheets[0].direction
@@ -613,17 +670,35 @@ class Production:
         kw.update(strike=(lo[:n], hi[:n]), dip=(lo[n:], hi[n:]), polarity=None)
         return kw, (lo == 0.0) & (hi == 0.0)
 
-    def system(self, meshes, obs):
+    def _correction(self, mesh, obs):
+        """`correction`'s `dG` for the mesh and samples, cached in `out/g_cache`."""
+        path = self.out / "g_cache" / f"dg_{mesh.digest()[:12]}_{_digest(obs)}.npy"
+        if path.exists():
+            return np.load(path)
+        t0 = time.time()
+        dg = np.asarray(self.correction(mesh, obs), float)
+        expect = (obs.n, 2 * mesh.n_nodes)
+        if dg.shape != expect:
+            raise ValueError(f"the correction is {dg.shape}; the Green's functions are {expect}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, dg)
+        self.log(f"  correction {dg.shape} in {time.time() - t0:.0f} s")
+        return dg
+
+    def system(self, meshes, obs, corrected=False):
         """`(inversion, NormalSystem)` for the meshes and samples.
 
         Slip parameters a sheet's `bounds` fix at zero lose their Green's functions, so they
         stay out of the fit and the rank, and the nodes where a sheet meets the one it ends
-        on are pinned (`SlipInversion.pinned`).
+        on are pinned (`SlipInversion.pinned`). `corrected` adds `correction`'s `dG` to the
+        Green's functions (stage X).
         """
         mesh = self._joined(meshes)
         g = self._green(mesh, obs)
         kw, fixed = self.solve_options(mesh)
-        if self.sees or (fixed is not None and fixed.any()):
+        if corrected:
+            g = g + self._correction(mesh, obs)
+        elif self.sees or (fixed is not None and fixed.any()):
             g = g.copy()
         if fixed is not None and fixed.any():
             g[:, fixed] = 0.0
@@ -822,7 +897,11 @@ class Production:
             ds["los"] = (("pair", "y", "x"), np.where(valid, los, np.nan)[None].astype(np.float32))
             if model is None:
                 first = {**r.round0[s.kind], **(s.first or {})}
-                sigma = first["sigma"] if first.get("sigma") is not None else _scatter(los, valid)
+                sigma = first.get("sigma")
+                if isinstance(sigma, str):
+                    sigma = float(np.nanmedian(np.asarray(s.grid.ds[sigma].values, float)[valid]))
+                elif sigma is None:
+                    sigma = _scatter(los, valid)
                 kw = dict(rms_min=first["rms_min"], width_min=first.get("width_min", r.width_min))
             else:
                 prediction = (enu[0] * ds["los_east"].values + enu[1] * ds["los_north"].values
@@ -994,11 +1073,36 @@ class Production:
                          + ", ".join(f"{lo:.1f}-{hi:.1f}" for lo, hi in choice.bands))
                 keep("E", dict(rank=rank, cv_rank=choice.rank, bands=choice.bands, inside=bool(inside)))
 
+            if ("X" in stages and self.correction is not None and (self.out / "final.pkl").exists()
+                    and "X" not in record):
+                meshes, obs, lam, rank, _ = self.load("final.pkl")
+                self.log(f"X: the final mesh and samples with the correction, at the final rank {rank:.2f}")
+                inv, system = self.system(meshes, obs, corrected=True)
+                lam_x = system.lam_for_rank(rank)
+                model_x = self.solve(inv, lam_x)
+                model_x.save(self.out / "final_corrected.slip.zip")
+                s = self.summary(model_x, system, lam_x, f"X (corrected, rank {rank:.2f})")
+                choice = self.cross_validate(system, obs)
+                choice.table.to_csv(self.out / "cv_X.csv", index=False)
+                inside = choice.inside(rank)
+                self.log(f"X: the final rank {rank:.2f} is {'inside' if inside else 'outside'} the corrected "
+                         "system's 1% band" + ("s " if len(choice.bands) > 1 else " ")
+                         + ", ".join(f"{lo:.1f}-{hi:.1f}" for lo, hi in choice.bands)
+                         + f" (its own rank {choice.rank:.2f})")
+                keep("X", dict(lam=lam_x, rank=rank, Mw=s.get("Mw"), cv_rank=choice.rank, bands=choice.bands,
+                               inside=bool(inside)))
+
             if "report" in stages and (self.out / "final.pkl").exists():
                 meshes, obs, lam, rank, extra = self.load("final.pkl")
-                inv, system = self.system(meshes, obs)
+                corrected = self.correction is not None and "X" in record
+                if corrected:
+                    # the corrected re-solve is the model to quote; the uncorrected final stays beside it
+                    inv0, _ = self.system(meshes, obs)
+                    self.solve(inv0, lam).save(self.out / "model_uncorrected.slip.zip")
+                    lam = float(record["X"]["lam"])
+                inv, system = self.system(meshes, obs, corrected=corrected)
                 model = self.solve(inv, lam)
-                s = self.summary(model, system, lam, "report")
+                s = self.summary(model, system, lam, "report (corrected)" if corrected else "report")
                 model.save(self.out / "model.slip.zip")
                 counts = {t: int(np.sum(np.asarray(obs.ds["track"].values).astype(str) == t)) for t in obs.tracks}
                 recipe = {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(r).items()}
@@ -1006,7 +1110,10 @@ class Production:
                     recipe=recipe, sheets=[dict(name=sh.name, dip=sh.dip, depth=sh.depth, length=sh.length,
                                                 listric=sh.profile is not None,
                                                 ends_on=sh.ends_on.name if sh.ends_on is not None else None,
-                                                bounds=_jsonable(sh.bounds)) for sh in self.sheets],
+                                                bounds=_jsonable(sh.bounds),
+                                                curved=_jsonable(getattr(sh, "curved", None)))
+                                           for sh in self.sheets],
+                    corrected=corrected,
                     **s, rows_by_track=counts, converged=extra.get("converged"), stages=record),
                     indent=1, default=float))
             elif (self.out / "final.slip.zip").exists() and model is None:

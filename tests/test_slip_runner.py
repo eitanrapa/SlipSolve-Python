@@ -185,3 +185,45 @@ def test_series_regions_are_used_as_given(planted, tmp_path):
     assert len(np.unique(connected["regions"][connected["regions"] > 0])) < 3, "the default relabels: no hand split"
     with pytest.raises(ValueError, match="regions are for phase"):
         DataSeries("rg", grid, kind="offset", ramp="offset", regions=labels)
+
+
+def test_a_curved_sheet_is_faultmesh_curveds_surface():
+    from slipsolve.layout import lloyd_layout
+    from slipsolve.production import CurvedSheet
+
+    trace = FaultTrace.from_lonlat(_LON, _LAT, name="planted")
+    frame = trace.local_frame()
+    dips = [90.0, 80.0, 70.0]
+    sheet = CurvedSheet("main", trace, frame, depth=15e3, edge_length=4000.0, segments=3, dips=dips)
+    x, y = trace.resample(4000.0, frame).to_local(frame)
+    assert sheet.length == pytest.approx(np.sum(np.hypot(np.diff(x), np.diff(y))), rel=1e-12)
+    lay = lloyd_layout(sheet.length, 15e3, 4000.0)
+    ref = FaultMesh.curved(trace, frame, layout=lay, edge_length=4000.0, segments=3, dips=dips)
+    np.testing.assert_array_equal(sheet.mesh(lay).nodes, ref.nodes)
+    assert sheet.dip == pytest.approx(80.0) and sheet.start(5e3).n_elements > 0
+    with pytest.raises(NotImplementedError):
+        Sheet("branch", trace, frame, ends_on=sheet)
+
+
+def test_stage_x_adds_the_correction_and_quotes_it(planted, tmp_path):
+    import shutil
+
+    from slipsolve import SlipInversion
+
+    run, _, _, out = planted
+    copy = tmp_path / "run"
+    shutil.copytree(out, copy)
+
+    def halve(mesh, obs):                    # dG = -G/2: the same data need twice the slip
+        return -0.5 * np.asarray(SlipInversion(mesh, obs, engine=run.engine, basis="node", ramp="none").g, float)
+
+    again = Production(copy, run.sheets, list(run.series.values()), points=run.points, recipe=run.recipe,
+                       sees=run.sees, correction=halve, echo=False)
+    again.run(stages=["X", "report"])
+    stages = json.loads((copy / "stages.json").read_text())
+    summary = json.loads((copy / "summary.json").read_text())
+    assert "X" in stages and summary["corrected"] and (copy / "cv_X.csv").exists()
+    corrected = SlipModel.load(copy / "model.slip.zip")
+    plain = SlipModel.load(copy / "model_uncorrected.slip.zip")
+    gain = _mw(corrected.moment()) - _mw(plain.moment())
+    assert abs(gain - (2.0 / 3.0) * np.log10(2.0)) < 0.02, gain

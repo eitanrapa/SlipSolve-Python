@@ -133,7 +133,7 @@ from .resolution import (
     target_element_size,
     weighted_design,
 )
-from .production import DataSeries, Production, Recipe, Sheet
+from .production import CurvedSheet, DataSeries, Production, Recipe, Sheet
 from .readers import GnssTable, gnss_points, on_lattice, read_gnss_offsets, read_licsar, read_offsets
 from .sampling import Observations
 from .selection import NormalSystem, RankChoice, choose_rank, heldout_residuals, slab_folds
@@ -272,6 +272,7 @@ __all__ = [
     "west_first",
     "whitening_factors",
     "with_solution",
+    "CurvedSheet",
     "DataSeries",
     "NormalSystem",
     "Production",

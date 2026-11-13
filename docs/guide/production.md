@@ -79,6 +79,7 @@ recipe).
 | `C` | the rank by blocked cross-validation on mesh B | `C.pkl`, `cv_C.csv`, `cv_C.json` |
 | `D` | re-mesh at that rank: the final model | `final.pkl`, `final.slip.zip`, `converge_D.csv` |
 | `E` | cross-validation on the final mesh: is the rank inside its 1% band? | `cv_E.csv` |
+| `X` | with `correction=`: the final mesh and samples again, the correction added to the Green's functions, at the final rank | `final_corrected.slip.zip`, `cv_X.csv` |
 | `report` | the final solve and its summary | `model.slip.zip`, `summary.json` |
 
 `run(stages=...)` runs a subset. A stage whose checkpoint exists is skipped, so delete a
@@ -91,12 +92,13 @@ size field (see [Regularization and resolution](regularization.md)). Re-meshing 
 until the element count changes by less than `count_tol` twice running. If the count
 reverses direction, the size field is under-relaxed.
 
-**Samples.** The first samples come from the data alone, or pass `samples=` to start from
-your own. From then on each series' quadtree splits while the model varies by more than
-`split[kind]` times the series' sigma. This puts samples where the model has structure
-rather than where the data are noisy, which matters for offsets with heavy-tailed
-outliers. Each series is weighted one over its sigma, re-measured from the latest model
-every round:
+**Samples.** The first samples come from the data alone (`Recipe.round0`, or a series'
+`first=`; `first=dict(sigma="sigma")` weights them by the median of the grid's own
+`sigma` variable), or pass `samples=` to start from your own. From then on each series'
+quadtree splits while the model varies by more than `split[kind]` times the series'
+sigma. This puts samples where the model has structure rather than where the data are
+noisy, which matters for offsets with heavy-tailed outliers. Each series is weighted one
+over its sigma, re-measured from the latest model every round:
 
 - `sigma="far"` (the default): the residual beyond `sigma_far` of every trace, after the
   series' own nuisance terms, as block medians `sigma_block` wide. The near field's model
@@ -164,6 +166,40 @@ west = Sheet("west", west_trace, frame, dip=135.0, depth=20e3, ends_on=main,
 - `bounds=` overrides `Recipe.solve`'s `strike`, `dip` and `polarity` on that sheet's
   nodes alone; here no strike-slip and positive dip-slip only. A component fixed at zero
   also loses its Green's functions, so it counts neither in the fit nor in the rank.
+
+## A surface fitted per segment
+
+`CurvedSheet` puts every layout on `FaultMesh.curved`'s surface instead of offsetting the
+trace, for a geometry that must be exactly that surface, such as one dip per segment of
+the trace:
+
+```python
+from slipsolve.production import CurvedSheet
+
+sheet = CurvedSheet("main", trace, frame, depth=30e3, edge_length=4000.0,
+                    segments=8, dips=[90, 90, 95, 100, 110, 120, 120, 120])
+```
+
+The keywords after `edge_length` are `FaultMesh.curved`'s, and they set the surface's
+shape: the dips are fitted to its `max_depth`, 20 km by default, while the layouts set
+the sheet's extent down to `depth`. The sheet's length is the arc length of the trace
+resampled at `edge_length`, on which the surface is fitted. A `Sheet` with a `profile`
+is a smooth approximation of the same geometry. A curved sheet cannot end on another
+sheet, nor be the one another ends on.
+
+## A correction to the Green's functions (stage X)
+
+`correction=` takes a function `(mesh, obs) -> dG`, an array the shape of the Green's
+functions: `obs.n` rows, and strike-slip then dip-slip columns for every node of the
+joined mesh. It adds an effect the engine leaves out, for example a rigidity contrast
+across the fault solved exactly with `slipsolve.bimaterial`. Stage `X` solves the final
+mesh and samples again with `G + dG`, at the final rank, and cross-validates the
+corrected system (`cv_X.csv`) to show whether that rank is still inside its 1% band. The
+report then quotes the corrected model as `model.slip.zip` and keeps the uncorrected one
+as `model_uncorrected.slip.zip`. `dG` is cached in `g_cache/` beside the Green's
+functions, named by the mesh and the samples only. After changing the correction, delete
+the `dg_*.npy` files and stage X's entry in `stages.json`, then run `X` and `report`
+again.
 
 ## Constraints beyond the recipe
 
