@@ -47,6 +47,35 @@ from slipsolve import resample_all
 scenes = resample_all({"asc": asc, "desc": desc}, frame)   # 10 arc-second spacing
 ```
 
+### Reading common products
+
+[`slipsolve.readers`](../api/observations.md#slipsolve.readers) reads the products
+inversions use most into geographic `LosGrid`s, `los` positive toward the sensor:
+
+| product | reader |
+|---|---|
+| a LiCSAR interferogram (`<pair>.geo.unw.tif`, `.cc.tif`, the frame's `.geo.{E,N,U}.tif`) | `read_licsar` |
+| pixel offsets as a GeoTIFF with east, north and up coefficient rasters, and optionally a sigma raster | `read_offsets` |
+| GNSS offsets: the Nevada Geodetic Laboratory's per-event files, or a CSV with station, lon, lat and the three displacements and sigmas | `read_gnss_offsets`, then `gnss_points` |
+
+[`on_lattice`](../api/observations.md#slipsolve.readers.on_lattice) then puts every
+grid on one lattice in the frame, with fixed bounds, and can keep each result in a
+cache folder:
+
+```python
+from slipsolve import gnss_points, on_lattice, read_gnss_offsets, read_licsar, read_offsets
+
+grids = {"014A_phase": read_licsar("licsar/014A_05232_242525", "20230128_20230209"),
+         "014A_rng": read_offsets("rng.tif", "rng_E.tif", "rng_N.tif", "rng_U.tif", sigma="rng_sig.tif")}
+grids = on_lattice(grids, frame, spacing=250.0, bounds=(-300e3, 300e3, -250e3, 250e3), cache="work")
+gnss = gnss_points(read_gnss_offsets("event_offsets.txt"), frame, components="en", scale=3.0,
+                   traces=[trace], max_distance=300e3, min_distance=2e3)
+```
+
+LiCSAR's phase becomes \(-\phi \lambda / 4\pi\), positive toward the satellite, and a
+coherence variable rides along. Measure each product's sign against GNSS or a model
+before relying on it.
+
 ## Quadtree sampling
 
 ```python

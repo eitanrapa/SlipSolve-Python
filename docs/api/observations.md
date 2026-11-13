@@ -16,6 +16,10 @@ observations, and the noise model. See the guide page
 
 ::: slipsolve.resample
 
+## Readers
+
+::: slipsolve.readers
+
 ::: slipsolve.diagnostics
 
 ::: slipsolve.covariance

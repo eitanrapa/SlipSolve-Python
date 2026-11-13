@@ -134,6 +134,7 @@ from .resolution import (
     weighted_design,
 )
 from .production import DataSeries, Production, Recipe, Sheet
+from .readers import GnssTable, gnss_points, on_lattice, read_gnss_offsets, read_licsar, read_offsets
 from .sampling import Observations
 from .selection import NormalSystem, RankChoice, choose_rank, heldout_residuals, slab_folds
 from .surface import FaultSurface, gridfit
@@ -280,4 +281,10 @@ __all__ = [
     "choose_rank",
     "heldout_residuals",
     "slab_folds",
+    "GnssTable",
+    "gnss_points",
+    "on_lattice",
+    "read_gnss_offsets",
+    "read_licsar",
+    "read_offsets",
 ]
