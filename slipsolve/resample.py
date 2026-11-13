@@ -129,6 +129,11 @@ def resample_all(scenes, frame, spacing=ARCSEC_10, bounds=None, pad=0.0,
     Returns a mapping of the same keys. Every output shares bit-identical
     `x`/`y`, which is what makes their quadtree cell-size ladders -- and so
     their sample counts -- comparable.
+
+    `resampling` is a rasterio name or `"median"`, the symmetric median. Prefer
+    `"median"` to rasterio's `"med"`: when a lattice cell holds an even number of
+    pixels, `"med"` returns the lower of the two middle values, so it reads low by half
+    their gap, and the median of `-los` is not minus the median of `los`.
     """
     scenes = dict(scenes)
     x, y = frame_lattice(list(scenes.values()), frame, spacing=spacing,

@@ -47,6 +47,12 @@ from slipsolve import resample_all
 scenes = resample_all({"asc": asc, "desc": desc}, frame)   # 10 arc-second spacing
 ```
 
+`resample_all` interpolates bilinearly by default. `resampling="median"` takes each
+lattice cell's median of the pixels in it instead, which suits offsets with outliers.
+It is the symmetric median, the mean of the two middle values. Rasterio's own `"med"`
+returns the lower of the two when a cell holds an even number of pixels, so it reads low
+by half their gap: several centimetres on noisy pixel offsets.
+
 ### Reading common products
 
 [`slipsolve.readers`](../api/observations.md#slipsolve.readers) reads the products

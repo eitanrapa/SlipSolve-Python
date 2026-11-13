@@ -382,3 +382,54 @@ def test_los_grid_rebuilds_from_a_dataset(grd_scene):
     assert isinstance(again, LosGrid)
     np.testing.assert_array_equal(again.x, stack.x)
     assert again.crs == stack.crs
+
+
+def test_median_is_symmetric_where_rasterios_is_not():
+    """Each coarse cell holds 2 x 2 fine pixels (an even count) or 3 x 3 (odd).
+
+    rasterio's `med` returns the lower middle of four values, so it reads low and the
+    median of `-x` is not `-median(x)`; `"median"` returns their mean, and the middle
+    value of nine.
+    """
+    from affine import Affine
+
+    from slipsolve._geo import warp_to_grid
+
+    rng = np.random.default_rng(1)
+    for k, n in ((2, 4), (3, 9)):
+        fine = rng.normal(0.0, 1.0, (6 * k, 6 * k)).astype(np.float32)
+        src = Affine(100.0, 0.0, 500000.0, 0.0, -100.0, 1160000.0)
+        dst = Affine(100.0 * k, 0.0, 500000.0, 0.0, -100.0 * k, 1160000.0)
+        cells = fine.reshape(6, k, 6, k).transpose(0, 2, 1, 3).reshape(6, 6, n)
+        expect = np.median(cells, axis=2)
+        lower = np.sort(cells, axis=2)[:, :, (n - 1) // 2]
+        med = warp_to_grid(fine, src, 32620, dst, 32620, (6, 6), "med")
+        median = warp_to_grid(fine, src, 32620, dst, 32620, (6, 6), "median")
+        flipped = warp_to_grid(-fine, src, 32620, dst, 32620, (6, 6), "median")
+        np.testing.assert_allclose(median, expect, atol=1e-6)
+        np.testing.assert_allclose(flipped, -median, atol=1e-6)
+        np.testing.assert_allclose(med, lower, atol=1e-6)
+        if n % 2 == 0:
+            assert np.all(med < median), "rasterio's med is the lower middle of an even count"
+
+
+def test_grid_matching_takes_the_symmetric_median_too():
+    """`LosGrid.from_grd` puts a look grid on the displacement's lattice through rioxarray;
+    `"median"` must be the symmetric median there as well, not rasterio's `med`."""
+    import rioxarray  # noqa: F401  (registers .rio)
+    import xarray as xr
+
+    from slipsolve._geo import _match_grid
+
+    rng = np.random.default_rng(2)
+    fine = rng.normal(0.0, 1.0, (12, 12))
+    da = xr.DataArray(fine, dims=("y", "x"), coords={"y": 1160000.0 - 50.0 - 100.0 * np.arange(12),
+                                                    "x": 500000.0 + 50.0 + 100.0 * np.arange(12)})
+    ref = xr.DataArray(np.zeros((6, 6)), dims=("y", "x"), coords={"y": 1160000.0 - 100.0 - 200.0 * np.arange(6),
+                                                                 "x": 500000.0 + 100.0 + 200.0 * np.arange(6)})
+    da, ref = da.rio.write_crs("EPSG:32620"), ref.rio.write_crs("EPSG:32620")
+    cells = fine.reshape(6, 2, 6, 2).transpose(0, 2, 1, 3).reshape(6, 6, 4)
+    median = _match_grid(da, ref, "median").values
+    np.testing.assert_allclose(median, np.median(cells, axis=2), atol=1e-12)
+    np.testing.assert_allclose(_match_grid(-da, ref, "median").values, -median, atol=1e-12)
+    np.testing.assert_allclose(_match_grid(da, ref, "med").values, np.sort(cells, axis=2)[:, :, 1], atol=1e-12)

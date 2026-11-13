@@ -17,9 +17,9 @@ from slipsolve.production import DataSeries, Production, Recipe, Sheet
 trace = FaultTrace.from_kml("rupture.kml")
 frame = trace.local_frame()
 
-# every raster on one lattice in the frame (median resampling suits offsets with outliers)
+# every raster on one lattice in the frame (the symmetric median suits offsets with outliers)
 grids = resample_all({"S1_asc": asc, "S1_dsc": dsc, "S1_asc_rg": asc_rg}, frame, spacing=500.0,
-                     bounds=(-150e3, 150e3, -100e3, 100e3), resampling="med")
+                     bounds=(-150e3, 150e3, -100e3, 100e3), resampling="median")
 
 sheets = [Sheet("main", trace, frame, dip=70.0, depth=20e3)]
 series = [

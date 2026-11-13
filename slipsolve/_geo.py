@@ -259,14 +259,24 @@ def phase_to_los(unwrapped, wavelength, sign=1):
 # ---------------------------------------------------------------------------
 
 
+#: The resampling name of the symmetric median (`warp_to_grid`), beside rasterio's own names.
+MEDIAN = "median"
+
+
 def resampling_from_name(name):
-    """Resolve a rasterio `Resampling` mode by name (e.g. `"bilinear"`)."""
+    """Resolve a rasterio `Resampling` mode by name (e.g. `"bilinear"`).
+
+    `"median"` is this package's symmetric median (`warp_to_grid`); it resolves to
+    rasterio's `med`, which it runs twice.
+    """
     from rasterio.enums import Resampling
 
+    if name == MEDIAN:
+        return Resampling.med
     try:
         return Resampling[name]
     except KeyError:
-        valid = ", ".join(r.name for r in Resampling)
+        valid = ", ".join([MEDIAN] + [r.name for r in Resampling])
         raise ValueError(
             f"Unknown resampling {name!r}; expected one of: {valid}") from None
 
@@ -300,16 +310,39 @@ def warp_to_grid(arr, src_transform, src_epsg, dst_transform, dst_epsg,
     """Warp one 2-D array between projected grids. Eager, whole-frame.
 
     Pixels with no source coverage come back NaN.
+
+    `"median"` is the symmetric median: GDAL's `med` returns the lower of the two
+    middle values when a cell holds an even number of pixels, which biases it low by
+    half their gap (several centimetres on pixel offsets), and `med(-x)` is then not
+    `-med(x)`. `"median"` runs `med` on the array and on its negative and averages
+    the two answers, `(med(x) - med(-x)) / 2`: the mean of the two middle values, and
+    the middle one when the count is odd.
     """
     from rasterio.warp import reproject
 
     mode = resampling_from_name(resampling)
     src = np.ascontiguousarray(arr, dtype=np.float32)
-    dst = np.full(tuple(dst_shape), np.nan, dtype=np.float32)
-    reproject(src, dst, src_transform=src_transform, src_crs=as_crs(src_epsg),
-              dst_transform=dst_transform, dst_crs=as_crs(dst_epsg),
-              src_nodata=np.nan, dst_nodata=np.nan, resampling=mode)
-    return dst
+
+    def warp(values):
+        dst = np.full(tuple(dst_shape), np.nan, dtype=np.float32)
+        reproject(values, dst, src_transform=src_transform, src_crs=as_crs(src_epsg),
+                  dst_transform=dst_transform, dst_crs=as_crs(dst_epsg),
+                  src_nodata=np.nan, dst_nodata=np.nan, resampling=mode)
+        return dst
+
+    return _symmetric_median(warp, src, resampling).astype(np.float32, copy=False)
+
+
+def _symmetric_median(reproject, values, resampling):
+    """`reproject(values)`, or for `"median"` the mean of `reproject(values)` and `-reproject(-values)`.
+
+    `reproject` takes one array (or DataArray / Dataset) and resamples it with
+    `resampling_from_name(resampling)`; `"median"` then cancels `med`'s tie-break
+    (`warp_to_grid`).
+    """
+    if resampling != MEDIAN:
+        return reproject(values)
+    return 0.5 * (reproject(values) - reproject(-values))
 
 
 def warp_onto_lattice(field, tx, ty, src_epsg, dst_epsg, resampling="bilinear"):
@@ -367,7 +400,8 @@ def _match_grid(da, ref, resampling):
             and da.rio.crs == ref.rio.crs)
     if same:
         return da
-    return da.rio.reproject_match(ref, resampling=resampling_from_name(resampling))
+    mode = resampling_from_name(resampling)
+    return _symmetric_median(lambda a: a.rio.reproject_match(ref, resampling=mode), da, resampling)
 
 
 def _finalise_look(ds):
@@ -545,9 +579,9 @@ class LosGrid:
         if ds.rio.crs.is_geographic:
             if epsg is None:
                 epsg = utm_epsg(ds["x"].values.mean(), ds["y"].values.mean())
-            ds = ds.rio.reproject(f"EPSG:{int(epsg)}", resolution=resolution,
-                                  resampling=resampling_from_name(resampling),
-                                  nodata=np.nan)
+            mode = resampling_from_name(resampling)
+            ds = _symmetric_median(lambda d: d.rio.reproject(f"EPSG:{int(epsg)}", resolution=resolution,
+                                                     resampling=mode, nodata=np.nan), ds, resampling)
         epsg = int(ds.rio.crs.to_epsg())
 
         ds = _finalise_look(ds)

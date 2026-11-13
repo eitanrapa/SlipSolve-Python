@@ -175,12 +175,13 @@ def read_offsets(value, east, north, up, sigma=None, sign=1, scale=1.0, name="of
                     extra=extra, source=str(Path(value).name))
 
 
-def on_lattice(grids, frame, spacing, bounds, resampling="med", cache=None):
+def on_lattice(grids, frame, spacing, bounds, resampling="median", cache=None):
     """`{name: LosGrid}` on one lattice in `frame`, each resampled from its native grid once.
 
     `bounds` is `(x_min, x_max, y_min, y_max)` in the frame, so the lattice is fixed by
-    `bounds` and `spacing` alone and every grid lands on the same one. Median
-    resampling (`"med"`) suits offsets with outliers. With `cache` (a folder), each
+    `bounds` and `spacing` alone and every grid lands on the same one. The default
+    `"median"` is the symmetric median, which suits offsets with outliers; rasterio's
+    `"med"` is biased low (`slipsolve.resample.resample_all`). With `cache` (a folder), each
     result is kept as a zarr store named by the grid, the frame, the spacing and the
     bounds, and read from there next time.
     """
