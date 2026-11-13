@@ -21,11 +21,11 @@ LON0, LAT0, STEP = -68.9, 10.8, 0.01
 SHAPE = (40, 60)
 
 
-def _write(path, values, crs="EPSG:4326", shift=0.0, dtype="float32"):
+def _write(path, values, crs="EPSG:4326", shift=0.0, dtype="float32", nodata=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     transform = Affine(STEP, 0.0, LON0 + shift * STEP, 0.0, -STEP, LAT0)
     with rasterio.open(path, "w", driver="GTiff", height=values.shape[0], width=values.shape[1], count=1,
-                       dtype=dtype, crs=crs, transform=transform) as dst:
+                       dtype=dtype, crs=crs, transform=transform, nodata=nodata) as dst:
         dst.write(values.astype(dtype), 1)
 
 
@@ -41,7 +41,9 @@ def licsar_flat(tmp_path):
     folder = tmp_path / "014A_05232_242525"
     phase = _phase()
     _write(folder / "20230128_20230209.geo.unw.tif", phase)
-    _write(folder / "20230128_20230209.geo.cc.tif", np.full(SHAPE, 128), dtype="uint8")
+    cc = np.full(SHAPE, 128)
+    cc[10, 10] = 0                                       # zero coherence under valid phase
+    _write(folder / "20230128_20230209.geo.cc.tif", cc, dtype="uint8", nodata=0)   # as LiCSAR tags some frames
     for c, v in zip("ENU", (-0.6, -0.1, 0.79)):
         _write(folder / f"014A_05232_242525.geo.{c}.tif", np.full(SHAPE, v), shift=0.5)
     return folder, phase
@@ -55,6 +57,7 @@ def test_licsar_is_los_toward_the_satellite(licsar_flat):
     assert np.isnan(los[:3]).all(), "a zero phase is a missing pixel"
     np.testing.assert_allclose(grid.ds["los_up"].values[5, 5], 0.79, rtol=1e-6)
     np.testing.assert_allclose(grid.ds["coherence"].values[5, 5], 128 / 255, rtol=1e-6)
+    assert grid.ds["coherence"].values[10, 10] == 0.0, "a zero coherence under valid phase is a value, not no-data"
     assert grid.ds.attrs["frame"] == "014A_05232_242525" and grid.ds.attrs["sign"] == 1
     assert grid.ds.rio.crs.to_epsg() == 4326
 

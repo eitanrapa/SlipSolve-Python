@@ -36,20 +36,21 @@ from ._geo import LosGrid
 SENTINEL1_WAVELENGTH = 0.05546576
 
 
-def read_geotiff(path, band=1):
+def read_geotiff(path, band=1, nodata=True):
     """`(values, x, y, crs)`: one band of a GeoTIFF, its pixel-centre coordinates and its CRS (None if it has none).
 
-    The no-data value becomes NaN. Rotated or sheared transforms are refused.
+    The no-data value becomes NaN unless `nodata` is False. Rotated or sheared transforms
+    are refused.
     """
     import rasterio
 
     with rasterio.open(path) as src:
         values = src.read(band).astype(float)
-        t, crs, nodata = src.transform, src.crs, src.nodata
+        t, crs, missing = src.transform, src.crs, src.nodata
     if t.b or t.d:
         raise ValueError(f"{path}: a rotated or sheared grid is not supported")
-    if nodata is not None and np.isfinite(nodata):
-        values[values == nodata] = np.nan
+    if nodata and missing is not None and np.isfinite(missing):
+        values[values == missing] = np.nan
     ny, nx = values.shape
     x = t.c + (np.arange(nx) + 0.5) * t.a
     y = t.f + (np.arange(ny) + 0.5) * t.e
@@ -109,10 +110,11 @@ def read_licsar(folder, pair, frame=None, wavelength=SENTINEL1_WAVELENGTH, name=
 
     The unwrapped phase becomes `los = -phase * wavelength / (4 pi)`, positive toward
     the satellite. LiCSAR's E, N and U point from the ground to the satellite, as this
-    package's look vectors do. A zero phase or look value marks a missing pixel, and
-    coherence stored as a byte (0-255) is scaled to 0-1. Rasters without a CRS are taken
-    as geographic (EPSG:4326). Measure the sign against GNSS or the model before
-    trusting it on a new product.
+    package's look vectors do. A zero phase or look value marks a missing pixel.
+    Coherence stored as a byte (0-255) is scaled to 0-1, and a zero there is a coherence
+    of zero wherever the phase is valid, whatever the raster's no-data tag says. Rasters
+    without a CRS are taken as geographic (EPSG:4326). Measure the sign against GNSS or
+    the model before trusting it on a new product.
     """
     folder = Path(folder)
     unw_path = _first(folder / f"{pair}.geo.unw.tif", folder / pair / f"{pair}.geo.unw.tif")
@@ -140,7 +142,7 @@ def read_licsar(folder, pair, frame=None, wavelength=SENTINEL1_WAVELENGTH, name=
     los = np.where(valid, -phase * wavelength / (4.0 * np.pi), np.nan)
     extra = {}
     if cc_path is not None:
-        cc = read_geotiff(cc_path)
+        cc = read_geotiff(cc_path, nodata=False)
         _same_grid(unw, cc, f"{pair}.geo.cc.tif")
         extra["coherence"] = cc[0] / 255.0 if np.nanmax(cc[0]) > 1.5 else cc[0]
     return los_grid(los, x, y, look, crs=crs or "EPSG:4326", name=name or frame, extra=extra,
