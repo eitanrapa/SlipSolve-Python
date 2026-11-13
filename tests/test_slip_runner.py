@@ -101,3 +101,87 @@ def test_bad_inputs_are_refused(planted):
         DataSeries("x", None, kind="gnss")
     with pytest.raises(ValueError, match="first="):
         DataSeries("x", None, first=dict(rms=0.1))
+
+
+def _branch_pair(dip=135.0):
+    """A vertical host along x and a branch 5 km north of it dipping toward it: they meet at 5 km for dip 135."""
+    host = FaultTrace.from_lonlat(np.array([-68.9, -68.5]), np.array([10.5, 10.5]), name="host")
+    frame = host.local_frame()
+    x = np.array([-15e3, 15e3])
+    lon, lat = frame.to_lonlat(x, np.array([5e3, 5e3]))
+    branch = FaultTrace.from_lonlat(lon, lat, name="branch")
+    main = Sheet("host", host, frame, dip=90.0, depth=12e3)
+    side = Sheet("branch", branch, frame, dip=dip, depth=12e3, ends_on=main,
+                 bounds=dict(strike=(0.0, 0.0), polarity=(0, 1)))
+    return frame, main, side
+
+
+def test_a_sheet_ending_on_another_is_clipped_and_pinned(tmp_path):
+    frame, main, side = _branch_pair()
+    s, depth = side.meeting
+    inner = (s > 2e3) & (s < side.length - 2e3)
+    np.testing.assert_allclose(depth[inner], 5e3, atol=60.0, err_msg="a 45-degree branch 5 km away meets at 5 km")
+    meshes = [main.start(3e3), side.start(3e3)]
+    m = meshes[1]
+    node_depth = -m.nodes[:, 2]
+    assert node_depth.max() <= 5e3 + 60.0, "nothing of the branch reaches below the host"
+    edge = side.lower_edge(m)
+    assert edge.sum() >= 4 and np.allclose(node_depth[edge], 5e3, atol=60.0)
+    assert m.attrs["layout"] != "" and not main.lower_edge(meshes[0]).any()
+
+    rng = np.random.default_rng(0)
+    px, py = rng.uniform(-30e3, 30e3, 40), rng.uniform(-25e3, 25e3, 40)
+    px, py = px[np.abs(py) > 2e3], py[np.abs(py) > 2e3]
+    lon, lat = frame.to_lonlat(px, py)
+    look = np.tile(np.eye(3), (px.size, 1))
+    obs = Observations.from_points(np.repeat(lon, 3), np.repeat(lat, 3), rng.normal(0.0, 0.05, 3 * px.size), look,
+                                   np.full(3 * px.size, 0.01), name="gnss", frame=frame)
+    run = Production(tmp_path / "run", [main, side], [], points=[obs], echo=False,
+                     recipe=Recipe(solve=dict(boundary_ratio=1e3, strike=(-5.0, 5.0), dip=(-5.0, 5.0))))
+    inv, system = run.system(meshes, obs)
+    n_host = meshes[0].n_nodes
+    assert np.array_equal(inv.pinned, np.r_[np.zeros(n_host, bool), edge])
+    kw, fixed = run.solve_options(inv.mesh)
+    n = inv.mesh.n_nodes
+    assert fixed[n_host:n].all() and not fixed[:n_host].any() and not fixed[n:].any()
+    assert np.all(kw["dip"][0][n_host:] == 0.0) and np.all(kw["dip"][0][:n_host] == -5.0)
+    assert np.all(inv.g[:, n_host:n] == 0.0), "a fixed component leaves the fit and the rank"
+    model = run.solve(inv, system.lam_for_rank(10.0))
+    x = np.asarray(model.x, float)
+    assert np.all(x[n_host:n] == 0.0) and np.all(x[n + n_host:2 * n] >= 0.0)
+    assert np.abs(x[n_host:n][edge]).max() == 0.0 and np.abs(x[n + n_host:2 * n][edge]).max() < 1e-3
+
+
+def test_a_clip_the_layout_never_reaches_leaves_it_alone():
+    from slipsolve.layout import clip_layout, lloyd_layout
+
+    lay = lloyd_layout(30e3, 10e3, 3e3)
+    s = np.linspace(0.0, 30e3, 61)
+    assert clip_layout(lay, s, np.full(s.size, 10e3)) is lay
+    cut = clip_layout(lay, s, 6e3 + 2e3 * np.sin(s / 5e3))
+    depth = -cut.params[:, 1]
+    assert depth.max() <= 8e3 + 30.0 and cut.attrs["clipped"]
+    assert np.all(depth <= 6e3 + 2e3 * np.sin(cut.params[:, 0] / 5e3) + 30.0)
+
+
+def test_series_regions_are_used_as_given(planted, tmp_path):
+    run, _, _, _ = planted
+    grid = run.series["asc"].grid
+    ny, nx = grid.ds["los"].shape[1:]
+    labels = np.zeros((ny, nx), int)
+    labels[:, : nx // 2] = 1
+    labels[:, nx // 2:] = 2                  # one connected area split in two by hand
+    labels[:3, :3] = 7                       # 36 km2, below the planted recipe's 50 km2: kept, not dropped
+    s = DataSeries("asc", grid, kind="phase", ramp="linear", near=2e3, regions=labels)
+    prod = Production(tmp_path / "regions", run.sheets, [s], recipe=run.recipe, echo=False)
+    prod._setup_lattice()
+    los, valid, extra = prod._usable(s)
+    assert np.array_equal(valid, np.isfinite(los) & (prod._lattice["dist"] >= 2e3) & (labels > 0))
+    assert np.array_equal(extra["regions"][valid], labels[valid]) and 7 in extra["regions"][valid]
+    default = DataSeries("asc", grid, kind="phase", ramp="linear", near=2e3)
+    plain = Production(tmp_path / "default", run.sheets, [default], recipe=run.recipe, echo=False)
+    plain._setup_lattice()
+    _, _, connected = plain._usable(default)
+    assert len(np.unique(connected["regions"][connected["regions"] > 0])) < 3, "the default relabels: no hand split"
+    with pytest.raises(ValueError, match="regions are for phase"):
+        DataSeries("rg", grid, kind="offset", ramp="offset", regions=labels)

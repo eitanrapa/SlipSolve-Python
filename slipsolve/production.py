@@ -60,9 +60,10 @@ from . import resolution as R
 from ._geo import LosGrid
 from .greens import HalfSpaceTDE
 from .inversion import SlipInversion, SlipModel, _far_enough
-from .layout import MAX_COUNT_RATIO, lloyd_layout
+from .layout import MAX_COUNT_RATIO, clip_layout, lloyd_layout
 from .mesh import FaultMesh
 from .predict import _fill_nearest
+from .regularize import slip_bounds
 from .sampling import Observations
 from .selection import CV_RANKS, RANK_JITTER, GridEdge, NormalSystem, choose_rank, slab_folds
 
@@ -157,6 +158,32 @@ class Recipe:
         self.solve = {**base, **dict(self.solve)}
 
 
+def _side_of(px, py, cx, cy):
+    """Signed distance of the points `(px, py)` from the polyline `(cx, cy)` (+ on its left), and whether
+    the nearest point of the polyline is an interior one (not beyond either end)."""
+    ax, ay = cx[:-1], cy[:-1]
+    vx, vy = np.diff(cx), np.diff(cy)
+    l2 = np.maximum(vx * vx + vy * vy, 1e-12)
+    t = ((px[:, None] - ax) * vx + (py[:, None] - ay) * vy) / l2
+    tc = np.clip(t, 0.0, 1.0)
+    dx, dy = px[:, None] - (ax + tc * vx), py[:, None] - (ay + tc * vy)
+    d = np.hypot(dx, dy)
+    k = np.argmin(d, axis=1)
+    r = np.arange(px.size)
+    cross = vx[k] * dy[r, k] - vy[k] * dx[r, k]
+    inside = ~(((k == 0) & (t[r, k] < 0)) | ((k == vx.size - 1) & (t[r, k] > 1)))
+    return np.sign(cross) * d[r, k], inside
+
+
+def _jsonable(value):
+    """Tuples and arrays inside `value` as lists, for a JSON record."""
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list, np.ndarray)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
 class Sheet:
     """One fault sheet: a trace, a dip and a depth, meshed on any `(arc length, depth)` layout.
 
@@ -166,6 +193,13 @@ class Sheet:
     a function of `(s, z)` arrays returning a dip in degrees, replaces the uniform dip: the
     offset is then the integral of `cot(dip)` over depth, which makes a listric sheet.
 
+    `ends_on`, another `Sheet`, makes this one end where it meets that sheet: every mesh is
+    cut off below the meeting depth (`slipsolve.layout.clip_layout`), and its nodes on
+    that edge are pinned to zero slip, as a bottom edge is. `bounds` overrides the
+    recipe's slip bounds on this sheet: any of `polarity`, `strike` and `dip`, as
+    `SlipInversion.solve` takes them. `strike=(0, 0)` with `polarity=(0, 1)`, say, allows
+    positive dip-slip only.
+
     Attributes:
         name: The sheet's name.
         trace: Its `FaultTrace`.
@@ -173,11 +207,20 @@ class Sheet:
         dip: The uniform dip, degrees.
         depth: The sheet's depth, m.
         length: The trace's arc length in the mesh's parameterisation, m.
+        ends_on: The `Sheet` this one ends on, or None.
+        meeting: `(s, depth)`: where this sheet meets `ends_on` along its arc length (`depth`
+            where it never does), or None.
+        bounds: The slip-bound overrides, or None.
     """
 
-    def __init__(self, name, trace, frame, dip=90.0, depth=20e3, profile=None, normal_smoothing=10e3, spacing=500.0):
+    def __init__(self, name, trace, frame, dip=90.0, depth=20e3, profile=None, normal_smoothing=10e3, spacing=500.0,
+                 ends_on=None, bounds=None):
         self.name, self.trace, self.frame = str(name), trace, frame
         self.dip, self.depth, self.profile = float(dip), float(depth), profile
+        self.bounds = dict(bounds) if bounds else None
+        unknown = set(self.bounds or {}) - {"polarity", "strike", "dip"}
+        if unknown:
+            raise ValueError(f"sheet {name}: bounds take polarity, strike and dip, not {sorted(unknown)}")
         ref = FaultMesh.curved(trace, frame, uniform_dip=90.0, depths=[0.0, 2e3], along_spacing=spacing,
                                edge_length=spacing)
         top = np.abs(ref.nodes[:, 2]) < 1.0
@@ -196,6 +239,8 @@ class Sheet:
         norm = np.hypot(nx, ny)
         self._nx, self._ny = nx / norm, ny / norm
         self.length = float(self._s[-1])
+        self.ends_on = ends_on
+        self.meeting = self.meeting_depth(ends_on) if ends_on is not None else None
 
     def offset(self, s, depth):
         """How far each point `(s, depth)` lies from the trace along the normal, m."""
@@ -206,8 +251,51 @@ class Sheet:
         cot = np.where(np.abs(dips - 90.0) < 1e-9, 0.0, 1.0 / np.tan(np.radians(dips)))
         return np.trapezoid(cot, zz, axis=1)
 
+    def position(self, s, depth):
+        """`(x, y)` in the frame of the sheet's surface at arc lengths `s` and depth `depth` (m)."""
+        s = np.asarray(s, float)
+        depth = np.broadcast_to(np.asarray(depth, float), s.shape)
+        step = self.offset(s.reshape(-1), depth.reshape(-1)).reshape(s.shape)
+        return (np.interp(s, self._s, self._x) + step * np.interp(s, self._s, self._nx),
+                np.interp(s, self._s, self._y) + step * np.interp(s, self._s, self._ny))
+
+    def meeting_depth(self, host, dz=50.0):
+        """`(s, depth)`: where each column of this sheet first crosses `host`'s surface.
+
+        The sheet's columns, one per point of its reference trace, are stepped down by `dz`
+        and compared with the host's depth contour at the same depth. A column that never
+        crosses, or crosses beyond either end of the host, keeps the sheet's own depth.
+        """
+        s = self._s
+        zend = np.full(s.size, self.depth)
+        prev = None
+        for z in np.arange(0.0, self.depth + dz / 2, dz):
+            bx, by = self.position(s, z)
+            hx, hy = host.position(host._s, z)
+            side, inside = _side_of(bx, by, hx, hy)
+            if prev is not None:
+                flip = (np.sign(side) != np.sign(prev[0])) & inside & prev[1] & (zend >= self.depth) & (prev[0] != 0)
+                if flip.any():
+                    frac = np.abs(prev[0][flip]) / np.maximum(np.abs(prev[0][flip]) + np.abs(side[flip]), 1e-9)
+                    zend[flip] = z - dz + frac * dz
+            prev = (side, inside)
+        return s.copy(), zend
+
+    def lower_edge(self, mesh, tol=30.0):
+        """The nodes of one of this sheet's meshes on the edge where it meets `ends_on` (none if it does not)."""
+        if self.meeting is None:
+            return np.zeros(mesh.n_nodes, bool)
+        s, depth = mesh.params[:, 0], -mesh.params[:, 1]
+        end = np.interp(s, *self.meeting)
+        return (np.abs(depth - end) <= tol) & (end < self.depth - 1.0) & (depth > 0.0)
+
     def mesh(self, layout):
-        """The `FaultMesh` of a layout (`slipsolve.layout.lloyd_layout`, `resolution.adapt_layout`)."""
+        """The `FaultMesh` of a layout (`slipsolve.layout.lloyd_layout`, `resolution.adapt_layout`).
+
+        A sheet that ends on another has the layout cut off where it meets it first.
+        """
+        if self.meeting is not None and (self.meeting[1] < self.depth).any():
+            layout = clip_layout(layout, *self.meeting)
         s, depth = layout.params[:, 0], -layout.params[:, 1]
         step = self.offset(s, depth)
         nodes = np.column_stack([np.interp(s, self._s, self._x) + step * np.interp(s, self._s, self._nx),
@@ -246,6 +334,10 @@ class DataSeries:
             leave out), or None.
         first: Overrides of `Recipe.round0` for this series' first, data-driven samples:
             any of `rms_min`, `sigma` and `width_min`.
+        regions: Phase only: integer labels on the lattice (0 for none), each with its own
+            offset, used as given in place of the connected regions of at least
+            `Recipe.min_region_km2` (labels drawn on the native product, a split by hand).
+            The `near` and `valid` masks apply on top; labels are not merged or dropped.
     """
 
     name: str
@@ -256,12 +348,15 @@ class DataSeries:
     reach: float = np.inf
     valid: object = None
     first: dict = None
+    regions: object = None
 
     def __post_init__(self):
         if self.kind not in ("phase", "offset"):
             raise ValueError(f"series {self.name}: kind={self.kind!r}, one of 'phase', 'offset'")
         if self.ramp not in RAMP_DEGREE or self.ramp == "none":
             raise ValueError(f"series {self.name}: ramp={self.ramp!r}, one of offset, linear, quadratic, cubic")
+        if self.regions is not None and self.kind != "phase":
+            raise ValueError(f"series {self.name}: regions are for phase series")
         unknown = set(self.first or {}) - {"rms_min", "sigma", "width_min"}
         if unknown:
             raise ValueError(f"series {self.name}: first= takes rms_min, sigma and width_min, not {sorted(unknown)}")
@@ -398,7 +493,7 @@ class Production:
         self.direction = self.sheets[0].direction
         self._pool = None
         self._lattice = None
-        self.log = None
+        self.log = lambda message: None          # until `run` opens the log
 
     # -- the lattice ---------------------------------------------------------------------------------------------
     def _setup_lattice(self):
@@ -418,6 +513,7 @@ class Production:
         else:
             dist = np.min([np.asarray(t.distance(X.ravel(), Y.ravel(), self.frame), float) for t in self.traces],
                           axis=0).reshape(X.shape)
+            cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, dist)
         spacing = float(np.median(np.abs(np.diff(x))))
         self._lattice = dict(x=x, y=y, X=X, Y=Y, dist=dist, spacing=spacing)
@@ -430,7 +526,13 @@ class Production:
         if s.valid is not None:
             valid &= np.asarray(s.valid, bool)
         extra = {}
-        if s.kind == "phase":
+        if s.kind == "phase" and s.regions is not None:
+            regions = np.asarray(s.regions)
+            if regions.shape != valid.shape:
+                raise ValueError(f"series {s.name}: regions {regions.shape} against the lattice's {valid.shape}")
+            valid &= (lat["dist"] >= s.near) & (regions > 0)
+            extra["regions"] = np.where(valid, regions, 0).astype(int)
+        elif s.kind == "phase":
             valid &= lat["dist"] >= s.near
             labels, n = ndimage.label(valid)
             regions = np.zeros_like(labels)
@@ -488,18 +590,53 @@ class Production:
     def _ramps(self, obs):
         return {t: (self.series[t].ramp if t in self.series else "none") for t in obs.tracks}
 
+    def solve_options(self, mesh):
+        """`(options, fixed)`: the solve keywords for a joined mesh, and its slip parameters fixed at zero.
+
+        The recipe's `solve`, with each sheet's `bounds` applied to its own nodes as
+        per-parameter limits. `fixed` is None when no sheet overrides the bounds.
+        """
+        kw = dict(self.recipe.solve)
+        if not any(s.bounds for s in self.sheets):
+            return kw, None
+        counts = [int(c) for c in np.atleast_1d(mesh.attrs.get("joined_nodes", [mesh.n_nodes]))]
+        n = int(sum(counts))
+        lo, hi = slip_bounds(n, kw["strike"], kw["dip"], kw.get("polarity"))
+        a = 0
+        for sheet, c in zip(self.sheets, counts):
+            if sheet.bounds:
+                b = {"strike": kw["strike"], "dip": kw["dip"], "polarity": kw.get("polarity"), **sheet.bounds}
+                l, h = slip_bounds(c, b["strike"], b["dip"], b["polarity"])
+                lo[a:a + c], hi[a:a + c] = l[:c], h[:c]
+                lo[n + a:n + a + c], hi[n + a:n + a + c] = l[c:], h[c:]
+            a += c
+        kw.update(strike=(lo[:n], hi[:n]), dip=(lo[n:], hi[n:]), polarity=None)
+        return kw, (lo == 0.0) & (hi == 0.0)
+
     def system(self, meshes, obs):
-        """`(inversion, NormalSystem)` for the meshes and samples."""
+        """`(inversion, NormalSystem)` for the meshes and samples.
+
+        Slip parameters a sheet's `bounds` fix at zero lose their Green's functions, so they
+        stay out of the fit and the rank, and the nodes where a sheet meets the one it ends
+        on are pinned (`SlipInversion.pinned`).
+        """
         mesh = self._joined(meshes)
         g = self._green(mesh, obs)
-        inv = SlipInversion(mesh, obs, engine=self.engine, g=g.copy() if self.sees else g, basis="node",
-                            ramp=self._ramps(obs), velocity_model=self.velocity_model, sees=self.sees)
+        kw, fixed = self.solve_options(mesh)
+        if self.sees or (fixed is not None and fixed.any()):
+            g = g.copy()
+        if fixed is not None and fixed.any():
+            g[:, fixed] = 0.0
+        inv = SlipInversion(mesh, obs, engine=self.engine, g=g, basis="node", ramp=self._ramps(obs),
+                            velocity_model=self.velocity_model, sees=self.sees)
+        if any(s.meeting is not None for s in self.sheets):
+            inv.pinned = np.concatenate([s.lower_edge(m) for s, m in zip(self.sheets, meshes)])
         if self.constrain is not None:
             inv = self.constrain(inv, meshes)
-        return inv, NormalSystem(inv, **self.recipe.solve)
+        return inv, NormalSystem(inv, **kw)
 
     def solve(self, inv, lam):
-        return inv.solve(smoothing=lam, method="active_set", **self.recipe.solve)
+        return inv.solve(smoothing=lam, method="active_set", **self.solve_options(inv.mesh)[0])
 
     def moments(self, model):
         """`{"total": Mw, sheet: Mw, event: Mw}` on the model's rigidity, each sheet's or group's slip alone."""
@@ -568,7 +705,8 @@ class Production:
         new, a = [], 0
         for sheet, mesh in zip(self.sheets, meshes):
             b = a + mesh.n_elements
-            layout = R.adapt_layout(mesh, sizes[a:b], budget=None, balance=MAX_COUNT_RATIO, structure="unstructured")
+            layout = R.adapt_layout(mesh, sizes[a:b], budget=None, balance=MAX_COUNT_RATIO, structure="unstructured",
+                                    length=sheet.length, max_depth=sheet.depth)
             new.append(sheet.mesh(layout))
             a = b
         return new, lam, sizes
@@ -762,6 +900,14 @@ class Production:
             f"{s.name} {s.length / 1e3:.0f} km at {s.dip:g}" for s in self.sheets) + f"; series {list(self.series)}; "
             f"points {[t for p in self.points for t in p.tracks]}; rank0 {r.rank0:g}; sigma {r.sigma}; "
             f"CV {r.folds} slabs x {r.shifts}; workers {r.workers}")
+        for s in self.sheets:
+            if s.meeting is not None:
+                cut = s.meeting[1] < s.depth
+                self.log(f"  {s.name} ends on {s.ends_on.name} along {100 * cut.mean():.0f}% of its length"
+                         + (f", at {s.meeting[1][cut].min() / 1e3:.1f}-{s.meeting[1][cut].max() / 1e3:.1f} km"
+                            if cut.any() else ""))
+            if s.bounds:
+                self.log(f"  {s.name} bounds: {s.bounds}")
         model = None
         try:
             if "A" in stages and not (self.out / "A.pkl").exists():
@@ -858,7 +1004,9 @@ class Production:
                 recipe = {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(r).items()}
                 (self.out / "summary.json").write_text(json.dumps(dict(
                     recipe=recipe, sheets=[dict(name=sh.name, dip=sh.dip, depth=sh.depth, length=sh.length,
-                                                listric=sh.profile is not None) for sh in self.sheets],
+                                                listric=sh.profile is not None,
+                                                ends_on=sh.ends_on.name if sh.ends_on is not None else None,
+                                                bounds=_jsonable(sh.bounds)) for sh in self.sheets],
                     **s, rows_by_track=counts, converged=extra.get("converged"), stages=record),
                     indent=1, default=float))
             elif (self.out / "final.slip.zip").exists() and model is None:

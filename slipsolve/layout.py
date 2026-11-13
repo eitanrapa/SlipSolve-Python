@@ -617,3 +617,166 @@ def lloyd_layout(length, max_depth, size, top_depth=0.0, iterations=25, seed=0):
     layout = MeshLayout(params, triangulate(params), attrs={"layout": "lloyd"})
     require_boundaries(layout.params)
     return layout
+
+
+#: `clip_layout`: a node within this fraction of its shortest edge of the curve snaps onto it.
+CLIP_SNAP = 0.3
+
+
+def _douglas_peucker(x, y, tol):
+    """Indices of the vertices of the polyline `(x, y)` kept by Douglas-Peucker at tolerance `tol`."""
+    keep = np.zeros(x.size, bool)
+    keep[[0, -1]] = True
+    stack = [(0, x.size - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b <= a + 1:
+            continue
+        dx, dy = x[b] - x[a], y[b] - y[a]
+        length = np.hypot(dx, dy)
+        seg = slice(a + 1, b)
+        d = (np.abs(dy * (x[seg] - x[a]) - dx * (y[seg] - y[a])) / length if length > 0
+             else np.hypot(x[seg] - x[a], y[seg] - y[a]))
+        k = int(np.argmax(d))
+        if d[k] > tol:
+            keep[a + 1 + k] = True
+            stack += [(a, a + 1 + k), (a + 1 + k, b)]
+    return np.flatnonzero(keep)
+
+
+def _curve_distance(q, cs, cz):
+    """Distance in `(s, z)` from each point of `q` `(n, 2)` to the polyline `(cs, cz)`."""
+    ax, ay, vx, vy = cs[:-1], cz[:-1], np.diff(cs), np.diff(cz)
+    l2 = np.maximum(vx * vx + vy * vy, 1e-12)
+    out = np.empty(q.shape[0])
+    for i0 in range(0, q.shape[0], 4000):
+        qq = q[i0:i0 + 4000]
+        t = np.clip(((qq[:, :1] - ax) * vx + (qq[:, 1:] - ay) * vy) / l2, 0.0, 1.0)
+        out[i0:i0 + 4000] = np.hypot(qq[:, :1] - ax - t * vx, qq[:, 1:] - ay - t * vy).min(axis=1)
+    return out
+
+
+def clip_layout(layout, s_curve, depth_curve, snap=None, tol=25.0, dp_tol=100.0, tol_mid=200.0):
+    """The part of `layout` above a depth that varies along strike, with that curve as its lower edge.
+
+    `depth_curve` (m, positive down) is given at the arc lengths `s_curve`; it is where
+    a sheet meets another one (`slipsolve.production.Sheet.meeting_depth`). Nodes within
+    `snap` (default `CLIP_SNAP`) times their shortest edge of the curve move onto it; an
+    end node moves only up or down, and a surface node never. The nodes left above the
+    curve, the points where the layout's edges cross it and the curve's own vertices
+    (simplified by Douglas-Peucker at `dp_tol`, m, so every bend of the curve that reaches
+    into the sheet is a node) are triangulated again. A triangle is kept only if its
+    centroid lies above the curve to within `tol` and its edge midpoints to within
+    `tol_mid` (m). A layout the curve does not reach comes back unchanged.
+
+    Cutting each triangle that straddles the curve along its own chord does not work: a
+    triangle whose three nodes lie above the curve can still span a bend of it, and then
+    reaches through the other sheet.
+    """
+    from scipy.spatial import Delaunay
+
+    snap = CLIP_SNAP if snap is None else snap
+    p = np.asarray(layout.params, float).copy()
+    tri = np.asarray(layout.triangles, int)
+    cs, cd = np.asarray(s_curve, float), np.asarray(depth_curve, float)
+    ze = lambda s: np.interp(s, cs, cd)                                      # noqa: E731
+    depth = -p[:, 1]
+    if np.all(depth <= ze(p[:, 0]) + 1e-6):
+        return layout
+    s_lo, s_hi = p[:, 0].min(), p[:, 0].max()
+    e = np.vstack([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]])
+    e = np.unique(np.sort(e, axis=1), axis=0)
+    el = np.hypot(*(p[e[:, 0]] - p[e[:, 1]]).T)
+    hmin = np.full(p.shape[0], np.inf)
+    np.minimum.at(hmin, e[:, 0], el)
+    np.minimum.at(hmin, e[:, 1], el)
+    # 1. snap onto the nearest point of the curve (an end node only up or down; never a surface node)
+    cz = -cd
+    ax, ay, vx, vy = cs[:-1], cz[:-1], np.diff(cs), np.diff(cz)
+    l2 = np.maximum(vx * vx + vy * vy, 1e-12)
+    t = np.clip(((p[:, :1] - ax) * vx + (p[:, 1:] - ay) * vy) / l2, 0.0, 1.0)
+    nx_, ny_ = ax + t * vx, ay + t * vy
+    dist = np.hypot(p[:, :1] - nx_, p[:, 1:] - ny_)
+    k = np.argmin(dist, axis=1)
+    rows = np.arange(p.shape[0])
+    near_s, near_z, near_d = nx_[rows, k], ny_[rows, k], dist[rows, k]
+    end = np.isclose(p[:, 0], s_lo, atol=1e-6) | np.isclose(p[:, 0], s_hi, atol=1e-6)
+    phi = depth - ze(p[:, 0])
+    cand = (depth > 0.0) & np.where(end, (np.abs(phi) < snap * hmin) & (ze(p[:, 0]) > 0.0),
+                                    (near_d < snap * hmin) & (-near_z < ze(near_s) + 1.0) & (near_z < 0.0))
+    p[cand & end, 1] = -ze(p[cand & end, 0])
+    inner = cand & ~end
+    p[inner, 0], p[inner, 1] = near_s[inner], -ze(near_s[inner])
+    phi = -p[:, 1] - ze(p[:, 0])
+    inside = phi <= tol
+    # 2. where the layout's edges cross the curve
+    ins, outs = phi < -tol, phi > tol
+    cross_e = e[(ins[e[:, 0]] & outs[e[:, 1]]) | (outs[e[:, 0]] & ins[e[:, 1]])]
+    pts = []
+    for a, b in cross_e:
+        lo, hi = (a, b) if ins[a] else (b, a)
+        t0, t1 = 0.0, 1.0
+        for _ in range(40):
+            tm = 0.5 * (t0 + t1)
+            q = p[lo] + tm * (p[hi] - p[lo])
+            if -q[1] - ze(q[0]) > 0:
+                t1 = tm
+            else:
+                t0 = tm
+        q = p[lo] + t0 * (p[hi] - p[lo])
+        pts.append([q[0], -ze(q[0])])
+    # 3. the curve's own vertices where it cuts the sheet (simplified), inside the sheet's s range, and points along
+    #    its arc at the typical element size, so a steep stretch of the curve has nodes down its length
+    shape_pts = []
+    cut = (cd < cd.max() - tol) & (cs >= s_lo) & (cs <= s_hi)
+    h_typ = float(np.median(el))
+    if cut.any():
+        i0, i1 = max(np.flatnonzero(cut)[0] - 1, 0), min(np.flatnonzero(cut)[-1] + 1, cs.size - 1)
+        sub = np.arange(i0, i1 + 1)
+        for j in sub[_douglas_peucker(cs[sub], cd[sub], dp_tol)]:
+            if s_lo <= cs[j] <= s_hi:
+                shape_pts.append([cs[j], -cd[j]])
+        arc_c = np.r_[0.0, np.cumsum(np.hypot(np.diff(cs[sub]), np.diff(cd[sub])))]
+        for a in np.arange(0.0, arc_c[-1], 0.75 * h_typ)[1:]:
+            ps, pd_ = np.interp(a, arc_c, cs[sub]), np.interp(a, arc_c, cd[sub])
+            if s_lo <= ps <= s_hi and pd_ < cd.max() - tol:
+                pts.append([ps, -pd_])
+    # The curve's points are the new edge: all kept but near-duplicates (< 0.3 x the typical edge), and the layout's
+    # own nodes within half their shortest edge of the curve dropped instead, since a node that close leaves slivers.
+    # The Douglas-Peucker vertices carry the curve's shape and are never thinned.
+    on_curve = inside & (np.abs(phi) <= tol)
+    shape = np.array(shape_pts) if shape_pts else np.zeros((0, 2))
+    rest = np.vstack([np.array(pts).reshape(-1, 2), p[on_curve]])
+    rest = rest[np.lexsort((rest[:, 1], rest[:, 0]))] if rest.size else rest
+    kept = [q for q in shape]
+    for q in rest:
+        if not kept or np.hypot(*(np.array(kept) - q).T).min() > 0.3 * h_typ:
+            kept.append(q)
+    extra = np.array(kept).reshape(-1, 2)
+    interior = inside & ~on_curve
+    if extra.size:
+        d_int = _curve_distance(p[interior], cs, -cd)
+        far = d_int > 0.5 * hmin[interior]
+        idx = np.flatnonzero(interior)
+        top_or_end = (p[idx, 1] >= -1e-6) | np.isclose(p[idx, 0], s_lo, atol=1e-6) | np.isclose(p[idx, 0], s_hi, atol=1e-6)
+        interior[idx[~far & ~top_or_end]] = False
+    base = p[interior]
+    allp = np.vstack([base, extra]) if extra.size else base
+    tris = Delaunay(allp).simplices
+    # 4. keep a triangle only if it lies inside: centroid and edge midpoints
+    corners = allp[tris]
+    probes = np.stack([corners.mean(axis=1), 0.5 * (corners[:, 0] + corners[:, 1]),
+                       0.5 * (corners[:, 1] + corners[:, 2]), 0.5 * (corners[:, 2] + corners[:, 0])], 1)
+    below = (-probes[..., 1] - ze(probes[..., 0])) > 0
+    dist = _curve_distance(probes.reshape(-1, 2), cs, -cd).reshape(probes.shape[:2])
+    ph = np.where(below, dist, -dist)
+    ok = (ph[:, 0] <= tol) & np.all(ph[:, 1:] <= tol_mid, axis=1)
+    area = np.abs(signed_areas(allp, tris)) / 2.0
+    ok &= area > 1e-4 * np.median(area[ok])
+    tris = tris[ok]
+    used = np.unique(tris)
+    remap = -np.ones(allp.shape[0], int)
+    remap[used] = np.arange(used.size)
+    params = allp[used]
+    tris = orient_triangles(params, remap[tris])
+    return MeshLayout(params, tris, attrs={**dict(layout.attrs), "clipped": True})

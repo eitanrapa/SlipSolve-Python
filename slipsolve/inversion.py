@@ -129,9 +129,15 @@ def _per_parameter(basis, mesh, factor):
     return (basis.projection().T @ (areas * factor)) / basis.lumped_areas()
 
 
-def _boundary_rows(basis, sides, ratio):
-    """Selection rows pulling the flagged boundary parameters toward zero."""
-    idx = np.nonzero(basis.boundary(sides))[0]
+def _boundary_rows(basis, sides, ratio, pinned=None):
+    """Selection rows pulling the flagged boundary parameters, and any `pinned` ones, toward zero."""
+    mask = np.asarray(basis.boundary(sides), dtype=bool)
+    if pinned is not None:
+        pinned = np.asarray(pinned, dtype=bool)
+        if pinned.shape != mask.shape:
+            raise ValueError(f"pinned has {pinned.shape} entries against {mask.shape} basis functions")
+        mask = mask | pinned
+    idx = np.nonzero(mask)[0]
     n = basis.n_basis
     if idx.size == 0:
         return sp.csr_matrix((0, 2 * n))
@@ -158,7 +164,8 @@ def regularization_blocks(inversion, ss_ratio=1.0, ds_ratio=3.0, boundary_ratio=
         # A continuous field lives on the nodes, so neighbouring *elements* is
         # the wrong thing to difference; the surface Laplacian is the right one.
         smooth = laplace_beltrami(inversion.mesh, ss_ratio, ds_ratio)
-    boundary = _boundary_rows(inversion.basis, sides, boundary_ratio * inversion.boundary_scale)
+    boundary = _boundary_rows(inversion.basis, sides, boundary_ratio * inversion.boundary_scale,
+                              getattr(inversion, "pinned", None))
     n_ramp = inversion.n_ramp
     if n_ramp:
         smooth = sp.hstack([smooth, sp.csr_matrix((smooth.shape[0], n_ramp))], format="csr")
@@ -583,6 +590,11 @@ class SlipInversion:
     #: median row weight (about 1 on `sqrt_count` weights, a few thousand on one over sigma);
     #: the postseismic and interseismic modes set this instead: see `pinned_edges`.
     boundary_scale = 1.0
+
+    #: A mask over the basis functions held at zero slip by zero-slip rows, as an edge is,
+    #: whatever the `sides` of a solve: a sheet's lower edge where it ends on another sheet,
+    #: which lies at no single depth. `None` pins nothing beyond the sides.
+    pinned = None
 
     def __init__(self, mesh, obs, engine=None, ramp="none", basis="element",
                  velocity_model=None, covariance=None, sees=None, extra_columns=None,

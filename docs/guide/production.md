@@ -56,6 +56,9 @@ if __name__ == "__main__":
   - `kind="offset"`: pixel offsets, used from `near` to `reach` of the traces, with
     `ramp` as their nuisance terms.
   - `valid=` masks pixels (a coherence threshold, a zone to leave out).
+  - `regions=` (phase only) gives integer labels on the lattice, each with its own
+    offset, used as given in place of the connected regions: labels drawn on the native
+    product, or a region split by hand. The `near` mask applies on top.
 - `points` are used as they are, with their own weights, for instance GNSS.
 - `sees={"gnss_e1": [0, 1]}` restricts which sheets a track sees, so GNSS that resolves
   two events can be given to each event's faults. `events={"e1": [0, 1]}` reports a
@@ -141,13 +144,34 @@ print(choice.rank, choice.bands)
 Stage `E` repeats the cross-validation on the final mesh and samples, and reports
 whether the rank chosen on mesh B lies inside the final mesh's 1% band.
 
+## Sheets that meet, and per-sheet bounds
+
+A sheet can end where it meets another one, as an antithetic fault does against the main
+fault at depth:
+
+```python
+main = Sheet("main", main_trace, frame, dip=50.0, depth=20e3)
+west = Sheet("west", west_trace, frame, dip=135.0, depth=20e3, ends_on=main,
+             bounds=dict(strike=(0.0, 0.0), polarity=(0, 1)))
+```
+
+- `ends_on=main` finds, for every column of `west`, the depth where it first crosses
+  `main` (`Sheet.meeting_depth`). Every mesh of `west` is then cut off below that curve
+  (`slipsolve.layout.clip_layout`), so nothing reaches through the main sheet, and its
+  nodes on the curve are pinned to zero slip, as a bottom edge is
+  (`SlipInversion.pinned`). The log reports how much of the sheet ends on the other and
+  at what depths.
+- `bounds=` overrides `Recipe.solve`'s `strike`, `dip` and `polarity` on that sheet's
+  nodes alone; here no strike-slip and positive dip-slip only. A component fixed at zero
+  also loses its Green's functions, so it counts neither in the fit nor in the rank.
+
 ## Constraints beyond the recipe
 
 `constrain=` takes a function `(inversion, meshes) -> inversion`, applied to every
-system the run assembles. Use it for what the recipe does not cover: pinning an edge
-where one sheet ends on another, or another zero-slip condition. Bounds, polarity, the
-zero-slip sides and the smoothing ratios go in `Recipe.solve`, which is passed to both
-`SlipInversion.solve` and `NormalSystem`.
+system the run assembles. Use it for what the recipe and the sheets do not cover, such
+as another zero-slip condition. Bounds, polarity, the zero-slip sides and the smoothing
+ratios go in `Recipe.solve`, which is passed to both `SlipInversion.solve` and
+`NormalSystem`; `Sheet(bounds=)` overrides the bounds on one sheet.
 
 ## Workers
 
