@@ -69,6 +69,12 @@ vectors point from the ground to the sensor; see the
 [getting-started page](https://eitanrapa.github.io/SlipSolve-Python/getting-started/)
 has a complete synthetic example that runs as it is.
 
+## Examples on real data
+
+[`examples/`](examples/) solves three recent earthquakes end to end from public data with the production recipe
+(`slipsolve.production`). Each folder downloads its data, runs the inversion, and describes the model and what the
+run should give.
+
 ## Credits and licence
 
 slipsolve is a Python translation of, and extension to,

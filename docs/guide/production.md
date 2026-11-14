@@ -5,7 +5,9 @@ as fine as the data resolve and no finer. The samples should be dense where the 
 varies and sparse where it does not. Each data set should be weighted by its own noise,
 and the smoothing should be chosen by how well the model predicts data it was not fitted
 to. [`Production`](../api/production.md#slipsolve.production.Production) runs those steps
-as one recipe, in checkpointed stages, so a run can be interrupted and resumed.
+as one recipe, in checkpointed stages, so a run can be interrupted and resumed. The
+repository's [`examples`](https://github.com/eitanrapa/SlipSolve-Python/tree/main/examples)
+folder runs it on real earthquakes, from downloading the data to the slip model.
 
 ## What a run needs
 
