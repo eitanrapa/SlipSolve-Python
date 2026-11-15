@@ -72,6 +72,7 @@ answer as where to look, and take the dip, ratio and moment from
 """
 
 import itertools
+import math
 import warnings
 from types import SimpleNamespace
 
@@ -260,6 +261,12 @@ def _evidence_cache_key(covariance):
                                             for v in covariance.values()):
         return ("models", tuple(sorted(covariance.items())))
     return ("object", id(covariance))
+
+
+def _combinations(candidates):
+    """How many combinations `candidates` (one list per axis) makes, exactly: numpy's int64 wraps at ~9e18,
+    and a wrapped count would send `run(method="auto")` to search them all."""
+    return math.prod(len(c) for c in candidates)
 
 
 class DipSweep:
@@ -750,7 +757,7 @@ class DipSweep:
                 raise ValueError(f"fix names segment {j}; segments are 0-{k - 1}")
             candidates[int(j)] = [geometry_key(value)]
         candidates += [list(g) for g in self.ratio_grids]
-        count = int(np.prod([len(c) for c in candidates]))
+        count = _combinations(candidates)
         if method == "auto":
             method = "exhaustive" if count <= max_evaluations else "coordinate"
         if method not in ("exhaustive", "coordinate"):

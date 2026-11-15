@@ -323,3 +323,10 @@ def test_the_bootstrap_needs_an_evidence_result(setup):
     _, _, _, sweep = setup
     with pytest.raises(ValueError, match="score='evidence'"):
         sweep.bootstrap(sweep.run(rank=RANK, fix={0: 90.0, 1: 90.0}))
+
+
+def test_the_combination_count_does_not_wrap():
+    from slipsolve.sweep import _combinations
+
+    assert _combinations([[60.0, 75.0, 90.0]] * 40) == 3 ** 40 > 2 ** 63
+    assert _combinations([[1, 2, 3, 4]] * 32) == 4 ** 32
