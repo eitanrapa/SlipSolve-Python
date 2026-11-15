@@ -253,3 +253,24 @@ def test_synthesised_noise_has_the_covariance_it_was_asked_for():
                            field[:, 3 * lag:].ravel())[0, 1]
     assert 0.2 < at_one < 0.6
     assert abs(at_three) < 0.25
+
+
+def test_the_rank_ladder_reads_the_solves_own_regularisation(mesh):
+    """A rung's weight and its recorded rank come from the system the solve minimises."""
+    from slipsolve import Observations, SlipInversion
+    from slipsolve.selection import NormalSystem
+
+    rng = np.random.default_rng(4)
+    frame = mesh.frame
+    x, y = rng.uniform(-200e3, 200e3, 300), rng.uniform(-60e3, 60e3, 300)
+    keep = np.abs(y) > 3e3
+    look = np.array([0.6, -0.1, 0.79]) / np.linalg.norm([0.6, -0.1, 0.79])
+    obs = Observations.from_points(x[keep], y[keep], rng.normal(0.0, 0.01, keep.sum()), look,
+                                   np.full(keep.sum(), 0.01), name="asc", frame=frame, epsg=None)
+    inversion = SlipInversion(mesh, obs, basis="node")
+    solve_kwargs = dict(ss_ratio=1.0, ds_ratio=3.0, boundary_ratio=3e3, sides=("bottom", "left", "right"), **DEXTRAL)
+    system = NormalSystem(inversion, **solve_kwargs)
+    for lam in (1.0, 30.0, 300.0):
+        assert C._effective_rank(inversion, lam, solve_kwargs) == pytest.approx(system.rank(lam), rel=1e-4)
+    rows = [dict(cell=c, rung=21.0, rank=20.8, correlation=v) for c, v in ((20e3, 0.9), (40e3, 0.95))]
+    assert C.resolving_wavelength(rows, rank=21.0) is not None, "read by the rung asked for"

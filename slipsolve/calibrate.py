@@ -263,18 +263,36 @@ def recovery_score(got, want):
     }
 
 
+def _effective_rank(inversion, smoothing, solve_kwargs=None):
+    """The effective rank of `inversion` solved at `smoothing` with `solve_kwargs`.
+
+    The regularisation keywords among `solve_kwargs` (`_REGULARISATION`) go to
+    `slipsolve.resolution.resolution_diagonal`, so the rank is the one of the system
+    the solve minimises.
+    """
+    from . import resolution
+
+    reg = {k: v for k, v in (solve_kwargs or {}).items() if k in _REGULARISATION}
+    return float(resolution.resolution_diagonal(inversion, float(smoothing), **reg).attrs["effective_rank"])
+
+
+#: The keywords of `SlipInversion.solve` that shape its regularisation, so its rank.
+_REGULARISATION = ("ss_ratio", "ds_ratio", "boundary_ratio", "sides", "smooth_weighting")
+
+
 def resolving_wavelength(table, rank=None, threshold=RESOLVED_CORRELATION):
     """Smallest planted cell that clears `threshold`, interpolated in log cell.
 
     `table` is a sequence of mappings with `cell`, `correlation` and
-    `rank`. When `rank` is given, only that rung is read; otherwise the best
-    rung per cell is used, which reports what the geometry can do rather than
+    `rank`. When `rank` is given, only that rung is read (the row's `rung`, as
+    `run_case` records the rank asked for, or its `rank` without one); otherwise the
+    best rung per cell is used, which reports what the geometry can do rather than
     what one damping choice achieved.
 
     Returns `None` when no wavelength clears the threshold -- an honest answer,
     and the one that should stop a paper claiming a resolved rupture length.
     """
-    rows = [r for r in table if rank is None or abs(r["rank"] - rank) < 1e-6]
+    rows = [r for r in table if rank is None or abs(float(r.get("rung", r["rank"])) - rank) < 1e-6]
     if not rows:
         return None
     best = {}
@@ -603,8 +621,7 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
 
     inversion = SlipInversion(model.mesh, obs, **inversion_kwargs)
     grid = np.logspace(-1.5, 4, 28)
-    achieved = [R.resolution_diagonal(inversion, float(w)).attrs["effective_rank"]
-                for w in grid]
+    achieved = [_effective_rank(inversion, w, solve_kwargs) for w in grid]
     want = truth_on_probe(mesh0, target, probe)
     want_tent = truth_on_probe(mesh0, target, probe, tent=True)
 
@@ -629,8 +646,8 @@ def run_case(case, scenes, mesh0, trace, frame, sample_kwargs, inversion_kwargs,
         # own triangulation, which is the P1 basis. Both are reported; under a
         # node basis the `_tent` scores are the correct ones.
         row = dict(stage=case.stage, cell=case.cell, budget=int(case.budget),
-                   layout=case.layout, seed=case.seed, rank=float(
-                       R.resolution_diagonal(inversion, lam).attrs["effective_rank"]),
+                   layout=case.layout, seed=case.seed, rung=float(rung),
+                   rank=_effective_rank(inversion, lam, solve_kwargs),
                    smoothing=lam, n_obs=int(obs.n),
                    n_elements=int(model.mesh.n_elements),
                    converged=bool(solved.converged),
