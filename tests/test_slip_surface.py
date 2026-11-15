@@ -661,3 +661,23 @@ def test_surface_fit_options_still_reach_the_gridder(setup):
                             dips=[70.0, 80.0], regularizer="diffusion",
                             samples_per_cell=4)
     assert mesh.attrs["kind"] == "curved"
+
+
+def test_a_buried_fault_keeps_the_dip_it_was_given():
+    """The surface trace sits above a buried fault's lattice: it must constrain the plane, not pin its top."""
+    trace = FaultTrace.from_lonlat(np.linspace(-68.0, -67.0, 11), np.full(11, 10.0), name="straight")
+    frame = trace.local_frame()
+    kw = dict(max_depth=20e3, top_depth=5e3, edge_length=2.5e3)
+    x, y = trace.to_local(frame)
+    nx, ny = trace.normals(frame)
+    lon, lat = frame.to_lonlat(x + 20e3 * nx, y + 20e3 * ny)
+    for mesh in (FaultMesh.curved(trace, frame, segments=1, dips=[45.0], **kw),
+                 FaultMesh.curved(trace, frame, bottom_trace=FaultTrace.from_lonlat(lon, lat, name="b"),
+                                  bottom_depth=20e3, **kw)):
+        assert np.median(mesh.dip) == pytest.approx(45.0, abs=0.1)
+        top = mesh.params[:, 1] == mesh.params[:, 1].max()
+        assert np.median(mesh.nodes[top, 1] - np.median(y)) == pytest.approx(5e3, abs=50.0), "the top is 5 km out"
+    # the cell centres of a fault reaching the surface sit on the same plane as its nodes
+    whole = FaultMesh.curved(trace, frame, segments=1, dips=[45.0], max_depth=20e3, edge_length=2.5e3)
+    depth = -whole.centres[:, 2]
+    np.testing.assert_allclose(whole.centres[:, 1] - np.median(y), depth, atol=60.0)

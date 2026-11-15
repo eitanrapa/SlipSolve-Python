@@ -244,13 +244,23 @@ class FaultSurface:
     @classmethod
     def from_control_points(cls, s, z, cross, s_nodes, z_nodes,
                             smoothness=DEFAULT_SMOOTHNESS, weights=None, **kwargs):
-        """Fit both grids from a curvilinear control cloud."""
-        node_grid = gridfit(s, z, cross, s_nodes, z_nodes,
-                            smoothness=smoothness, weights=weights, **kwargs)
+        """Fit both grids from a curvilinear control cloud.
+
+        Each grid is fitted on its depths plus those of any control point above or below
+        them, then read at its own depths: `gridfit` puts a point outside its lattice on
+        the edge row, which would pin the surface trace (`z = 0`) to the top of a buried
+        fault, or of the cell centres half a level down.
+        """
+        def fit(s_axis, z_axis):
+            z_axis = np.asarray(z_axis, dtype=float)
+            extended = np.unique(np.concatenate([z_axis, [z for z in (np.min(z), np.max(z))
+                                                          if not z_axis.min() <= z <= z_axis.max()]]))
+            grid = gridfit(s, z, cross, s_axis, extended, smoothness=smoothness, weights=weights, **kwargs)
+            return grid[np.searchsorted(extended, z_axis)]
+
+        node_grid = fit(s_nodes, z_nodes)
         s_c, z_c = centres(s_nodes), centres(z_nodes)
-        centre_grid = (gridfit(s, z, cross, s_c, z_c, smoothness=smoothness,
-                               weights=weights, **kwargs)
-                       if s_c.size and z_c.size else None)
+        centre_grid = fit(s_c, z_c) if s_c.size and z_c.size else None
         return cls(s_nodes, z_nodes, node_grid, s_c, z_c, centre_grid,
                    attrs={"smoothness": float(smoothness)})
 
