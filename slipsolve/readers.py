@@ -114,7 +114,8 @@ def read_licsar(folder, pair, frame=None, wavelength=SENTINEL1_WAVELENGTH, name=
     Coherence stored as a byte (0-255) is scaled to 0-1, and a zero there is a coherence
     of zero wherever the phase is valid, whatever the raster's no-data tag says. Rasters
     without a CRS are taken as geographic (EPSG:4326). Measure the sign against GNSS or
-    the model before trusting it on a new product.
+    the model before trusting it on a new product. The LiCSAR frame is recorded as
+    `attrs["licsar_frame"]` (`attrs["frame"]` is a `LocalFrame`'s, once on a lattice).
     """
     folder = Path(folder)
     unw_path = _first(folder / f"{pair}.geo.unw.tif", folder / pair / f"{pair}.geo.unw.tif")
@@ -146,7 +147,7 @@ def read_licsar(folder, pair, frame=None, wavelength=SENTINEL1_WAVELENGTH, name=
         _same_grid(unw, cc, f"{pair}.geo.cc.tif")
         extra["coherence"] = cc[0] / 255.0 if np.nanmax(cc[0]) > 1.5 else cc[0]
     return los_grid(los, x, y, look, crs=crs or "EPSG:4326", name=name or frame, extra=extra,
-                    source="LiCSAR", pair=str(pair), frame=str(frame), wavelength=float(wavelength))
+                    source="LiCSAR", pair=str(pair), licsar_frame=str(frame), wavelength=float(wavelength))
 
 
 def read_offsets(value, east, north, up, sigma=None, sign=1, scale=1.0, name="offsets"):

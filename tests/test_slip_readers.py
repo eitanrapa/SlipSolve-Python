@@ -13,6 +13,7 @@ import pytest
 from slipsolve import FaultTrace
 from slipsolve.readers import (SENTINEL1_WAVELENGTH, GnssTable, gnss_points, on_lattice, read_geotiff,
                                read_gnss_offsets, read_licsar, read_offsets)
+from slipsolve.sampling import stack_epsg
 
 rasterio = pytest.importorskip("rasterio")
 from affine import Affine  # noqa: E402
@@ -58,8 +59,9 @@ def test_licsar_is_los_toward_the_satellite(licsar_flat):
     np.testing.assert_allclose(grid.ds["los_up"].values[5, 5], 0.79, rtol=1e-6)
     np.testing.assert_allclose(grid.ds["coherence"].values[5, 5], 128 / 255, rtol=1e-6)
     assert grid.ds["coherence"].values[10, 10] == 0.0, "a zero coherence under valid phase is a value, not no-data"
-    assert grid.ds.attrs["frame"] == "014A_05232_242525" and grid.ds.attrs["sign"] == 1
+    assert grid.ds.attrs["licsar_frame"] == "014A_05232_242525" and grid.ds.attrs["sign"] == 1
     assert grid.ds.rio.crs.to_epsg() == 4326
+    assert "frame" not in grid.ds.attrs and stack_epsg(grid.ds) == 4326, "geographic, not yet on a lattice"
 
 
 def test_licsar_archive_layout_and_missing_files(tmp_path):
@@ -69,7 +71,7 @@ def test_licsar_archive_layout_and_missing_files(tmp_path):
     for c, v in zip("ENU", (0.6, -0.1, 0.79)):
         _write(folder / "metadata" / f"F.geo.{c}.tif", np.full(SHAPE, v))
     grid = read_licsar(folder, "P")
-    assert "coherence" not in grid.ds and grid.ds.attrs["frame"] == "F"
+    assert "coherence" not in grid.ds and grid.ds.attrs["licsar_frame"] == "F"
     with pytest.raises(FileNotFoundError):
         read_licsar(folder, "Q")
 
