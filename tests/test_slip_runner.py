@@ -316,3 +316,36 @@ def test_the_sigma_is_measured_against_the_models_own_engine(planted, tmp_path):
     print(f"signal {rms(exact):.4f} m; half-space field off by {rms(half - exact):.5f}, "
           f"with the engine's difference {rms(prediction[valid] - exact):.5f}")
     assert rms(prediction[valid] - exact) < 0.15 * rms(half - exact)
+
+
+def test_redoing_a_stage_redoes_the_later_ones(planted, tmp_path):
+    import shutil
+
+    from slipsolve.production import _file_digest
+
+    run, _, _, out = planted
+    copy = tmp_path / "run"
+    shutil.copytree(out, copy)
+    again = Production(copy, run.sheets, list(run.series.values()), points=run.points, recipe=run.recipe,
+                       sees=run.sees, echo=False)
+    meshes, obs, lam, rank, extra = again.load("C.pkl")
+    again._save("C.pkl", meshes, obs, 1.5 * lam, rank + 1.0, extra)          # as a redone stage C leaves it
+    with pytest.raises(ValueError, match="earlier C.pkl"):
+        again.run(stages=["report"])
+    again.run()
+    assert again.load("final.pkl")[3] == pytest.approx(rank + 1.0), "D was redone from the new C"
+    record = json.loads((copy / "stages.json").read_text())
+    assert record["E"]["final"] == _file_digest(copy / "final.pkl"), "and so was E"
+
+
+def test_the_greens_function_cache_tells_engines_apart(planted, tmp_path):
+    from slipsolve import SlipInversion
+
+    run, model, _, _ = planted
+    series = list(run.series.values())
+    plain = Production(tmp_path / "g", run.sheets, series, echo=False)._green(model.mesh, model.obs)
+    other = Production(tmp_path / "g", run.sheets, series, engine=HalfSpaceTDE(0.45), echo=False)
+    got = other._green(model.mesh, model.obs)
+    want = SlipInversion(model.mesh, model.obs, engine=HalfSpaceTDE(0.45), ramp="none", basis="node").g
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-12 * np.abs(want).max())
+    assert not np.allclose(got, plain)

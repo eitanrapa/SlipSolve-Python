@@ -69,6 +69,8 @@ from .selection import CV_RANKS, RANK_JITTER, GridEdge, NormalSystem, choose_ran
 
 #: The stages `Production.run` knows, in order.
 STAGES = ("A", "B", "C0", "C", "D", "E", "X", "report")
+#: Each checkpoint's input: a checkpoint is current only while it was built from that file as it is now.
+_PARENT = {"B.pkl": "A.pkl", "C0.pkl": "B.pkl", "C.pkl": "C0.pkl", "final.pkl": "C.pkl"}
 #: The degree of each nuisance kind's polynomial.
 RAMP_DEGREE = {"none": None, "offset": 0, "linear": 1, "quadratic": 2, "cubic": 3}
 
@@ -485,6 +487,31 @@ def _engine_spec(engine):
     raise ValueError(f"workers > 1 supports LayeredTDE and HalfSpaceTDE engines, not {type(engine).__name__}")
 
 
+def _file_digest(path):
+    """A checkpoint's identity: its bytes' hash, or None while it does not exist."""
+    path = Path(path)
+    return hashlib.sha1(path.read_bytes()).hexdigest()[:16] if path.exists() else None
+
+
+def _engine_key(engine):
+    """What an engine computes, as a short hash: the Green's function cache is shared by every run in a folder.
+
+    A half-space by its Poisson's ratio; a layered engine by its tables' crust and grids and its own settings; any
+    other engine by its type and its scalar settings.
+    """
+    h = hashlib.sha1(type(engine).__name__.encode())
+    tables = getattr(engine, "tables", None)
+    if tables is not None:
+        for a in (tables.r, tables.z, tables.tops, tables.lam, tables.mu):
+            h.update(np.ascontiguousarray(a, dtype=float).tobytes())
+        h.update(json.dumps(tables.attrs, sort_keys=True, default=str).encode())
+        h.update(str(np.shape(tables.values)).encode())
+    for name, value in sorted(vars(engine).items()):
+        if isinstance(value, (bool, int, float, str, type(None))):
+            h.update(f"{name}={value!r};".encode())
+    return h.hexdigest()[:8]
+
+
 def _digest(obs):
     h = hashlib.sha1()
     for k in ("x", "y", "look_e", "look_n", "look_u"):
@@ -642,7 +669,7 @@ class Production:
 
     def _green(self, mesh, obs):
         """The node-basis Green's matrix of `obs` against `mesh`, cached in `out/g_cache`."""
-        path = self.out / "g_cache" / f"g_{mesh.digest()[:12]}_{_digest(obs)}.npy"
+        path = self.out / "g_cache" / f"g_{mesh.digest()[:12]}_{_digest(obs)}_{_engine_key(self.engine)}.npy"
         if path.exists():
             return np.load(path)
         t0 = time.time()
@@ -1061,8 +1088,11 @@ class Production:
 
     # -- checkpoints -----------------------------------------------------------------------------------------------
     def _save(self, name, meshes, obs, lam, rank, extra=None):
+        extra = dict(extra or {})
+        if name in _PARENT:
+            extra["parent"] = _file_digest(self.out / _PARENT[name])
         with open(self.out / name, "wb") as fh:
-            pickle.dump(dict(meshes=meshes, obs=obs, lam=lam, rank=rank, extra=extra or {}), fh)
+            pickle.dump(dict(meshes=meshes, obs=obs, lam=lam, rank=rank, extra=extra), fh)
 
     def load(self, name):
         """A stage's checkpoint: `(meshes, observations, weight, rank, extra)`."""
@@ -1070,9 +1100,34 @@ class Production:
             z = pickle.load(fh)
         return z["meshes"], z["obs"], z["lam"], z["rank"], z["extra"]
 
+    def _current(self, name):
+        """Whether checkpoint `name` exists and was built from its input checkpoint as that is now.
+
+        A checkpoint written before the inputs were recorded counts as current.
+        """
+        if not (self.out / name).exists():
+            return False
+        parent = _PARENT.get(name)
+        if parent is None:
+            return True
+        recorded = self.load(name)[4].get("parent")
+        return recorded is None or recorded == _file_digest(self.out / parent)
+
+    def _load_current(self, name):
+        """`load(name)`, refused when the checkpoint is older than its input (`_current`)."""
+        if not self._current(name):
+            raise ValueError(f"{name} was built from an earlier {_PARENT[name]}: run its stage again "
+                             f"(stages {STAGES}), or delete it")
+        return self.load(name)
+
     # -- the run ---------------------------------------------------------------------------------------------------
     def run(self, stages=STAGES):
-        """Run `stages` (each skipped when its checkpoint exists); return the final model, or None before `D`."""
+        """Run `stages`; return the final model, or None before `D`.
+
+        A stage is skipped while its checkpoint is current: built from the checkpoint before it as that is now
+        (E's and X's records from `final.pkl`). Redoing one therefore redoes every later stage that is run, and
+        a stage that would read an out-of-date checkpoint raises instead.
+        """
         import pandas as pd
 
         unknown = set(stages) - set(STAGES)
@@ -1103,7 +1158,7 @@ class Production:
                 self.log(f"  {s.name} bounds: {s.bounds}")
         model = None
         try:
-            if "A" in stages and not (self.out / "A.pkl").exists():
+            if "A" in stages and not self._current("A.pkl"):
                 meshes = [s.start(r.start_edge) for s in self.sheets]
                 if self.samples is not None:
                     obs = self.samples
@@ -1116,8 +1171,8 @@ class Production:
                 keep("A", self.summary(self.solve(inv, lam), system, lam, f"A (start meshes, rank {r.rank0:g})"))
                 self._save("A.pkl", meshes, obs, lam, r.rank0)
 
-            if "B" in stages and not (self.out / "B.pkl").exists():
-                meshes, obs, *_ = self.load("A.pkl")
+            if "B" in stages and not self._current("B.pkl"):
+                meshes, obs, *_ = self._load_current("A.pkl")
                 meshes, ok, rows = self._converge(meshes, obs, r.rank0, "B", r.maps_b)
                 pd.DataFrame(rows).to_csv(self.out / "converge_B.csv", index=False)
                 inv, system = self.system(meshes, obs)
@@ -1125,8 +1180,8 @@ class Production:
                 keep("B", dict(self.summary(self.solve(inv, lam), system, lam, "B"), converged=ok))
                 self._save("B.pkl", meshes, obs, lam, r.rank0, {"converged": ok})
 
-            if "C0" in stages and not (self.out / "C0.pkl").exists():
-                meshes, obs, *_ = self.load("B.pkl")
+            if "C0" in stages and not self._current("C0.pkl"):
+                meshes, obs, *_ = self._load_current("B.pkl")
                 inv, system = self.system(meshes, obs)
                 lam = system.lam_for_rank(r.rank0)
                 model = self.solve(inv, lam)
@@ -1154,8 +1209,8 @@ class Production:
                 keep("C0", dict(self.summary(model, system, lam, "C0"), converged=done))
                 self._save("C0.pkl", meshes, obs, lam, r.rank0, {"converged": done})
 
-            if "C" in stages and not (self.out / "C.pkl").exists():
-                meshes, obs, *_ = self.load("C0.pkl")
+            if "C" in stages and not self._current("C.pkl"):
+                meshes, obs, *_ = self._load_current("C0.pkl")
                 inv, system = self.system(meshes, obs)
                 self.log("C: blocked cross-validation on mesh B")
                 choice = self.cross_validate(system, obs)
@@ -1164,8 +1219,8 @@ class Production:
                 keep("C", self.summary(self.solve(inv, choice.lam), system, choice.lam, f"C (rank {choice.rank:.2f})"))
                 self._save("C.pkl", meshes, obs, choice.lam, choice.rank)
 
-            if "D" in stages and not (self.out / "final.pkl").exists():
-                meshes, obs, _, rank, _ = self.load("C.pkl")
+            if "D" in stages and not self._current("final.pkl"):
+                meshes, obs, _, rank, _ = self._load_current("C.pkl")
                 meshes, ok, rows = self._converge(meshes, obs, rank, "D", r.maps_d)
                 pd.DataFrame(rows).to_csv(self.out / "converge_D.csv", index=False)
                 inv, system = self.system(meshes, obs)
@@ -1175,8 +1230,14 @@ class Production:
                 self._save("final.pkl", meshes, obs, lam, rank, {"converged": ok})
                 model.save(self.out / "final.slip.zip")
 
-            if "E" in stages and (self.out / "final.pkl").exists() and "E" not in record:
-                meshes, obs, lam, rank, _ = self.load("final.pkl")
+            final = _file_digest(self.out / "final.pkl")
+
+            def current(key):
+                """Stage `key`'s record exists and was made from final.pkl as it is now."""
+                return key in record and record[key].get("final", final) == final
+
+            if "E" in stages and final is not None and not current("E"):
+                meshes, obs, lam, rank, _ = self._load_current("final.pkl")
                 inv, system = self.system(meshes, obs)
                 self.log("E: blocked cross-validation on the final mesh")
                 choice = self.cross_validate(system, obs)
@@ -1185,11 +1246,10 @@ class Production:
                 self.log(f"E: the final rank {rank:.2f} is {'inside' if inside else 'outside'} the final mesh's 1% "
                          "band" + ("s " if len(choice.bands) > 1 else " ")
                          + ", ".join(f"{lo:.1f}-{hi:.1f}" for lo, hi in choice.bands))
-                keep("E", dict(rank=rank, cv_rank=choice.rank, bands=choice.bands, inside=bool(inside)))
+                keep("E", dict(rank=rank, cv_rank=choice.rank, bands=choice.bands, inside=bool(inside), final=final))
 
-            if ("X" in stages and self.correction is not None and (self.out / "final.pkl").exists()
-                    and "X" not in record):
-                meshes, obs, lam, rank, _ = self.load("final.pkl")
+            if "X" in stages and self.correction is not None and final is not None and not current("X"):
+                meshes, obs, lam, rank, _ = self._load_current("final.pkl")
                 self.log(f"X: the final mesh and samples with the correction, at the final rank {rank:.2f}")
                 inv, system = self.system(meshes, obs, corrected=True)
                 lam_x = system.lam_for_rank(rank)
@@ -1204,10 +1264,15 @@ class Production:
                          + ", ".join(f"{lo:.1f}-{hi:.1f}" for lo, hi in choice.bands)
                          + f" (its own rank {choice.rank:.2f})")
                 keep("X", dict(lam=lam_x, rank=rank, Mw=s.get("Mw"), cv_rank=choice.rank, bands=choice.bands,
-                               inside=bool(inside)))
+                               inside=bool(inside), final=final))
 
-            if "report" in stages and (self.out / "final.pkl").exists():
-                meshes, obs, lam, rank, extra = self.load("final.pkl")
+            if "report" in stages and final is not None:
+                meshes, obs, lam, rank, extra = self._load_current("final.pkl")
+                for key in [k for k in ("E", "X") if k in record and not current(k)]:
+                    if key == "X" and self.correction is not None:
+                        raise ValueError("stage X was solved on an earlier final.pkl: run X again")
+                    self.log(f"report: stage {key}'s record is from an earlier final.pkl; left out")
+                    del record[key]
                 corrected = self.correction is not None and "X" in record
                 if corrected:
                     # the corrected re-solve is the model to quote; the uncorrected final stays beside it

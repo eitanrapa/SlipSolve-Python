@@ -84,8 +84,10 @@ recipe).
 | `X` | with `correction=`: the final mesh and samples again, the correction added to the Green's functions, at the final rank | `final_corrected.slip.zip`, `cv_X.csv` |
 | `report` | the final solve and its summary | `model.slip.zip`, `summary.json` |
 
-`run(stages=...)` runs a subset. A stage whose checkpoint exists is skipped, so delete a
-checkpoint to redo its stage and everything after it.
+`run(stages=...)` runs a subset. A stage is skipped while its checkpoint is current, that is,
+built from the checkpoint before it as that is now, so delete a checkpoint to redo its stage
+and everything after it. A stage that would read an out-of-date checkpoint stops instead.
+Green's functions are cached in `g_cache/`, named by the mesh, the samples and the engine.
 
 **Meshes.** Each re-mesh computes the resolution matrix at the stage's rank. It fits a
 Gaussian to every parameter's resolving kernel and asks for elements a `fraction` of that
