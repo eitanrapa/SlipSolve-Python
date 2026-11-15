@@ -155,3 +155,11 @@ def test_a_gradient_is_refused():
     gradient = VelocityModel([0.0, 5000.0], [5000.0, 6000.0], [2900.0, 3460.0], [2600.0, 2700.0])
     with pytest.raises(NotImplementedError, match="gradient"):
         wn.layer_stack(gradient)
+
+
+@pytest.mark.parametrize("top", [-1000.0, 500.0])
+def test_a_model_not_starting_at_the_surface_is_refused(top):
+    """A row above the surface (a model listed by elevation) would put the tables' free surface there."""
+    off = VelocityModel([top, 60e3], [6000.0, 6000.0], [3464.0, 3464.0], [2700.0, 2700.0])
+    with pytest.raises(ValueError, match="start at the surface"):
+        wn.layer_stack(off)

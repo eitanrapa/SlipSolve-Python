@@ -120,8 +120,9 @@ def layer_stack(model):
     depth = np.asarray(model.depth, dtype=float)
     lam = np.asarray(model.lam, dtype=float)
     mu = np.asarray(model.mu, dtype=float)
-    if depth[0] > 0:
-        raise ValueError("the velocity model must start at the surface")
+    if depth[0] != 0:
+        raise ValueError(f"the velocity model must start at the surface, depth 0 and positive down; its first row "
+                         f"is at {depth[0]:g} m")
     tops, lams, mus = [], [], []
     for i in range(depth.size - 1):
         if depth[i + 1] == depth[i]:
