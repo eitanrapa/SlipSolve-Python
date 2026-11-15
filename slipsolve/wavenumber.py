@@ -105,6 +105,11 @@ MU_SCALE = 3e10
 _TWO_PI = 2.0 * np.pi
 
 
+def _npz(path):
+    """`path` as `numpy.savez` writes it: `.npz` appended unless it already ends so."""
+    return path if path.suffix == ".npz" else path.with_name(path.name + ".npz")
+
+
 # -- the layer stack ---------------------------------------------------------------
 def layer_stack(model):
     """`(tops, lam, mu)` of a piecewise-constant `slipsolve.crust.VelocityModel`.
@@ -915,17 +920,16 @@ class RemainderTables:
 
     # -- files ------------------------------------------------------------------------
     def save(self, path):
-        """Write the tables to a compressed `.npz` file."""
+        """Write the tables to a compressed `.npz` file; returns its path (`.npz` appended to any other name,
+        as numpy does)."""
         import json
-        path = Path(path).expanduser()
+        path = _npz(Path(path).expanduser())
         extra = ({} if self.surface is None else
                  {f"surface_{k}": v for k, v in self.surface.items()})
         if self.strain is not None:
             extra["strain"] = self.strain
         np.savez_compressed(path, r=self.r, z=self.z, values=self.values, tops=self.tops,
                             lam=self.lam, mu=self.mu, attrs=json.dumps(self.attrs), **extra)
-        if not path.suffix:
-            path = path.with_suffix(".npz")
         #: The file the tables were saved to or loaded from: where pool workers load their own copy
         #: (`slipsolve.layered_tde.engine_pool`).
         self.path = path
@@ -933,15 +937,17 @@ class RemainderTables:
 
     @classmethod
     def load(cls, path):
-        """Read tables written by `save`."""
+        """Read tables written by `save`, from its path or the name it was given."""
         import json
-        with np.load(Path(path).expanduser(), allow_pickle=False) as f:
+        path = Path(path).expanduser()
+        path = path if path.exists() else _npz(path)
+        with np.load(path, allow_pickle=False) as f:
             surface = ({k: f[f"surface_{k}"] for k in ("r", "z", "whole", "remainder")}
                        if "surface_whole" in f.files else None)
             strain = f["strain"] if "strain" in f.files else None
             out = cls(f["r"], f["z"], f["values"], f["tops"], f["lam"], f["mu"],
                       attrs=json.loads(str(f["attrs"])), surface=surface, strain=strain)
-        out.path = Path(path).expanduser().resolve()
+        out.path = path.resolve()
         return out
 
     def __repr__(self):

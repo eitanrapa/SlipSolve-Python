@@ -171,3 +171,10 @@ def test_a_thin_layer_gets_a_node_and_none_on_its_interfaces(tops):
         assert not np.isin(np.asarray(tops[1:]), grid).any(), "no node on an interface"
         for a, b in zip(tops[:-1], tops[1:]):
             assert ((grid > a) & (grid < b)).any(), (a, b)
+
+
+def test_tables_saved_under_any_name_load_back(small_tables, tmp_path):
+    path = small_tables.save(tmp_path / "tables.v3")
+    assert path.name == "tables.v3.npz" and path.exists() and small_tables.path == path
+    for name in (path, tmp_path / "tables.v3"):
+        np.testing.assert_array_equal(wn.RemainderTables.load(name).values, small_tables.values)
