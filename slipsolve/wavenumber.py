@@ -156,7 +156,7 @@ def depth_grid(tops, z_max=200e3, first=5.0, growth=1.5, spacing=500.0, deep_spa
     top layer starts at the surface itself, where the remainder is smooth (both
     fields have the free surface). Below the last interface the spacing grows to
     `deep_spacing`, since the remainder decays away from it. No node sits on an
-    interface.
+    interface; a layer no thicker than `2 * first` gets one node, at its middle.
     """
     tops = np.asarray(tops, dtype=float)
 
@@ -175,6 +175,8 @@ def depth_grid(tops, z_max=200e3, first=5.0, growth=1.5, spacing=500.0, deep_spa
             continue
         b = tops[i + 1]
         offsets = graded(0.5 * (b - a), spacing)
+        if not offsets.size:                         # a layer too thin for `first`: one node at its middle
+            offsets = np.array([0.5 * (b - a)])
         lower = b - offsets
         upper = a + offsets if i > 0 else np.array([0.0])
         lo, hi = upper.max(), lower.min()

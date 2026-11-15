@@ -163,3 +163,11 @@ def test_a_model_not_starting_at_the_surface_is_refused(top):
     off = VelocityModel([top, 60e3], [6000.0, 6000.0], [3464.0, 3464.0], [2700.0, 2700.0])
     with pytest.raises(ValueError, match="start at the surface"):
         wn.layer_stack(off)
+
+
+@pytest.mark.parametrize("tops", [[0.0, 8.0, 3000.0], [0.0, 2000.0, 2010.0, 30e3]])
+def test_a_thin_layer_gets_a_node_and_none_on_its_interfaces(tops):
+    for grid in (wn.depth_grid(np.asarray(tops), z_max=40e3), wn.surface_depth_grid(np.asarray(tops), z_max=40e3)):
+        assert not np.isin(np.asarray(tops[1:]), grid).any(), "no node on an interface"
+        for a, b in zip(tops[:-1], tops[1:]):
+            assert ((grid > a) & (grid < b)).any(), (a, b)
