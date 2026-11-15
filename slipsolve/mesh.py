@@ -281,7 +281,7 @@ class FaultMesh:
             "n_down": int(nz),
         }
         mesh = cls(nodes, triangles, params, frame=frame, attrs=attrs)
-        mesh._check_winding(trace)
+        mesh._check_winding(resampled)
         return mesh
 
     @classmethod
@@ -438,7 +438,7 @@ class FaultMesh:
         mesh = cls(nodes, triangles=layout.triangles, params=params,
                    frame=frame, attrs=attrs, centres=centres,
                    centre_params=centre_params)
-        mesh._check_winding(trace)
+        mesh._check_winding(resampled)
         # Validated the way `boundary_nodes` will read it, or the check and the
         # thing it is checking could disagree on a mesh of more than one piece.
         components = mesh.node_components
@@ -778,18 +778,25 @@ class FaultMesh:
         )
 
     # -- checks ------------------------------------------------------------
-    def _check_winding(self, trace):
+    def _check_winding(self, reference):
         """Every normal must lie on the trace's left-hand side.
 
         The invariant that keeps the dip-slip column's sign meaningful. Compared
         against the trace's own perpendicular rather than a fixed axis, so it
-        holds at any strike.
+        holds at any strike. `reference` is the trace the mesh's arc length is
+        measured along (the resampled one it was laid on), or that polyline as
+        `(s, nx, ny)`: arc length and left-hand normals. The digitised trace would not
+        do: its arc length differs, and a back-step in it read at the wrong place
+        refuses a mesh that is wound right.
         """
-        nx, ny = trace.normals(self.frame)
+        if isinstance(reference, tuple):
+            s_trace, nx, ny = (np.asarray(v, dtype=float) for v in reference)
+        else:
+            nx, ny = reference.normals(self.frame)
+            tx, ty = reference.to_local(self.frame)
+            s_trace = _arc_length(tx, ty)
         # Compare each element against the trace normal nearest its centroid in
         # arc length, which is the right reference for a curving fault.
-        tx, ty = trace.to_local(self.frame)
-        s_trace = _arc_length(tx, ty)
         s_elem = self.element_params[:, 0]
         ref_x = np.interp(s_elem, s_trace, nx)
         ref_y = np.interp(s_elem, s_trace, ny)

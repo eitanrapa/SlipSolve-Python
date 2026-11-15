@@ -307,7 +307,7 @@ class Sheet:
                          attrs={"kind": "production", "sheet": self.name, "dip_deg": self.dip,
                                 "max_depth": self.depth, "top_depth": 0.0, "trace_name": self.name,
                                 "trace_length": self.length, "layout": str(layout.attrs.get("layout", ""))})
-        mesh._check_winding(self.trace)
+        mesh._check_winding((self._s, self._nx, self._ny))
         return mesh
 
     def start(self, edge):

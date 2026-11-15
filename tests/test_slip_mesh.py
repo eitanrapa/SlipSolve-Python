@@ -331,3 +331,14 @@ def test_join_assembles_to_the_two_meshes_side_by_side(trace, frame):
     np.testing.assert_allclose(g_joined[:, :na], g_a[:, :na], rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(g_joined[:, na:na + nb], g_b[:, :nb],
                                rtol=1e-12, atol=1e-14)
+
+
+def test_a_back_step_in_the_digitised_trace_does_not_fail_the_winding_check():
+    """The check reads the trace the mesh was laid on, at its own arc length, not the digitised one's."""
+    frame = LocalFrame(0.0, 0.0)
+    x = np.r_[np.arange(0.0, 30e3, 100.0), 29.8e3, 29.7e3, np.arange(29.9e3, 60e3, 100.0)]
+    y = np.r_[np.zeros(300), 150.0, 300.0, np.full(301, 300.0)]
+    trace = FaultTrace.from_lonlat(*frame.to_lonlat(x, y), name="backstep")
+    for edge in (3e3, 2e3, 1e3, 500.0):
+        mesh = FaultMesh.vertical(trace, frame, max_depth=10e3, edge_length=edge)
+        assert np.all(mesh.normals[:, 1] > 0), edge
