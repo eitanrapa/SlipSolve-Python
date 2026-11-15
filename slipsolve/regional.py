@@ -818,11 +818,16 @@ def _read_msh(path):
     return points, np.array([[index[v] for v in tri] for tri in triangles])
 
 
+#: celeri's locking depths (km) for the segments flagged 2-5, when the configuration does not set them.
+CELERI_FLAG_DEPTHS = {2: 25.0, 3: 15.0, 4: 10.0, 5: 5.0}
+
+
 def celeri_inputs(config):
     """The arguments of `RegionalModel.solve` from a celeri configuration file and the input files it names.
 
-    Applies what celeri applies before its solve: stations with flag 0 dropped; the locking-depth flags and override;
-    segments replaced by a mesh (`mesh_flag`) given no elastic field; flagged slip rates and poles as constraints, with
+    Applies what celeri applies before its solve: stations with flag 0 dropped; the locking-depth flags (celeri's
+    defaults, `CELERI_FLAG_DEPTHS`, where the configuration gives none) and override; segments replaced by a mesh
+    (`mesh_flag`, with a `mesh_file_index` naming one of the meshes) given no elastic field; flagged slip rates and poles as constraints, with
     celeri's weights as sigmas (`slip_constraint_weight`, `tri_con_weight`; its a priori poles are held, as its weight
     of 1e24 does). A mesh edge flagged 2 (slip tied to the blocks' motion) is not supported.
 
@@ -839,12 +844,15 @@ def celeri_inputs(config):
     seg = pd.read_csv(path("segment_file_name"))
     seg["name"] = seg["name"].astype(str).str.strip()
     depth = seg["locking_depth"].astype(float).copy()
-    for flag in (2, 3, 4, 5):
-        depth[seg["locking_depth_flag"] == flag] = float(options.get(f"locking_depth_flag{flag}", depth.mean()))
+    for flag, default in CELERI_FLAG_DEPTHS.items():
+        depth[seg["locking_depth_flag"] == flag] = float(options.get(f"locking_depth_flag{flag}", default))
     if options.get("locking_depth_override_flag"):
         depth[:] = float(options["locking_depth_override_value"])
+    mesh_items = (json.loads(path("mesh_parameters_file_name").read_text())
+                  if options.get("mesh_parameters_file_name") else [])
     if "mesh_flag" in seg:
-        depth[seg["mesh_flag"] != 0] = 0.0
+        index = seg.get("mesh_file_index", pd.Series(-1, index=seg.index)).astype(int)
+        depth[(seg["mesh_flag"] != 0) & (index >= 0) & (index < len(mesh_items))] = 0.0
     sigma = 1.0 / np.sqrt(float(options.get("slip_constraint_weight", 1e5)))
     segments = pd.DataFrame({"name": seg["name"], "lon1": seg["lon1"], "lat1": seg["lat1"], "lon2": seg["lon2"],
                              "lat2": seg["lat2"], "dip": seg["dip"], "locking_depth": depth})
@@ -862,9 +870,9 @@ def celeri_inputs(config):
                              "east": st["east_vel"], "north": st["north_vel"], "east_sigma": st["east_sig"],
                              "north_sigma": st["north_sig"], "up": st.get("up_vel", 0.0), "up_sigma": st.get("up_sig", 1.0)})
     meshes = []
-    if options.get("mesh_parameters_file_name"):
+    if mesh_items:
         edge_sigma = 1.0 / np.sqrt(float(options.get("tri_con_weight", 1e6)))
-        for item in json.loads(path("mesh_parameters_file_name").read_text()):
+        for item in mesh_items:
             file = Path(item["mesh_filename"]).expanduser()
             points, triangles = _read_msh(file if file.is_absolute() else config.parent / file)
             points[:, 0] = np.where(points[:, 0] < 0, points[:, 0] + 360.0, points[:, 0])

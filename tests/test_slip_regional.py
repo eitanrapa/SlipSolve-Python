@@ -288,3 +288,33 @@ def test_a_mesh_recovers_uniform_slip():
     assert np.allclose(solved.meshes["strike_slip"], 5.0, atol=1e-4)
     assert np.allclose(solved.meshes["dip_slip"], -2.0, atol=1e-4)
     assert np.allclose(solved.parameters[:omega.size], omega, rtol=0.0, atol=1e-6 * np.abs(omega).max())
+
+
+def test_celeri_locking_depths_follow_celeri(tmp_path):
+    """Flags 2-5 take celeri's default depths, and only a segment whose mesh exists loses its elastic field."""
+    import json
+
+    from slipsolve.regional import celeri_inputs
+
+    pd.DataFrame(dict(name=list("abcdef"), lon1=240.0 + np.arange(6), lat1=35.0, lon2=241.0 + np.arange(6), lat2=35.5,
+                      dip=90.0, locking_depth=12.0, locking_depth_flag=[0, 2, 3, 4, 5, 0], mesh_flag=[0, 0, 0, 0, 1, 1],
+                      mesh_file_index=[-1, -1, -1, -1, 0, 3])).to_csv(tmp_path / "seg.csv", index=False)
+    pd.DataFrame(dict(name=["w", "e"], interior_lon=[240.5, 245.5], interior_lat=[34.0, 36.0], euler_lon=0.0,
+                      euler_lat=0.0, rotation_rate=0.0, rotation_flag=0)).to_csv(tmp_path / "blk.csv", index=False)
+    pd.DataFrame(dict(lon=[241.0], lat=[34.0], name=["s"], east_vel=0.0, north_vel=0.0, east_sig=1.0, north_sig=1.0,
+                      flag=1)).to_csv(tmp_path / "sta.csv", index=False)
+    config = dict(segment_file_name="seg.csv", block_file_name="blk.csv", station_file_name="sta.csv")
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    depth = celeri_inputs(tmp_path / "config.json")["segments"]["locking_depth"].tolist()
+    assert depth == [12.0, 25.0, 15.0, 10.0, 5.0, 12.0], "no mesh file: every segment keeps its field"
+    points, triangles = _grid_mesh()
+    lines = ["$MeshFormat", "2.2 0 8", "$EndMeshFormat", "$Nodes", str(len(points))]
+    lines += [f"{i + 1} {p[0]} {p[1]} {p[2]}" for i, p in enumerate(points)]
+    lines += ["$EndNodes", "$Elements", str(len(triangles))]
+    lines += [f"{i + 1} 2 2 0 1 {t[0] + 1} {t[1] + 1} {t[2] + 1}" for i, t in enumerate(triangles)]
+    (tmp_path / "fault.msh").write_text("\n".join(lines + ["$EndElements", ""]))
+    (tmp_path / "mesh.json").write_text(json.dumps([dict(mesh_filename="fault.msh")]))
+    (tmp_path / "config.json").write_text(json.dumps(dict(config, mesh_parameters_file_name="mesh.json",
+                                                          locking_depth_flag3=7.0)))
+    depth = celeri_inputs(tmp_path / "config.json")["segments"]["locking_depth"].tolist()
+    assert depth == [12.0, 25.0, 7.0, 10.0, 0.0, 12.0], "mesh 0 exists, mesh 3 does not"
