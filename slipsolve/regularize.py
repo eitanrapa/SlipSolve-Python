@@ -181,9 +181,11 @@ def laplace_beltrami(mesh, ss_ratio=1.0, ds_ratio=1.0, form="curvature",
 def scale_smoothing(smooth, smoothing):
     """Apply `smoothing` to a smoothing operator, scalar or per row.
 
-    `solve` divides by the row count so one weight means the same thing on a
-    coarse mesh as on a fine one; that normalisation is here so the solver and
-    `slipsolve.resolution._normal_equations` cannot drift apart.
+    `solve` divides by the row count, as the reference implementation does; that
+    normalisation is here so the solver and `slipsolve.resolution._normal_equations`
+    cannot drift apart. It does not make one weight mean the same on a coarser or a
+    finer mesh: the penalty a given slip field pays falls with the element size, so a
+    weight carried to another mesh should be chosen again, at the same rank.
 
     A **scalar** multiplies the whole operator, which is Tikhonov: one prior
     variance for every regularized quantity, wherever it sits on the fault.

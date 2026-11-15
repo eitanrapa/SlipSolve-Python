@@ -950,3 +950,16 @@ def test_to_grd_writes_readable_single_variable_grids(recovery, tmp_path):
 
     with pytest.raises(KeyError, match="Unknown field"):
         model.to_grd(tmp_path, fields=("ue",), spacing=20000.0, pad=20e3)
+
+
+def test_one_weight_damps_a_finer_mesh_less(setup):
+    """The row-count normalisation is the reference's; it does not make a weight mesh-independent."""
+    from slipsolve.regularize import neighbor_smoothing, scale_smoothing
+
+    trace, frame, _ = setup
+    penalty = []
+    for edge in (12e3, 6e3, 3e3):
+        mesh = FaultMesh.vertical(trace, frame, max_depth=20e3, edge_length=edge)
+        slip = np.asarray(tapered_slip(mesh, peak=-2.0), float)
+        penalty.append(float(np.sum((scale_smoothing(neighbor_smoothing(mesh.neighbors, 1.0, 3.0), 0.3) @ slip) ** 2)))
+    assert penalty[0] > 3 * penalty[1] > 9 * penalty[2]

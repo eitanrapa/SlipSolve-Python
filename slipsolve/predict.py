@@ -150,6 +150,9 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
     `slipsolve.resolution.adapt_layout`), plus `rounds` to stop
     adapting after N rounds and
     `smoothing` to evaluate resolution at a weight other than `solve_kwargs`'.
+    Every round solves at `solve_kwargs`' weight, and one weight damps a finer mesh
+    less (`slipsolve.regularize.scale_smoothing`): to hold the damping as the mesh
+    changes, hold the rank instead (`make_inversion`, `NormalSystem.lam_for_rank`).
 
     `sampling_field` chooses what the quadtree splits on: `"model"` (the
     default, Wang & Fialko's predicted displacement), `"resolution"` (Lohman &

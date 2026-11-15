@@ -7,9 +7,11 @@ The system is the reference implementation's, stacked:
     [ W_boundary   ]        [   0   ]
 
 with `lb <= m <= ub`. `G` is the Green's matrix, `w` the per-observation
-weights, `L` the smoothing operator normalised by its own row count (so
-`lam` means the same thing as the mesh is refined), and `W_boundary` the
-zero-slip edge rows.
+weights, `L` the smoothing operator normalised by its own row count (the
+reference implementation's convention), and `W_boundary` the zero-slip edge
+rows. The normalisation does not make `lam` mean the same on another mesh: the
+penalty a given slip field pays falls as the elements shrink, so solves on
+different meshes compare at a matched effective rank, not at one weight.
 
 `solve` minimises it in its normal equations, exactly, by primal-dual active set
 (`box_qp`). `G'G` and `G'd` do not depend on the regularization, so they are
