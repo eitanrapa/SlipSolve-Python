@@ -169,8 +169,7 @@ class Observations:
 
         x_native = np.asarray(ds["x"].values, dtype=float)
         y_native = np.asarray(ds["y"].values, dtype=float)
-        dx = abs(float(np.diff(x_native)[0]))
-        dy = abs(float(np.diff(y_native)[0]))
+        dx, dy = _pixel_metres(x_native, y_native, frame, epsg)
 
         refine = None
         if refine_within > 0:
@@ -201,7 +200,8 @@ class Observations:
             if dem.shape != los.shape:
                 raise ValueError(f"elevation has shape {dem.shape}, but the stack's grid is {los.shape}")
         rows = _reduce_cells(cells, los, look, valid, x_native, y_native, stat,
-                             regions=region_map, min_valid_fraction=min_valid_fraction, elevation=dem)
+                             regions=region_map, min_valid_fraction=min_valid_fraction, elevation=dem,
+                             pixel=(dx, dy))
 
         # Native grid metres -> the shared local frame. Averaging in the native
         # projection and transforming once is exact to well under a metre over a
@@ -551,6 +551,21 @@ def _to_frame(x, y, frame, epsg):
     return frame.from_epsg(x, y, epsg)
 
 
+def _pixel_metres(x, y, frame, epsg):
+    """A grid's pixel `(dx, dy)` in metres: its spacing, or on a geographic grid (degrees) its size in `frame`
+    at the grid's centre, so the sampler's widths in metres mean metres there too."""
+    dx, dy = abs(float(np.diff(x)[0])), abs(float(np.diff(y)[0]))
+    if epsg is None:
+        return dx, dy
+    from pyproj import CRS
+
+    if not CRS.from_epsg(int(epsg)).is_geographic:
+        return dx, dy
+    x0, y0 = float(np.median(x)), float(np.median(y))
+    px, py = frame.from_epsg(np.array([x0, x0 + dx, x0]), np.array([y0, y0, y0 + dy]), int(epsg))
+    return float(np.hypot(px[1] - px[0], py[1] - py[0])), float(np.hypot(px[2] - px[0], py[2] - py[0]))
+
+
 def _frame_for(ds):
     """A local frame centred on a scene, when no trace was supplied."""
     from pyproj import Transformer
@@ -676,7 +691,7 @@ def _quadtree_cells(values, valid, rms_min, min_rows, min_cols,
 
 
 def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=None,
-                  min_valid_fraction=0.0, elevation=None):
+                  min_valid_fraction=0.0, elevation=None, pixel=None):
     """Collapse each surviving cell to one sample.
 
     Every quantity is averaged over the same valid pixels: the cell is an
@@ -685,7 +700,8 @@ def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=Non
 
     With `regions`, a cell still holding two regions (one that reached the
     minimum width) is reduced over its majority region's pixels only, and dropped
-    (`keep` False) if those fall under `min_valid_fraction` of the cell.
+    (`keep` False) if those fall under `min_valid_fraction` of the cell. `pixel` is the
+    pixel's `(dx, dy)` in metres, for `cell_size` (the grid's own spacing by default).
     """
     n = len(cells)
     out = {k: np.empty(n) for k in
@@ -696,8 +712,10 @@ def _reduce_cells(cells, los, look, valid, x_native, y_native, stat, regions=Non
         out["region"] = np.zeros(n, dtype=np.int64)
     if elevation is not None:
         out["elevation"] = np.full(n, np.nan)
-    dx = abs(float(np.diff(x_native)[0]))
-    dy = abs(float(np.diff(y_native)[0]))
+    if pixel is None:
+        dx, dy = abs(float(np.diff(x_native)[0])), abs(float(np.diff(y_native)[0]))
+    else:
+        dx, dy = pixel
 
     for i, (r0, r1, c0, c1) in enumerate(cells):
         m = valid[r0:r1, c0:c1]

@@ -219,3 +219,25 @@ def test_persist_round_trip(trace, frame, tmp_path):
 def test_empty_result_is_an_error_not_an_empty_set(trace, frame):
     with pytest.raises(ValueError, match="removed every sample"):
         _sample(trace, frame, exclude_within=1e7)
+
+
+def test_a_geographic_grid_is_sampled_in_metres():
+    """The widths are metres on a grid in degrees too: the same field samples as it does on a lattice."""
+    from slipsolve.readers import los_grid, on_lattice
+
+    lon = np.arange(-68.5, -67.5, 0.01)
+    lat = np.arange(10.9, 10.1, -0.01)
+    LON, LAT = np.meshgrid(lon, lat)
+    los = 0.6 / np.pi * np.arctan((LAT - 10.5) / 0.05) + 0.003 * np.random.default_rng(0).standard_normal(LON.shape)
+    look = [np.full(LON.shape, v / np.sqrt(0.6 ** 2 + 0.1 ** 2 + 0.79 ** 2)) for v in (-0.6, -0.1, 0.79)]
+    grid = los_grid(los, lon, lat, look, crs="EPSG:4326", name="geo")
+    trace = FaultTrace(np.array([-68.5, -67.5]), np.array([10.5, 10.5]), name="t")
+    frame = trace.local_frame()
+    kwargs = dict(name="geo", frame=frame, trace=trace, rms_min=0.005, width_min=2000.0, width_max=20000.0,
+                  exclude_within=2000.0)
+    obs = Observations.from_los(grid, **kwargs)
+    ref = Observations.from_los(on_lattice({"geo": grid}, frame, spacing=1000.0,
+                                           bounds=(-50e3, 50e3, -40e3, 40e3))["geo"], **kwargs)
+    assert 0.5 < obs.n / ref.n < 2.0, (obs.n, ref.n)
+    size = obs.ds["cell_size"].values
+    assert 2000.0 <= size.min() < 2500.0 and size.max() < 25e3, "cells measured in metres"
