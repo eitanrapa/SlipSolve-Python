@@ -275,17 +275,27 @@ class FaultTrace:
         exceeds this folds the fault surface back through itself, and the
         resulting mesh has inverted elements.
         """
+        _, kappa = self.signed_curvature(frame)
+        kappa = np.abs(kappa)
+        if not np.any(kappa > 0):
+            return np.inf
+        return float(1.0 / kappa.max())
+
+    def signed_curvature(self, frame=None):
+        """`(s, kappa)`: arc length and curvature (1/m) at each vertex, positive where the trace turns left.
+
+        Its centre of curvature is then on the left, so an offset `d` along the left-hand
+        normal folds the curve where `d * kappa >= 1`; an offset to the other, convex,
+        side never does.
+        """
         frame = frame or self.local_frame()
         x, y = self.to_local(frame)
         s = _arc_length(x, y)
         if s[-1] == 0:
-            return np.inf
+            return s, np.zeros_like(s)
         d1x, d1y = np.gradient(x, s), np.gradient(y, s)
         d2x, d2y = np.gradient(d1x, s), np.gradient(d1y, s)
-        kappa = np.abs(d1x * d2y - d1y * d2x)
-        if not np.any(kappa > 0):
-            return np.inf
-        return float(1.0 / kappa.max())
+        return s, d1x * d2y - d1y * d2x
 
     def _nearest_segment(self, x, y, frame):
         """Closest segment for each point: squared distance, side, index, position.

@@ -495,16 +495,21 @@ def test_bottom_depth_alone_does_not_pass_silently(setup):
 
 
 def test_bottom_trace_folding_guard():
-    """Same limit as a too-shallow dip, stated in terms of the trace."""
-    angle = np.linspace(-np.pi / 2, np.pi / 2, 41)
-    radius = 0.05                                   # ~5.5 km, degrees of latitude
-    trace = FaultTrace(-68.0 + radius * np.cos(angle), 10.0 + radius * np.sin(angle))
-    frame = trace.local_frame()
-    bottom = _bottom_from_offset(trace, frame, -30e3, edge_length=2e3)
+    """Same limit as a too-shallow dip, stated in terms of the trace: past the radius, inside the bend only."""
+    from slipsolve import LocalFrame
+
+    frame = LocalFrame(0.0, 0.0)
+    th = np.linspace(np.pi / 2, 0.0, 40)                  # east, then a right turn of 20 km radius, then south
+    x = np.r_[np.linspace(-60e3, -1e3, 30), 20e3 * np.cos(th[1:]), np.full(30, 20e3)]
+    y = np.r_[np.full(30, 20e3), 20e3 * np.sin(th[1:]), np.linspace(-1e3, -60e3, 30)]
+    trace = FaultTrace.from_lonlat(*frame.to_lonlat(x, y), name="right_turn")
 
     with pytest.raises(ValueError, match="radius of curvature"):
-        FaultMesh.curved(trace, frame, bottom_trace=bottom,
-                         max_depth=20e3, edge_length=2e3)
+        FaultMesh.curved(trace, frame, bottom_trace=_bottom_from_offset(trace, frame, -30e3, edge_length=3e3),
+                         max_depth=20e3, edge_length=3e3)
+    outside = FaultMesh.curved(trace, frame, bottom_trace=_bottom_from_offset(trace, frame, 30e3, edge_length=3e3),
+                               max_depth=20e3, edge_length=3e3)
+    assert outside.areas.min() > 0
 
 
 def test_bottom_trace_reads_a_file(setup, tmp_path):
@@ -700,3 +705,19 @@ def test_a_fit_option_the_builders_set_themselves_is_refused_by_name():
     frame = trace.local_frame()
     with pytest.raises(TypeError, match="Unexpected keyword argument"):
         FaultMesh.curved(trace, frame, segments=2, dips=[60.0, 70.0], max_depth=15e3, edge_length=3e3, weights=1.0)
+
+
+def test_the_fold_guard_refuses_only_the_inside_of_a_bend():
+    """A curve offset toward its convex side spreads; toward its centre it folds once past the radius."""
+    from slipsolve import LocalFrame
+
+    frame = LocalFrame(0.0, 0.0)
+    th = np.linspace(np.pi / 2, 0.0, 40)                  # east, then a right turn of 20 km radius, then south
+    x = np.r_[np.linspace(-60e3, -1e3, 30), 20e3 * np.cos(th[1:]), np.full(30, 20e3)]
+    y = np.r_[np.full(30, 20e3), 20e3 * np.sin(th[1:]), np.linspace(-1e3, -60e3, 30)]
+    trace = FaultTrace.from_lonlat(*frame.to_lonlat(x, y), name="right_turn")
+    kw = dict(segments=12, max_depth=30e3, edge_length=3e3)
+    outside = FaultMesh.curved(trace, frame, dips=[45.0] * 12, **kw)       # leans left: the convex side
+    assert outside.areas.min() > 0
+    with pytest.raises(ValueError, match="inside of a bend"):
+        FaultMesh.curved(trace, frame, dips=[135.0] * 12, **kw)            # 30 km toward the centre, 20 km away

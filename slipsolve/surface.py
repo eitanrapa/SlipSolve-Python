@@ -47,6 +47,18 @@ SURFACE_WEIGHT_RATIO = 1e3
 SAMPLES_PER_CELL = 8
 
 
+def _fold(trace, frame, s, offset):
+    """`(offset, radius)` where an offset along the left-hand normal (m, at arc lengths `s`) reaches the
+    centre of curvature, `offset * kappa >= 1`, the worst such point; None where it never does."""
+    s_trace, kappa = trace.signed_curvature(frame)
+    d = np.interp(s_trace, s, offset)
+    product = d * kappa
+    worst = int(np.argmax(product))
+    if product[worst] < 1.0:
+        return None
+    return abs(float(d[worst])), 1.0 / abs(float(kappa[worst]))
+
+
 def _with_trace(segment, trace, frame):
     """`segment`, reversed if it runs against the trace (its end nearer the trace's start)."""
     s, _ = trace.to_curvilinear(np.array([segment.x_begin, segment.x_end]),
@@ -298,14 +310,23 @@ class FaultSurface:
 
         max_depth = float(-np.min(z_nodes))
         radius = trace.min_curvature_radius(frame)
-        worst = float(np.max(np.abs(dip_offset(max_depth, dips))))
-        if worst >= radius:
+        # each segment's offset at the base over its own stretch of the trace
+        s_trace, _ = trace.signed_curvature(frame)
+        offset = np.zeros_like(s_trace)
+        ends = [np.sort(trace.to_curvilinear(np.array([g.x_begin, g.x_end]), np.array([g.y_begin, g.y_end]),
+                                             frame)[0]) for g in segments]
+        for i, s_i in enumerate(s_trace):
+            inside = [j for j, (a, b) in enumerate(ends) if a <= s_i <= b]
+            j = inside[0] if inside else int(np.argmin([min(abs(s_i - a), abs(s_i - b)) for a, b in ends]))
+            offset[i] = dip_offset(max_depth, dips[j])
+        fold = _fold(trace, frame, s_trace, offset)
+        if fold is not None:
+            worst, at_radius = fold
             raise ValueError(
                 f"A down-dip offset of {worst / 1e3:.1f} km at {max_depth / 1e3:.1f} km "
-                f"depth exceeds the trace's smallest radius of curvature "
-                f"({radius / 1e3:.1f} km), so the projected surface folds through "
-                "itself and the mesh would contain inverted elements. Use a "
-                "steeper dip, a shallower fault, or a smoother trace."
+                f"depth, toward the inside of a bend whose radius of curvature is {at_radius / 1e3:.1f} km, "
+                "folds the projected surface through itself, and the mesh would contain "
+                "inverted elements. Use a steeper dip, a shallower fault, or a smoother trace."
             )
 
         n_along = max(2, int(round(samples_per_cell * (s_nodes.size - 1))))
@@ -452,15 +473,16 @@ class FaultSurface:
         # The fit extrapolates the dip below the control row, so the offset that
         # has to clear the fold limit is the one at the base of the mesh.
         radius = trace.min_curvature_radius(frame)
-        worst = float(np.max(np.abs(cross_bottom))) * max_depth / bottom_depth
-        if worst >= radius:
+        order = np.argsort(s_bottom)
+        fold = _fold(trace, frame, s_bottom[order], cross_bottom[order] * max_depth / bottom_depth)
+        if fold is not None:
+            worst, at_radius = fold
             raise ValueError(
                 f"The bottom trace is {worst / 1e3:.1f} km off the surface trace at "
-                f"{max_depth / 1e3:.1f} km depth, which exceeds the trace's smallest "
-                f"radius of curvature ({radius / 1e3:.1f} km), so the projected "
-                "surface folds through itself and the mesh would contain inverted "
-                "elements. Use a shallower fault, a bottom trace closer to the "
-                "surface trace, or a smoother trace."
+                f"{max_depth / 1e3:.1f} km depth, toward the inside of a bend whose radius of "
+                f"curvature is {at_radius / 1e3:.1f} km, so the projected surface folds through itself "
+                "and the mesh would contain inverted elements. Use a shallower fault, a "
+                "bottom trace closer to the surface trace, or a smoother trace."
             )
 
         n_along = max(2, int(round(samples_per_cell * (s_nodes.size - 1))))
