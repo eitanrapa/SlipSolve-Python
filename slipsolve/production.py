@@ -530,6 +530,12 @@ def _digest(obs):
     return h.hexdigest()[:16]
 
 
+def _slip_change(new, old):
+    """The rms change of the slip from `old` to `new` relative to the rms of `new`, over both components."""
+    new, old = np.asarray(new, float), np.asarray(old, float)
+    return float(np.linalg.norm(new - old) / max(np.linalg.norm(new), 1e-300))
+
+
 def _nuisance_columns(regions, x, y, degree):
     """One column per region and the bivariate monomials up to `degree` (scaled by 100 km)."""
     cols = [(regions == k).astype(float) for k in np.unique(regions)]
@@ -1204,8 +1210,7 @@ class Production:
                     lam = system.lam_for_rank(r.rank0)
                     new = self.solve(inv, lam)
                     n2 = 2 * inv.basis.n_basis
-                    dslip = float(np.sqrt(np.mean((new.x[:n2] - model.x[:n2]) ** 2))
-                                  / np.sqrt(np.mean(new.slip_magnitude ** 2)))
+                    dslip = _slip_change(new.x[:n2], model.x[:n2])
                     dn = abs(new_obs.n - obs.n) / obs.n
                     rows.append(dict(round=k, rows=new_obs.n, rel_rows=dn, rel_slip=dslip, lam=lam,
                                      Mw=self.moments(new)["total"], peak=float(new.max_slip),

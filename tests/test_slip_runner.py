@@ -362,3 +362,12 @@ def test_a_curved_sheets_geometry_goes_into_the_record():
     sheet = CurvedSheet("main", trace, frame, depth=15e3, edge_length=4000.0, bottom_trace=bottom, bottom_depth=15e3)
     record = json.loads(json.dumps(_jsonable(sheet.curved), default=float))
     assert record["bottom_trace"]["name"] == "base" and len(record["bottom_trace"]["lon"]) == len(_LON)
+
+
+def test_the_slip_change_between_rounds_is_relative_to_the_slip():
+    from slipsolve.production import _slip_change
+
+    rng = np.random.default_rng(0)
+    slip = rng.normal(size=200)                    # strike then dip, 100 nodes
+    moved = slip * (1.0 + 0.0244 * rng.choice([-1.0, 1.0], 200))
+    assert _slip_change(moved, slip) == pytest.approx(0.0244, rel=0.05), "not 0.0244 / sqrt(2)"
