@@ -117,3 +117,29 @@ def test_shifted_partitions_are_averaged(problem):
     stacked = np.mean([choice.table[choice.table.partition == k].cv_rms.to_numpy() for k in range(3)], axis=0)
     np.testing.assert_allclose(mean.cv_rms.to_numpy(), stacked)
     assert 3.0 < choice.rank < 120.0 and choice.inside(choice.rank)
+
+
+def test_a_track_a_fold_starves_of_its_ramp_sits_that_fold_out(problem):
+    """Two training rows for a plane's three columns: the fold's normal equations are singular for that track."""
+    inv, obs, direction = problem
+    axis = np.asarray(direction) / np.hypot(*direction)
+    t = obs.ds["x"].values * axis[0] + obs.ds["y"].values * axis[1]
+    lo, width = t.min(), np.ptp(t) / 6
+    rng = np.random.default_rng(5)
+    along = np.r_[rng.uniform(lo + 0.15 * width, lo + 0.85 * width, 40), lo + 1.3 * width, lo + 1.6 * width]
+    across = np.r_[rng.uniform(15e3, 35e3, 40), 20e3, 25e3]
+    x, y = along * axis[0] - across * axis[1], along * axis[1] + across * axis[0]
+    look = np.array([0.6, -0.1, 0.79]) / np.linalg.norm([0.6, -0.1, 0.79])
+    extra = Observations.from_points(x, y, rng.normal(0.0, 0.05, x.size) + 0.2, look, 0.05, name="rg",
+                                     frame=inv.mesh.frame, epsg=None)
+    both = Observations.concat([obs, extra], normalize="none")
+    inversion = SlipInversion(inv.mesh, both, basis="node", ramp={"asc": "offset", "desc": "offset", "rg": "linear"})
+    system = NormalSystem(inversion, **SOLVE)
+    folds, _ = slab_folds(both, 6, direction)
+    track = np.asarray(both.ds["track"].values).astype(str)
+    assert np.bincount(folds[track == "rg"], minlength=6)[:2].tolist() == [40, 2]
+    choice = choose_rank(system, folds, ranks=(5.0, 60.0))
+    held = heldout_residuals(system, folds, choice.lam)
+    rg = track == "rg"
+    assert np.isnan(held[rg & (folds == 0)]).all(), "trained on two rows for three columns: not scored"
+    assert np.isfinite(held[rg & (folds == 1)]).all() and np.isfinite(held[~rg]).all()

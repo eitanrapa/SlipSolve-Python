@@ -394,9 +394,20 @@ def _fold_parts(system, folds, drop):
     parts = []
     for label in np.unique(folds):
         test = np.flatnonzero((folds == label) & keep)
-        at = system.A[test] * w[test, None]
-        cols = system.starved(keep & (folds != label))
-        parts.append((test, at.T @ at, at.T @ (w[test] * system.d[test]), cols,
+        train = keep & (folds != label)
+        # A track left with no more training rows than the nuisance columns they load cannot fix them
+        # (its normal equations are singular there): it sits the fold out, its rows taken from the training
+        # set as well, so its columns are pinned and its held-out rows go unscored like a starved track's.
+        out = np.zeros(system.d.size, bool)
+        for name in np.unique(system._track):
+            mine = train & (system._track == name)
+            columns = int(system._nuisance[mine].any(axis=0).sum())
+            if columns and mine.sum() <= columns:
+                out |= mine
+        removed = np.flatnonzero(((folds == label) & keep) | out)
+        at = system.A[removed] * w[removed, None]
+        cols = system.starved(train & ~out)
+        parts.append((test, at.T @ at, at.T @ (w[removed] * system.d[removed]), cols,
                       test[~system.unpredictable(test, cols)]))
     return parts, keep
 
