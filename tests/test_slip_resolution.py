@@ -1219,3 +1219,12 @@ def test_a_region_held_out_whole_is_pinned_and_not_scored(setup):
     plain = R.blocked_cross_validation(inversion, 0.3, folds=folds)
     assert out["n_obs"] == inversion.obs.n - int(island.sum())
     assert out["cv_rms"] < 1.5 * plain["cv_rms"], "the unfitted constant no longer decides the score"
+
+
+def test_a_deep_kernel_is_pulled_up_and_says_so(setup):
+    _, _, mesh, inversion = setup
+    kernels = R.resolution_kernels(inversion, R.resolution_matrix(inversion, 1.0))
+    depth = -mesh.element_params[:, 1]
+    deep, shallow = depth >= np.percentile(depth, 80), depth <= np.percentile(depth, 20)
+    down = kernels["strike_slip_offset_down"].values
+    assert down[deep].mean() < 0 < down[shallow].mean(), "toward the data: up from the bottom, down from the top"

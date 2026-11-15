@@ -381,9 +381,10 @@ def resolution_kernels(inversion, matrix):
     `resolution_diagonal` reports its diagonal.
 
     `offset_along` / `offset_down` are the signed centroids of the same
-    weights. A large offset says the estimate is not even centred on its own
-    parameter -- classically the case for deep parameters, whose kernels are
-    pulled toward the surface where the data is.
+    weights, along strike and down dip (positive deeper). A large offset says the
+    estimate is not even centred on its own parameter -- classically the case for
+    deep parameters, whose kernels are pulled toward the surface where the data is,
+    so their `offset_down` is negative.
 
     `self_weight` is `|R[k, k]|` over the row's total absolute weight: the
     fraction of the kernel that is the parameter itself.
@@ -432,7 +433,7 @@ def resolution_kernels(inversion, matrix):
             width_along=np.sqrt((own * ds ** 2).sum(axis=1) / own_mass),
             width_down=np.sqrt((own * dz ** 2).sum(axis=1) / own_mass),
             offset_along=(own * ds).sum(axis=1) / own_mass,
-            offset_down=(own * dz).sum(axis=1) / own_mass,
+            offset_down=-(own * dz).sum(axis=1) / own_mass,          # z is up; down is deeper
             self_weight=np.abs(np.diag(block)) / safe,
             width_gaussian=gaussian_kernel_width(block, distance),
         )
