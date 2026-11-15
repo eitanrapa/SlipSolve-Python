@@ -143,7 +143,7 @@ from .sweep import (BootstrapResult, DipSweep, SweepResult, dip_profile_offsets,
 from .temporal import SlipSnapshot, TimeBasis, TimeDependentInversion, TimeDependentModel, TrackSeries
 from .trace import FaultSegment, FaultTrace, TraceSet
 from .tsurf import TSurf, read_tsurf
-from .uncertainty import Ensemble, checkerboard, monte_carlo, recovery, with_solution
+from .uncertainty import Ensemble, checkerboard, monte_carlo, recovery, recovery_score, with_solution
 from .wavenumber import RemainderTables
 
 __all__ = [
@@ -245,6 +245,7 @@ __all__ = [
     "read_tenv3",
     "read_tsurf",
     "recovery",
+    "recovery_score",
     "resample_all",
     "resample_to_frame",
     "resolution_bias",

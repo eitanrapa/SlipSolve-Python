@@ -16,7 +16,7 @@ import numpy as np
 from slipsolve import FaultTrace, LayeredTDE, Observations, RemainderTables, VelocityModel, frame_lattice, resample_all
 from slipsolve.production import DataSeries, Production, Recipe, Sheet
 
-trace = FaultTrace.from_kml("rupture.kml")
+trace = FaultTrace.from_file("rupture.kml")
 frame = trace.local_frame()
 
 # every raster on one lattice in the frame (the symmetric median suits offsets with outliers)
