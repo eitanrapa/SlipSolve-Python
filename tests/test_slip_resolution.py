@@ -810,9 +810,11 @@ def test_the_epic_jacobian_is_wired_to_the_right_matrices(epic_setup):
     A coarse step, and do not "improve" it by shrinking. A real normal
     matrix here has a condition number around 3e8, so `inv` loses about eight
     digits and differencing two nearly-equal variances loses the rest: the
-    disagreement *grows* as the step shrinks -- 6e-4 at a 1e-2 relative
-    step, 7e-3 at 1e-3, 3e-1 at 1e-5, 6e0 at 1e-6. That is rounding, not the
-    Jacobian, which the test above pins to 1e-5.
+    disagreement *grows* as the step shrinks -- 1-2e-3 at a 1e-1 relative
+    step, 1-2e-2 at 1e-2, where jittering the matrix by 1e-16 moves it across
+    that range. That is rounding, not the Jacobian, which the test above pins
+    to 1e-5. The step's own error is exactly (c h)^2 / (1 - (c h)^2), for c
+    the smoothing row's leverage, and far smaller here.
     """
     inversion = epic_setup
     smooth, fixed = R._epic_blocks(inversion, 1.0, 3.0, 1.0,
@@ -830,7 +832,7 @@ def test_the_epic_jacobian_is_wired_to_the_right_matrices(epic_setup):
     analytic = -((inverse @ operator.T)[:n_slip] ** 2)
 
     for j in rng.choice(operator.shape[0], size=6, replace=False):
-        step = 1e-2 * scale[j]
+        step = 1e-1 * scale[j]
         up, down = scale.copy(), scale.copy()
         up[j] += step
         down[j] -= step
