@@ -711,3 +711,23 @@ def test_sample_slip_names_its_components_like_plot_slip(nodal):
         sample_slip(nodal, s, z, "Magnitude")
     with pytest.raises(ValueError, match="same shape"):
         sample_slip(nodal, np.zeros(3), np.zeros(4))
+
+
+def test_a_remesh_that_keeps_the_element_count_is_compared_on_the_probe_lattice(setup, monkeypatch):
+    """The same elements in another order are another mesh: comparing them element by element is meaningless."""
+    from slipsolve import FaultMesh
+    from slipsolve import predict
+
+    trace, frame, mesh, _, scenes = setup
+    changes = {}
+    for name, remesh in (("same", lambda current, *a, **k: current),
+                         ("reordered", lambda current, *a, **k: FaultMesh(
+                             current.nodes, np.asarray(current.triangles)[::-1], current.params,
+                             frame=current.frame, attrs=current.attrs))):
+        monkeypatch.setattr(predict, "_adapt_mesh", remesh)
+        _, model, history = iterate_sampling(
+            scenes, mesh, trace, frame, {n: dict(_SAMPLING) for n in scenes}, max_rounds=3, tol=0.0,
+            spacing=4000.0, solve_kwargs={"smoothing": 0.3}, verbose=False,
+            mesh_adapt={"geometry": {"uniform_dip": 90.0, "edge_length": 6e3}, "rounds": 2})
+        changes[name] = history[2]["max_change"]                  # round 2 (history[0] is round 0): near convergence
+    assert changes["reordered"] == pytest.approx(changes["same"], rel=0.5, abs=0.02), changes

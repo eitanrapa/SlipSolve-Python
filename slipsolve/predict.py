@@ -167,8 +167,8 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
     cell's local scatter.
 
     On a fixed mesh `max_change` is `max |element_slip - previous|`. When the
-    mesh moves, two rounds give vectors of different length, so it is measured
-    on a fixed `(s, z)` probe lattice instead.
+    mesh moves, two rounds' elements are not the same elements (even where their
+    count is), so it is measured on a fixed `(s, z)` probe lattice instead.
 
     That probe number has a floor, which is why `mesh_adapt` stops before the
     last round: resampling a piecewise-constant field onto a fixed lattice
@@ -245,6 +245,7 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
     for round_index in range(1, int(max_rounds) + 1):
         _warn_if_degenerate(model, round_index)
         previous = model.element_slip.copy()
+        previous_mesh = mesh.digest()
         previous_probe = None if probe is None else _probe_slip(mesh, model, probe)
 
         # One factorization for the whole round: the sampling field needs it for
@@ -268,7 +269,8 @@ def iterate_sampling(scenes, mesh, trace, frame, sample_kwargs, coarse_kwargs=No
         inversion = build(mesh, obs)
         model = inversion.solve(**solve_kwargs)
 
-        if previous_probe is not None and model.element_slip.size != previous.size:
+        # A remesh can keep the element count and still move every element: compare on the probe lattice then too.
+        if previous_probe is not None and mesh.digest() != previous_mesh:
             change = float(np.abs(
                 _probe_slip(mesh, model, probe) - previous_probe).max())
         else:
