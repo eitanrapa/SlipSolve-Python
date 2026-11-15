@@ -455,3 +455,13 @@ def test_a_component_panel_quotes_its_own_peak(solved):
         assert f"max {dip:.2f} m" in ax.get_title() and f"{model.max_slip:.2f}" not in ax.get_title()
         matplotlib.pyplot.close(fig)
 
+
+def test_point_samples_are_drawn(solved):
+    """Point data (GNSS) have no cell: every marker is drawn, at one size."""
+    frame = solved[1].frame
+    points = Observations.from_points(np.r_[-5e3, 0.0, 5e3], np.r_[8e3, 9e3, 10e3], np.r_[0.01, -0.02, 0.03],
+                                      (1.0, 0.0, 0.0), 0.002, name="gnss", frame=frame, epsg=None)
+    fig, ax = slip_plot.plot_samples(points)
+    sizes = ax.collections[0].get_sizes()
+    assert np.all(np.isfinite(sizes)) and sizes.size in (1, points.n)
+    matplotlib.pyplot.close(fig)

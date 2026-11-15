@@ -413,7 +413,8 @@ def plot_samples(obs, trace=None, ax=None, cmap="RdBu_r"):
     y = obs.ds["y"].values / 1e3
     value = obs.ds["los"].values
     limit = np.abs(value).max() or 1.0
-    size = 4.0 + 40.0 * obs.ds["cell_size"].values / obs.ds["cell_size"].values.max()
+    cell = np.asarray(obs.ds["cell_size"].values, dtype=float)
+    size = 4.0 + 40.0 * (cell / cell.max() if cell.max() > 0 else np.ones_like(cell))     # points have no cell
 
     sc = ax.scatter(x, y, c=value, s=size, cmap=cmap, vmin=-limit, vmax=limit,
                     edgecolors="none")
