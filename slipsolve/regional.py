@@ -39,6 +39,7 @@ opening. Everything this module returns is in m/yr. Rotations and positions use 
 """
 
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -178,7 +179,8 @@ def fit_frame_rotation(lon, lat, east, north, east_model, north_model, clip=3.0,
 
     Fitted at shared stations, velocities in m/yr, each round dropping stations more than `clip` robust standard
     deviations off; the robust deviation is taken as at least `floor` (m/yr), so a close fit drops nothing. `kept`
-    marks the stations of the last fit.
+    marks the stations of the last fit, the one `omega` comes from; it stops early once the screening settles, and
+    warns if it has not within `rounds`.
     """
     lon, lat = np.asarray(lon, dtype=float), np.asarray(lat, dtype=float)
     position = EARTH_RADIUS * _unit(lon, lat)
@@ -191,14 +193,21 @@ def fit_frame_rotation(lon, lat, east, north, east_model, north_model, clip=3.0,
     target = np.r_[np.asarray(east_model, dtype=float) - east, np.asarray(north_model, dtype=float) - north]
     n = lon.size
     kept = np.ones(n, dtype=bool)
-    for _ in range(int(rounds)):
-        rows = np.r_[kept, kept]
+    for _ in range(max(1, int(rounds))):
+        fitted = kept
+        rows = np.r_[fitted, fitted]
         omega, *_ = np.linalg.lstsq(design[rows], target[rows], rcond=None)
         residual = target - design @ omega
         size = np.hypot(residual[:n], residual[n:])
-        scale = max(1.4826 * float(np.median(size[kept])), float(floor))
+        scale = max(1.4826 * float(np.median(size[fitted])), float(floor))
         kept = size < clip * scale
-    return EulerPole(omega), kept
+        if np.array_equal(kept, fitted):
+            break
+    else:
+        warnings.warn(f"fit_frame_rotation: the station screening had not settled in {rounds} rounds "
+                      f"({int(np.sum(kept != fitted))} stations would change); the pole is from the last fit's "
+                      "stations, which kept marks", RuntimeWarning, stacklevel=2)
+    return EulerPole(omega), fitted
 
 
 class RegionalModel:

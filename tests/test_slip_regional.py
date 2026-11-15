@@ -5,6 +5,8 @@ back-slip, the arctangent of Savage & Burford (1973), `v = V/2 + (V/pi) atan(x /
 celeri's input files are written here from the synthetic model and read back (`celeri_inputs`), so no celeri is needed.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -318,3 +320,25 @@ def test_celeri_locking_depths_follow_celeri(tmp_path):
                                                           locking_depth_flag3=7.0)))
     depth = celeri_inputs(tmp_path / "config.json")["segments"]["locking_depth"].tolist()
     assert depth == [12.0, 25.0, 7.0, 10.0, 0.0, 12.0], "mesh 0 exists, mesh 3 does not"
+
+
+def test_a_frame_rotation_returns_the_stations_its_pole_came_from():
+    from slipsolve import EulerPole, fit_frame_rotation
+    from slipsolve.interseismic import EARTH_RADIUS
+    from slipsolve.regional import _east_north, _unit
+
+    rng = np.random.default_rng(1)
+    lon, lat = rng.uniform(-122, -116, 60), rng.uniform(33, 38, 60)
+    v = np.cross(EulerPole.from_pole(-80.0, 40.0, 0.3).omega, EARTH_RADIUS * _unit(lon, lat))
+    e, n = _east_north(lon, lat)
+    east, north = rng.normal(0, 3e-4, 60), rng.normal(0, 3e-4, 60)
+    east[:8] += np.array([4, 3.0, 2.4, 2.0, 1.8, 1.6, 1.5, 1.45]) * 1e-3       # each round drops a few more
+    for rounds in (1, 2, 5):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            pole, kept = fit_frame_rotation(lon, lat, east, north, np.sum(v * e, 1), np.sum(v * n, 1), rounds=rounds)
+        again, _ = fit_frame_rotation(lon[kept], lat[kept], east[kept], north[kept], np.sum(v * e, 1)[kept],
+                                      np.sum(v * n, 1)[kept], rounds=1, clip=1e9)
+        np.testing.assert_allclose(pole.omega, again.omega, rtol=1e-10, atol=0)
+    with pytest.warns(RuntimeWarning, match="had not settled"):
+        fit_frame_rotation(lon, lat, east, north, np.sum(v * e, 1), np.sum(v * n, 1), rounds=1)
