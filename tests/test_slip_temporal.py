@@ -529,6 +529,28 @@ def test_save_load_and_snapshot_text(setup, tmp_path):
     assert history[0] == 0.0 and history[2] >= history[1]
     text = model.slip_between(0.0, 120.0).to_text(tmp_path / "window.txt")
     assert np.loadtxt(text, skiprows=1).shape == (setup["mesh"].n_elements, 10)
+    single = back.slip_between(0.0, 120.0).mesh
+    assert "joined_nodes" not in single.attrs and len(single.sheets()) == 1, "one field's mesh, one sheet"
+
+
+def test_a_loaded_model_of_two_faults_keeps_one_fields_join(setup, tmp_path):
+    n = setup["n"]
+    two = FaultMesh.join([setup["mesh"], setup["mesh"].lowered(1e3)])
+    basis = TimeBasis.epochs([0.0, 40.0, 120.0])
+    amp = np.r_[-0.6 * np.r_[setup["patch"](0.0, 25e3, 6e3), setup["patch"](0.0, 25e3, 6e3)], np.zeros(2 * n)]
+    field = lambda a, b: basis.weights([a], [b]).sum() * amp
+    x, y = setup["sites"]["A"]
+    greens = SlipInversion(two, Observations.from_points(x, y, np.zeros(x.size), _LOOK["A"], _SIGMA,
+                                                         frame=setup["frame"], epsg=None), engine=setup["engine"],
+                           basis="node").g
+    values = np.array([greens @ field(a, b) for a, b in zip((1.0, 41.0), (39.0, 119.0))])
+    series = [TrackSeries(x, y, _LOOK["A"], values, np.r_[1.0, 41.0], np.r_[39.0, 119.0], _SIGMA, name="A",
+                          ramp="linear", frame=setup["frame"])]
+    model = TimeDependentInversion(two, series, basis, engine=setup["engine"], frame_looks=False).solve(
+        smoothing=_LAM, **_SOLVE)
+    back = TimeDependentModel.load(model.save(tmp_path / "two.slip.zip"))
+    single = back.slip_between(0.0, 120.0).mesh
+    assert single.attrs["n_faults"] == 2 and len(single.sheets()) == 2
 
 
 def test_refusals(setup):

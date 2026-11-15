@@ -430,6 +430,10 @@ class TrackSeries:
                 f"ramp {self.ramp}>")
 
 
+#: A joined mesh's records of its pieces (`slipsolve.mesh.FaultMesh.join`).
+_JOIN_KEYS = ("joined_nodes", "joined_elements", "n_faults", "layout")
+
+
 class TimeDependentInversion(SlipInversion):
     """Slip fields `m_k` of a `TimeBasis`, from `TrackSeries` of any length.
 
@@ -631,7 +635,8 @@ class TimeDependentInversion(SlipInversion):
     def _model(self, x, result, smoothing, smooth_matrix, options):
         options = dict(options)
         options.update(time_basis=self.time_basis.to_dict(), temporal=self.temporal,
-                       frame_looks=self.use_frame_looks, boundary_scale=self.boundary_scale)
+                       frame_looks=self.use_frame_looks, boundary_scale=self.boundary_scale,
+                       field_join={k: v for k, v in self.single_mesh.attrs.items() if k in _JOIN_KEYS})
         return TimeDependentModel(self, x, result, smoothing, smooth_matrix, options)
 
     def series_fit(self, model):
@@ -736,8 +741,11 @@ class TimeDependentModel(SlipModel):
         self.time_basis = TimeBasis.from_dict(self.options["time_basis"])
         K, mesh = len(self.time_basis), self.mesh
         nodes, elements = mesh.n_nodes // K, mesh.n_elements // K
+        # The joined mesh's join records are of its K copies; the field's own (its faults) are in the options.
+        attrs = {k: v for k, v in mesh.attrs.items() if k not in _JOIN_KEYS}
+        attrs.update(self.options.get("field_join") or {})
         single = FaultMesh(mesh.nodes[:nodes], mesh.triangles[:elements], mesh.params[:nodes],
-                           frame=mesh.frame, attrs=mesh.attrs)
+                           frame=mesh.frame, attrs=attrs)
         self._single = (single, make_basis(single, self.basis.name))
         return self
 
