@@ -183,22 +183,32 @@ def on_lattice(grids, frame, spacing, bounds, resampling="median", cache=None):
     `bounds` and `spacing` alone and every grid lands on the same one. The default
     `"median"` is the symmetric median, which suits offsets with outliers; rasterio's
     `"med"` is biased low (`slipsolve.resample.resample_all`). With `cache` (a folder), each
-    result is kept as a zarr store named by the grid, the frame, the spacing and the
-    bounds, and read from there next time.
+    result is kept as a zarr store named by the grid's name and a digest of its data, the whole
+    frame (origin, meridian and ellipsoid), the spacing, the bounds and the resampling, and read
+    from there next time.
     """
     import xarray as xr
 
     from .resample import resample_all
 
-    key = None
+    def key(grid):
+        h = hashlib.sha1(np.asarray([frame.origin_lon, frame.origin_lat, frame.ref_lon, spacing, *bounds],
+                                    float).tobytes())
+        h.update(f"{frame.ellps}|{resampling}".encode())
+        for var in sorted(grid.ds.variables):
+            values = np.asarray(grid.ds[var].values)
+            if values.dtype.kind in "biufc":
+                h.update(var.encode())
+                h.update(np.ascontiguousarray(values).tobytes())
+        return h.hexdigest()[:16]
+
     if cache is not None:
         cache = Path(cache)
         cache.mkdir(parents=True, exist_ok=True)
-        h = hashlib.sha1(np.asarray([frame.origin_lon, frame.origin_lat, spacing, *bounds], float).tobytes())
-        key = f"{h.hexdigest()[:12]}_{resampling}"
+    paths = {name: cache / f"{name}_{key(grid)}.zarr" for name, grid in grids.items()} if cache is not None else {}
     out, todo = {}, {}
     for name, grid in grids.items():
-        path = cache / f"{name}_{key}.zarr" if cache is not None else None
+        path = paths.get(name)
         if path is not None and path.exists():
             out[name] = LosGrid(xr.open_zarr(path).load().rio.write_crs(frame.local_crs))
         else:
@@ -211,7 +221,7 @@ def on_lattice(grids, frame, spacing, bounds, resampling="median", cache=None):
                 clean = grid.ds.drop_vars("spatial_ref", errors="ignore")
                 for v in clean.variables.values():
                     v.encoding.clear()
-                clean.to_zarr(cache / f"{name}_{key}.zarr", mode="w")
+                clean.to_zarr(paths[name], mode="w")
             out[name] = grid
     return {name: out[name] for name in grids}
 

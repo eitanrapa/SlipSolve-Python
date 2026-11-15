@@ -148,3 +148,22 @@ def test_on_lattice_shares_one_lattice_and_caches(licsar_flat, tmp_path):
     again = on_lattice({"a": grids["a"]}, frame, spacing=2000.0, bounds=bounds, cache=tmp_path / "work")
     np.testing.assert_allclose(again["a"].ds["los"].values, first["a"].ds["los"].values, equal_nan=True)
     assert "coherence" in again["a"].ds
+
+
+def test_the_lattice_cache_tells_frames_and_data_apart(tmp_path):
+    from slipsolve.frame import LocalFrame
+    from slipsolve.readers import los_grid
+
+    lon, lat = np.arange(30.0, 32.0, 0.01), np.arange(38.0, 36.5, -0.01)
+    LON, LAT = np.meshgrid(lon, lat)
+    look = [np.full(LON.shape, v) for v in (-0.6, -0.1, 0.7937)]
+    grid = los_grid(0.01 * (LON - 31.0) + 0.02 * (LAT - 37.25), lon, lat, look, crs="EPSG:4326", name="g")
+    a, b = LocalFrame(31.0, 37.25), LocalFrame(31.0, 37.25, ref_lon=34.0)      # one origin, two meridians
+    bounds = (-60e3, 60e3, -60e3, 60e3)
+    on_lattice({"g": grid}, a, 2000.0, bounds, cache=tmp_path)
+    cached = on_lattice({"g": grid}, b, 2000.0, bounds, cache=tmp_path)["g"]
+    assert cached.ds.attrs["frame"] == b.to_dict()
+    np.testing.assert_array_equal(cached.ds["los"].values, on_lattice({"g": grid}, b, 2000.0, bounds)["g"].ds["los"].values)
+    shifted = los_grid(0.01 * (LON - 31.0) + 0.02 * (LAT - 37.25) + 0.1, lon, lat, look, crs="EPSG:4326", name="g")
+    again = on_lattice({"g": shifted}, a, 2000.0, bounds, cache=tmp_path)["g"]
+    assert np.nanmean(again.ds["los"].values) > 0.05, "a grid re-read with other data is resampled again"
