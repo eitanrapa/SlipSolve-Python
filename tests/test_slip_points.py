@@ -125,6 +125,15 @@ def test_sees_zeroes_exactly_the_hidden_faults(setup):
                                   full[np.ix_(rows["gnss1"], cols[0])])
 
 
+def test_sees_leaves_a_given_matrix_alone(setup):
+    kw = dict(basis="node", ramp={"asc": "offset", "gnss1": "none", "gnss2": "none"})
+    full = SlipInversion(setup["joined"], setup["obs"], **kw).g
+    given = full.copy()
+    restricted = SlipInversion(setup["joined"], setup["obs"], g=given, sees={"gnss1": [0], "gnss2": [1]}, **kw)
+    np.testing.assert_array_equal(given, full)
+    assert not np.array_equal(restricted.g, full), "the restriction went into the inversion's own copy"
+
+
 def test_sees_is_checked(setup):
     kw = dict(basis="node", ramp={"asc": "offset", "gnss1": "none", "gnss2": "none"})
     with pytest.raises(ValueError, match="not in the observations"):

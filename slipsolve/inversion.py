@@ -706,6 +706,8 @@ class SlipInversion:
 
         self.sees = None
         if sees:
+            if g is not None and np.shares_memory(self.g, g):
+                self.g = self.g.copy()                       # the caller's matrix is theirs: zero a copy
             self._restrict_views(sees)
 
         self.extra_columns = None

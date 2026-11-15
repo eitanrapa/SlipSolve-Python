@@ -743,7 +743,7 @@ class Production:
         kw, fixed = self.solve_options(mesh)
         if corrected:
             g = g + self._correction(mesh, obs)
-        elif self.sees or (fixed is not None and fixed.any()):
+        elif fixed is not None and fixed.any():
             g = g.copy()
         if fixed is not None and fixed.any():
             g[:, fixed] = 0.0
