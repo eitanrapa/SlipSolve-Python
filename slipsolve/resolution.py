@@ -1581,26 +1581,33 @@ def posterior_covariance(inversion, smoothing, kind="propagated", full=False,
 
 
 def _noise_normal_matrix(inversion, noise):
-    """`A' w^2 Cd w^2 A` -- the sandwich's middle, with `Cd = L L'` per track.
+    """`D' W Cd W' D` -- the sandwich's middle, with `D = W A` the solver's whitened design.
 
-    `w` appears twice on each side, not once. The solver's normal
-    equations are `(wA)'(wA) m = (wA)'(w d)`, so the right-hand side carries
-    `w^2` and its variance is `A' w^2 Cd w^2 A`. Applying `w` once gives a
-    covariance too large by `1/w^2` -- with `w = 1/sqrt(n)` and tracks of
-    ~1000 samples, a factor of a thousand in variance.
+    The solver's normal equations are `D'D m = D'(W d)`, so the right-hand side's
+    variance under noise `Cd` is `D' W Cd W' D`. With per-row weights `W = diag(w)`
+    that is `A' w^2 Cd w^2 A`: `w` twice on each side, not once, which would leave the
+    covariance too large by `1/w^2` -- with `w = 1/sqrt(n)` and tracks of ~1000
+    samples, a factor of a thousand in variance. An inversion that whitens by its
+    own covariance has `W = L^-1` there, so the same noise model gives back exactly
+    the propagated covariance.
 
-    Formed as `sum_t (L_t' w_t Aw_t)' (L_t' w_t Aw_t)` so the dense `Cd` is
-    only ever built one track at a time.
+    Formed block by block (`slipsolve.covariance.covariance_blocks`), so the dense `Cd`
+    is only ever built one track at a time.
     """
+    from scipy.linalg import solve_triangular
+
     from .covariance import covariance_blocks, whitening_factors
 
     design = weighted_design(inversion)
     weights = np.asarray(inversion.w, dtype=float)
+    own = getattr(inversion, "_chol", None)
     blocks = covariance_blocks(inversion.obs)
     middle = np.zeros((design.shape[1], design.shape[1]))
     for name, factor in whitening_factors(inversion.obs, noise).items():
         at = blocks[name][1]
-        projected = factor.T @ (weights[at, None] * design[at])
+        back = (weights[at, None] * design[at] if own is None
+                else solve_triangular(own[name], design[at], lower=True, trans="T"))      # W' D
+        projected = factor.T @ back
         middle += projected.T @ projected
     return middle
 

@@ -661,6 +661,15 @@ def test_the_bound_count_reads_every_limit_the_solve_had(signal_setup):
     assert R.bound_fraction(per) == pytest.approx(R.bound_fraction(scalar))
 
 
+def test_the_sandwich_with_the_inversions_own_covariance_is_the_propagated_one(signal_setup):
+    _, _, mesh, _, parts = signal_setup
+    obs = Observations.concat(parts, normalize="none")
+    model = CovarianceModel(sill=SILL, range_m=RANGE, nugget=NUGGET)
+    inversion = SlipInversion(mesh, obs, ramp="offset", covariance=model)
+    np.testing.assert_allclose(R.posterior_covariance(inversion, 3.0, noise=model),
+                               R.posterior_covariance(inversion, 3.0), rtol=1e-8)
+
+
 def test_the_bias_grows_with_lambda_against_a_FIXED_reference(signal_setup):
     """`(R - I) m` -- the other half of the error. Two traps, both pinned.
 
