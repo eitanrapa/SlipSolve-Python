@@ -179,12 +179,23 @@ def _side_of(px, py, cx, cy):
 
 
 def _jsonable(value):
-    """Tuples and arrays inside `value` as lists, for a JSON record."""
+    """`value` as a JSON record can hold it: tuples and arrays as lists, numpy numbers as numbers, a trace as its
+    name and vertices, a segment as its four coordinates, and any other object as its repr."""
+    from .trace import FaultSegment, FaultTrace
+
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}
     if isinstance(value, (tuple, list, np.ndarray)):
         return [_jsonable(v) for v in value]
-    return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, FaultTrace):
+        return dict(name=value.name, lon=_jsonable(np.asarray(value.lon)), lat=_jsonable(np.asarray(value.lat)))
+    if isinstance(value, FaultSegment):
+        return [value.x_begin, value.y_begin, value.x_end, value.y_end]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return repr(value)
 
 
 class Sheet:

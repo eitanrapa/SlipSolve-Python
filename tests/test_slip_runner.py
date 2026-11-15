@@ -349,3 +349,16 @@ def test_the_greens_function_cache_tells_engines_apart(planted, tmp_path):
     want = SlipInversion(model.mesh, model.obs, engine=HalfSpaceTDE(0.45), ramp="none", basis="node").g
     np.testing.assert_allclose(got, want, rtol=0, atol=1e-12 * np.abs(want).max())
     assert not np.allclose(got, plain)
+
+
+def test_a_curved_sheets_geometry_goes_into_the_record():
+    from slipsolve.production import CurvedSheet, _jsonable
+
+    trace = FaultTrace.from_lonlat(_LON, _LAT, name="planted")
+    frame = trace.local_frame()
+    x, y = trace.to_local(frame)
+    nx, ny = trace.normals(frame)
+    bottom = FaultTrace.from_lonlat(*frame.to_lonlat(x + 10e3 * nx, y + 10e3 * ny), name="base")
+    sheet = CurvedSheet("main", trace, frame, depth=15e3, edge_length=4000.0, bottom_trace=bottom, bottom_depth=15e3)
+    record = json.loads(json.dumps(_jsonable(sheet.curved), default=float))
+    assert record["bottom_trace"]["name"] == "base" and len(record["bottom_trace"]["lon"]) == len(_LON)
