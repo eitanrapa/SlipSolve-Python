@@ -681,3 +681,15 @@ def test_a_buried_fault_keeps_the_dip_it_was_given():
     whole = FaultMesh.curved(trace, frame, segments=1, dips=[45.0], max_depth=20e3, edge_length=2.5e3)
     depth = -whole.centres[:, 2]
     np.testing.assert_allclose(whole.centres[:, 1] - np.median(y), depth, atol=60.0)
+
+
+def test_a_segment_drawn_against_the_trace_dips_to_its_left_all_the_same():
+    trace = FaultTrace.from_lonlat(np.linspace(-68.0, -67.0, 11), np.full(11, 10.0), name="eastward")
+    frame = trace.local_frame()
+    x, y = trace.to_local(frame)
+    along = FaultSegment(x[0], y[0], x[-1], y[-1])
+    kw = dict(max_depth=15e3, edge_length=3e3, dips=[60.0])
+    a = FaultMesh.curved(trace, frame, segments=[along], **kw)
+    b = FaultMesh.curved(trace, frame, segments=[along.reversed()], **kw)
+    np.testing.assert_allclose(b.nodes, a.nodes, atol=1e-6)
+    assert np.median(a.dip_direction) == pytest.approx(0.0, abs=1.0), "north: the trace's left"

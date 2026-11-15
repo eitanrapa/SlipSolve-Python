@@ -47,6 +47,13 @@ SURFACE_WEIGHT_RATIO = 1e3
 SAMPLES_PER_CELL = 8
 
 
+def _with_trace(segment, trace, frame):
+    """`segment`, reversed if it runs against the trace (its end nearer the trace's start)."""
+    s, _ = trace.to_curvilinear(np.array([segment.x_begin, segment.x_end]),
+                                np.array([segment.y_begin, segment.y_end]), frame)
+    return segment.reversed() if s[1] < s[0] else segment
+
+
 def gridfit(x, y, v, x_nodes, y_nodes, smoothness=1.0, weights=None,
             interp="triangle", regularizer="gradient", autoscale=True,
             solver="lsqr"):
@@ -279,11 +286,15 @@ class FaultSurface:
         and planar with depth. `depth_control` supplies intermediate
         `(x, y, depth)` points (from relocated seismicity, say) and is the only
         way to bend the profile with depth.
+
+        A segment drawn against the trace's direction is turned to run with it, so
+        that its dip, like every dip here, is measured from the trace's left-hand side.
         """
         segments = list(segments)
         dips = np.broadcast_to(np.asarray(dips, dtype=float).ravel(), (len(segments),))
         if not segments:
             raise ValueError("from_segments needs at least one segment")
+        segments = [_with_trace(segment, trace, frame) for segment in segments]
 
         max_depth = float(-np.min(z_nodes))
         radius = trace.min_curvature_radius(frame)

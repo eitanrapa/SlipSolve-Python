@@ -400,6 +400,10 @@ class FaultSegment:
         """Map-view length, in metres."""
         return float(np.hypot(self.x_end - self.x_begin, self.y_end - self.y_begin))
 
+    def reversed(self):
+        """The same segment drawn the other way, end to begin."""
+        return FaultSegment(self.x_end, self.y_end, self.x_begin, self.y_begin, name=self.name)
+
     def strike_vector(self):
         """Unit vector from begin to end."""
         return np.array([self.x_end - self.x_begin,
