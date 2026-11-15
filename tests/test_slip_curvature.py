@@ -212,3 +212,10 @@ class _NativeTopography:
     def los_matrix(self, mesh, x, y, look_e, look_n, look_u, z=None, elevation=None, step=None):
         points, element = (x, y, look_e, look_n, look_u), make_basis(mesh, "element")
         return assemble_design(HalfSpaceTDE(), mesh, element, points, elevation=elevation, step=step or TOPOGRAPHY_STEP)
+
+
+def test_curvature_tables_saved_under_a_bare_name_load_back(tables, tmp_path):
+    path = tables.save(tmp_path / "far_field")
+    assert path.name == "far_field.npz" and path.exists()
+    back = cv.CurvatureTables.load(tmp_path / "far_field")
+    np.testing.assert_array_equal(back.r, tables.r)

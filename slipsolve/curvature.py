@@ -40,6 +40,7 @@ its product with a rigidity contrast or voxels (`slipsolve.bimaterial`, `slipsol
 """
 
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 import numpy as np
 
@@ -397,18 +398,25 @@ class CurvatureTables:
         return cls(r, z, values, interfaces=tops[1:], attrs=attrs)
 
     def save(self, path):
-        """Write the tables to an `.npz`."""
+        """Write the tables to an `.npz`; returns its path (`.npz` appended to any other name, as numpy does)."""
         import json
 
+        from .wavenumber import _npz
+
+        path = _npz(Path(path).expanduser())
         flat = {f"{kind}.{comp}": v for kind, comps in self.values.items() for comp, v in comps.items()}
         np.savez(path, r=self.r, z=self.z, interfaces=self.interfaces, attrs=json.dumps(self.attrs), **flat)
+        return path
 
     @classmethod
     def load(cls, path):
-        """Read tables `save` wrote."""
+        """Read tables `save` wrote, from its path or the name it was given."""
         import json
 
-        d = np.load(path)
+        from .wavenumber import _npz
+
+        path = Path(path).expanduser()
+        d = np.load(path if path.exists() else _npz(path))
         values = {kind: {comp: d[f"{kind}.{comp}"] for comp in comps} for kind, comps in COMPONENTS.items()}
         return cls(d["r"], d["z"], values, interfaces=d["interfaces"], attrs=json.loads(str(d["attrs"])))
 
