@@ -227,3 +227,51 @@ def test_stage_x_adds_the_correction_and_quotes_it(planted, tmp_path):
     plain = SlipModel.load(copy / "model_uncorrected.slip.zip")
     gain = _mw(corrected.moment()) - _mw(plain.moment())
     assert abs(gain - (2.0 / 3.0) * np.log10(2.0)) < 0.02, gain
+
+
+def _field_case(edge, lattice_offset):
+    """A planted model on a hand-set 500 m lattice, offset from the frame origin by `lattice_offset` m."""
+    from types import SimpleNamespace
+
+    from slipsolve.basis import make_basis
+
+    trace = FaultTrace.from_lonlat(_LON, _LAT, name="planted")
+    frame = trace.local_frame()
+    sheet = Sheet("main", trace, frame, dip=90.0, depth=15e3)
+    mesh = sheet.start(edge)
+    basis = make_basis(mesh, "node")
+    s, z = mesh.params[:, 0], mesh.params[:, 1]
+    amp = np.sin(np.pi * np.clip(s / sheet.length, 0, 1)) * np.clip(1 + z / 12e3, 0, 1)
+    amp[np.asarray(basis.boundary(("bottom", "left", "right")), bool)] = 0
+    slip = np.column_stack([basis.element_values(-3.0 * amp), np.zeros(mesh.n_elements)])
+    model = SimpleNamespace(mesh=mesh, element_slip=slip)
+    x = np.arange(-60e3, 60e3 + 1, 500.0) + lattice_offset
+    y = np.arange(-25e3, 25e3 + 1, 500.0) + lattice_offset
+    X, Y = np.meshgrid(x, y)
+    run = Production("unused", [sheet], [], echo=False)
+    dist = trace.distance(X.ravel(), Y.ravel(), frame).reshape(X.shape)
+    run._lattice = dict(x=x, y=y, X=X, Y=Y, dist=dist, spacing=500.0)
+    return run, model, X, Y, dist
+
+
+def test_the_surface_field_is_exact_beside_the_fault_and_never_crosses_it():
+    run, model, X, Y, dist = _field_case(3e3, 137.0)
+    look = ss.look_vector(35.0, -10.0)
+    field = sum(c * v for c, v in zip(run.field(model), look))
+    sel = (dist >= 2e3) & (dist < 12e3)
+    exact = np.full(X.shape, np.nan)
+    exact[sel] = HalfSpaceTDE(0.25).forward(model.mesh, model.element_slip, X[sel], Y[sel]) @ look
+    err = np.abs(field - exact)
+    near = sel & (dist < 5e3)                      # within two field_spacing: forwarded at each pixel
+    assert np.nanmax(err[near]) < 1e-6, "no value interpolated across the fault"
+    assert np.sqrt(np.nanmean(err[sel & ~near] ** 2)) < 3e-3, "the grid's error beyond: a few mm on metres"
+
+    # The frame origin is on the trace; a lattice snapped to the field grid holds it, and no top node is near it
+    run, model, X, Y, dist = _field_case(12e3, 0.0)
+    east, north, up = run.field(model)
+    on = dist < 1.0
+    assert on.any() and np.isnan(east[on]).all() and np.isfinite(east[~on]).all()
+    need = dist > 20e3
+    partial = run.field(model, need)[0]
+    assert np.isnan(partial[~need]).all() and np.allclose(partial[need], east[need], atol=1e-9)
+

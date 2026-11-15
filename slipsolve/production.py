@@ -59,7 +59,7 @@ from scipy.ndimage import gaussian_filter1d
 from . import resolution as R
 from ._geo import LosGrid
 from .greens import HalfSpaceTDE
-from .inversion import SlipInversion, SlipModel, _far_enough
+from .inversion import SlipInversion, SlipModel, _far_enough, _surface_segments
 from .layout import MAX_COUNT_RATIO, clip_layout, lloyd_layout
 from .mesh import FaultMesh, _arc_length
 from .predict import _fill_nearest
@@ -91,7 +91,8 @@ class Recipe:
         round_tol: Sampling has settled when the row count and the slip both change by
             less than this fraction.
         field_spacing: The grid the model's surface field is forwarded on before it is
-            interpolated to the lattice, m.
+            interpolated to the lattice, m. Within two of these of the fault's outcrop the
+            field is forwarded at each pixel instead.
         width_min: The smallest quadtree cell, m.
         width_max: The largest quadtree cell, m.
         min_valid_fraction: A cell needs at least this fraction of valid pixels.
@@ -451,7 +452,24 @@ def _green_rows(mesh, obs):
 
 
 def _forward_rows(mesh, slip, x, y):
-    return np.asarray(_WORKER["halfspace"].forward(mesh, slip, x, y), float)
+    return _blocked_forward(_WORKER["halfspace"], mesh, slip, x, y)
+
+
+def _blocked_forward(engine, mesh, slip, x, y, block=2048):
+    """East, north and up `(n, 3)` of `slip` at the points, a block of points at a time: the engine builds a
+    `(points, 3, 2 * n_elements)` array."""
+    out = np.empty((np.size(x), 3))
+    for a in range(0, np.size(x), block):
+        out[a:a + block] = engine.forward(mesh, slip, x[a:a + block], y[a:a + block])
+    return out
+
+
+def _element_faults(mesh):
+    """The joined fault of each element (all 0 for a mesh that was not joined)."""
+    counts = mesh.attrs.get("joined_elements")
+    if counts is None:
+        return np.zeros(mesh.n_elements, dtype=int)
+    return np.repeat(np.arange(len(counts)), np.asarray(counts, dtype=int))
 
 
 def _engine_spec(engine):
@@ -825,33 +843,82 @@ class Production:
         return meshes, False, rows
 
     # -- sampling --------------------------------------------------------------------------------------------------
-    def field(self, model):
-        """The model's east, north and up on the lattice: a half-space forward of the element means on a coarse
-        grid, the points within half a step of the outcrop filled from their neighbours, then interpolated."""
-        lat, step = self._lattice, self.recipe.field_spacing
-        x, y = lat["x"], lat["y"]
-        cx = np.arange(x.min() - 2 * step, x.max() + 3 * step, step)
-        cy = np.arange(y.min() - 2 * step, y.max() + 3 * step, step)
-        gx, gy = np.meshgrid(cx, cy)
-        top = model.mesh.nodes[model.mesh.boundary_nodes("top")][:, :2]
-        keep = _far_enough(gx.ravel(), gy.ravel(), top, top, 0.5 * step)
-        px, py = gx.ravel()[keep], gy.ravel()[keep]
+    def _halfspace(self):
+        """The half-space the surface field is forwarded in."""
+        return HalfSpaceTDE(0.25)
+
+    def _forward(self, mesh, slip, x, y):
+        """`_halfspace`'s east, north and up `(n, 3)` of element `slip` at the points, on the workers if any."""
+        x, y = np.asarray(x, float), np.asarray(y, float)
         pool = self._workers()
-        if pool is None:
-            pts = np.asarray(HalfSpaceTDE(0.25).forward(model.mesh, model.element_slip, px, py), float)
-        else:
-            edges = np.linspace(0, px.size, 4 * self.recipe.workers + 1).astype(int)
-            parts = pool.map(_forward_rows, *zip(*[(model.mesh, model.element_slip, px[a:b], py[a:b])
-                                                   for a, b in zip(edges[:-1], edges[1:]) if b > a]))
-            pts = np.vstack(list(parts))
-        at = np.column_stack([lat["Y"].ravel(), lat["X"].ravel()])
-        out = []
-        for c in range(3):
-            v = np.full(gx.size, np.nan)
-            v[keep] = pts[:, c]
-            out.append(RegularGridInterpolator((cy, cx), _fill_nearest(v.reshape(gx.shape)), bounds_error=False,
-                                               fill_value=np.nan)(at).reshape(lat["X"].shape))
-        return out
+        if pool is None or x.size < 2:
+            return _blocked_forward(self._halfspace(), mesh, slip, x, y)
+        edges = np.linspace(0, x.size, 4 * self.recipe.workers + 1).astype(int)
+        parts = pool.map(_forward_rows, *zip(*[(mesh, slip, x[a:b], y[a:b])
+                                               for a, b in zip(edges[:-1], edges[1:]) if b > a]))
+        return np.vstack(list(parts))
+
+    def _seen(self, model, name):
+        """The faults series `name` sees (`sees`), as a sorted tuple, or None for all of them."""
+        sees = getattr(model, "_inversion", None)
+        sees = getattr(sees, "sees", None) or self.sees or {}
+        faults = sees.get(name)
+        return None if faults is None else tuple(sorted(int(f) for f in faults))
+
+    @staticmethod
+    def _slip_seen(model, faults):
+        """The model's element slip with the faults outside `faults` (None: none) set to zero."""
+        slip = np.array(model.element_slip, dtype=float)
+        if faults is not None:
+            slip[~np.isin(_element_faults(model.mesh), faults)] = 0.0
+        return slip
+
+    def field(self, model, need=None, faults=None):
+        """The model's east, north and up on the lattice: `(east, north, up)`, NaN outside `need`.
+
+        A half-space forward of the element means. It is computed exactly at the pixels within two
+        `field_spacing` of the fault's outcrop, where the field steps across the fault and bends fastest, and
+        elsewhere interpolated bilinearly from a `field_spacing` grid evaluated only at the nodes those pixels
+        use. No interpolated pixel reaches a node across the fault, and pixels within a metre of the outcrop,
+        where the solution is singular, are left NaN.
+
+        `need` is a boolean lattice of the pixels wanted (all of them by default), and `faults` keeps only
+        those joined faults' slip, for a series that sees only some of them (`sees`).
+        """
+        lat, step = self._lattice, float(self.recipe.field_spacing)
+        X, Y = lat["X"], lat["Y"]
+        shape = X.shape
+        need = np.ones(shape, bool) if need is None else np.asarray(need, bool)
+        out = np.full((3, X.size), np.nan)
+        idx = np.flatnonzero(need.ravel())
+        if idx.size:
+            mesh, slip = model.mesh, self._slip_seen(model, faults)
+            outcrop = _surface_segments(mesh)
+            px, py = X.ravel()[idx], Y.ravel()[idx]
+            near = ~_far_enough(px, py, *outcrop, 2.0 * step)
+            exact = idx[near][_far_enough(px[near], py[near], *outcrop, 1.0)]
+            if exact.size:
+                out[:, exact] = self._forward(mesh, slip, X.ravel()[exact], Y.ravel()[exact]).T
+            rest = idx[~near]
+            if rest.size:
+                fx, fy = X.ravel()[rest], Y.ravel()[rest]
+                cx = np.arange(X.min() - 2 * step, X.max() + 3 * step, step)
+                cy = np.arange(Y.min() - 2 * step, Y.max() + 3 * step, step)
+                ix = np.clip(np.searchsorted(cx, fx, side="right") - 1, 0, cx.size - 2)
+                iy = np.clip(np.searchsorted(cy, fy, side="right") - 1, 0, cy.size - 2)
+                used = np.zeros((cy.size, cx.size), bool)
+                for di in (0, 1):
+                    for dj in (0, 1):
+                        used[iy + dj, ix + di] = True
+                gx, gy = np.meshgrid(cx, cy)
+                keep = used.ravel() & _far_enough(gx.ravel(), gy.ravel(), *outcrop, 0.5 * step)
+                values = self._forward(mesh, slip, gx.ravel()[keep], gy.ravel()[keep])
+                at = np.column_stack([fy, fx])
+                for c in range(3):
+                    v = np.full(gx.size, np.nan)
+                    v[keep] = values[:, c]
+                    out[c, rest] = RegularGridInterpolator((cy, cx), _fill_nearest(v.reshape(gx.shape)))(at)
+        return [out[c].reshape(shape) for c in range(3)]
 
     def _sigma(self, s, los, valid, regions, prediction, model):
         """A series' sigma from the model (`Recipe.sigma`)."""
@@ -886,10 +953,19 @@ class Production:
         """`(observations, {series: sigma})`: every series' quadtree, from the data alone (`model` None) or split on
         the model's field and weighted one over its sigma; the points as they are."""
         r = self.recipe
-        enu = self.field(model) if model is not None else None
+        usable = {name: self._usable(s) for name, s in self.series.items()}
+        fields = {}
+        if model is not None:
+            # one surface field per set of faults seen, over the pixels the series seeing them use
+            need = {}
+            for name, (_, valid, _) in usable.items():
+                if valid.sum() >= 500:
+                    key = self._seen(model, name)
+                    need[key] = need[key] | valid if key in need else valid.copy()
+            fields = {key: self.field(model, mask, faults=key) for key, mask in need.items()}
         parts, sigmas = [], {}
         for s in self.series.values():
-            los, valid, extra = self._usable(s)
+            los, valid, extra = usable[s.name]
             if valid.sum() < 500:
                 self.log(f"    {s.name}: only {int(valid.sum())} usable pixels; skipped")
                 continue
@@ -904,6 +980,8 @@ class Production:
                     sigma = _scatter(los, valid)
                 kw = dict(rms_min=first["rms_min"], width_min=first.get("width_min", r.width_min))
             else:
+                faults = self._seen(model, s.name)
+                enu = fields[faults]
                 prediction = (enu[0] * ds["los_east"].values + enu[1] * ds["los_north"].values
                               + enu[2] * ds["los_up"].values)
                 sigma = self._sigma(s, los, valid, extra.get("regions"), prediction, model)
