@@ -198,6 +198,29 @@ def test_two_fields_on_a_network_match_the_brute_force_system(setup):
     assert np.abs(model.x[:4 * n] - x_brute[:4 * n]).max() < 1e-7
 
 
+def test_a_covariance_whitens_each_virtual_pair_on_its_own(setup):
+    """With Cd, the virtual pairs give the normal equations of the whole series, noise Ct / mean(diag Ct) (x) Cd."""
+    from slipsolve.covariance import CovarianceModel, observation_covariance
+
+    n = setup["n"]
+    amp = np.r_[-0.6 * setup["patch"](0.0, 25e3, 6e3), np.zeros(n)]
+    basis = TimeBasis.epochs([0.0, 40.0, 120.0])
+    field = lambda a, b: basis.weights([a], [b]).sum() * amp
+    s = _series(setup, "A", np.r_[1.0, 41.0, 1.0], np.r_[39.0, 119.0, 119.0], field, seed=3, ramp="none")
+    cd = CovarianceModel(sill=1.6e-5, range_m=20e3, nugget=4e-6)
+    inv = TimeDependentInversion(setup["mesh"], [s], basis, engine=setup["engine"], frame_looks=False,
+                                 covariance=cd)
+    T = basis.weights(s.t0, s.t1)
+    G = setup["greens"]["A"]
+    full = np.vstack([np.hstack([T[i, k] * G[:, :n] for k in range(2)] + [T[i, k] * G[:, n:] for k in range(2)])
+                      for i in range(T.shape[0])])
+    ct = s.time_covariance()
+    cs = observation_covariance(inv.obs, cd, rows=np.arange(s.n_cells))
+    want = full.T @ np.linalg.solve(np.kron(ct / np.mean(np.diag(ct)), cs), full)
+    white = inv.whiten(inv.g)
+    assert np.abs(white.T @ white - want).max() < 1e-8 * np.abs(want).max()
+
+
 def test_one_engine_call_per_set_of_cells(setup):
     class Counting(HalfSpaceTDE):
         rows = 0

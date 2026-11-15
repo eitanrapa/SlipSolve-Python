@@ -439,12 +439,11 @@ def ramp_content(obs, covariance=None):
         def whiten(m):
             return m * (w[:, None] if m.ndim == 2 else w)
     else:
-        from .covariance import whitening_factors
+        from .covariance import covariance_blocks, whitening_factors
         from scipy.linalg import solve_triangular
 
-        track = np.asarray(ds["track"].values, dtype=object)
         factors = whitening_factors(obs, covariance)
-        rows = {name: np.flatnonzero(track == name) for name in factors}
+        rows = {key: at for key, (_, at) in covariance_blocks(obs).items()}
 
         def whiten(m):
             out_m = np.empty_like(np.asarray(m, dtype=float))

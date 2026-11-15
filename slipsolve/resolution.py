@@ -1029,7 +1029,7 @@ def _held_in(inversion, keep):
     """
     import copy
 
-    from .covariance import whitening_factors
+    from .covariance import covariance_blocks, whitening_factors
     from .sampling import Observations
 
     keep = np.asarray(keep)
@@ -1053,9 +1053,7 @@ def _held_in(inversion, keep):
         # the parent has already answered, and would raise the same warning once
         # per fold per weight.
         out._chol = whitening_factors(out.obs, inversion.covariance)
-        track = np.asarray(out.obs.ds["track"].values, dtype=object)
-        out._track_rows = {name: np.flatnonzero(track == name)
-                           for name in out._chol}
+        out._track_rows = {key: rows for key, (_, rows) in covariance_blocks(out.obs).items()}
     return out
 
 
@@ -1594,14 +1592,14 @@ def _noise_normal_matrix(inversion, noise):
     Formed as `sum_t (L_t' w_t Aw_t)' (L_t' w_t Aw_t)` so the dense `Cd` is
     only ever built one track at a time.
     """
-    from .covariance import whitening_factors
+    from .covariance import covariance_blocks, whitening_factors
 
     design = weighted_design(inversion)
     weights = np.asarray(inversion.w, dtype=float)
-    track = np.asarray(inversion.obs.ds["track"].values, dtype=object)
+    blocks = covariance_blocks(inversion.obs)
     middle = np.zeros((design.shape[1], design.shape[1]))
     for name, factor in whitening_factors(inversion.obs, noise).items():
-        at = np.flatnonzero(track == name)
+        at = blocks[name][1]
         projected = factor.T @ (weights[at, None] * design[at])
         middle += projected.T @ projected
     return middle

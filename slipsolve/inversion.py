@@ -779,7 +779,7 @@ class SlipInversion:
 
     def _build_whitening(self, covariance):
         """Cholesky factors of `Cd`, one block per track."""
-        from .covariance import cell_ratio_warning, whitening_factors
+        from .covariance import cell_ratio_warning, covariance_blocks, whitening_factors
 
         normalize = self.obs.ds.attrs.get("normalize")
         if normalize not in (None, "none"):
@@ -792,11 +792,10 @@ class SlipInversion:
                 "covariance set the weights."
             )
 
-        track = np.asarray(self.obs.ds["track"].values, dtype=object)
+        blocks = covariance_blocks(self.obs)
         self._chol = whitening_factors(self.obs, covariance)
-        self._track_rows = {name: np.flatnonzero(track == name)
-                            for name in self._chol}
-        for name in self._chol:
+        self._track_rows = {key: rows for key, (_, rows) in blocks.items()}
+        for name in dict.fromkeys(track for track, _ in blocks.values()):
             model = (covariance if not isinstance(covariance, dict)
                      else covariance[name])
             message = cell_ratio_warning(self.obs, model, track=name)

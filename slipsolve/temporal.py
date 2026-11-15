@@ -455,6 +455,11 @@ class TimeDependentInversion(SlipInversion):
     units of each row's noise (`cv_rms` of 1 is the noise level). A virtual pair's rms is
     not a displacement: read `series_fit` for that.
 
+    `covariance` (a `CovarianceModel`, or one per series name) is the spatial covariance of
+    one pair's noise, for a pair of the series' mean variance (`mean(diag(time_covariance))`):
+    with the noise `time_covariance / mean(diag) (x) Cd`, every virtual pair's noise is `Cd`,
+    and each is whitened on its own, independent of the other virtual pairs and series.
+
     `patterns` puts signals of known shape beside the slip, each with a free amplitude
     (`slipsolve.patterns`).
     """
@@ -489,7 +494,7 @@ class TimeDependentInversion(SlipInversion):
                 raise ValueError(f"pattern {pattern.name!r} has no time function, which a series needs")
             extended = extended + pattern.time
 
-        parts, weights, row_cell, ramp, offset = [], [], [], {}, 0
+        parts, weights, row_cell, ramp, offset, group = [], [], [], {}, 0, 0
         for s in series:
             # The patterns' time functions are in the reduction too, or it would not be exact.
             values, T, scale = s.reduce(extended)
@@ -500,6 +505,9 @@ class TimeDependentInversion(SlipInversion):
                                                name=name, frame=s.frame, epsg=None)
                 row.ds["cell_size"] = ("obs", s.cell_size)
                 row.ds["count"] = ("obs", s.count)
+                # independent of every other virtual pair, so its own block of Cd (covariance_blocks)
+                row.ds["cov_group"] = ("obs", np.full(s.n_cells, group, dtype=np.int64))
+                group += 1
                 if s.region is not None:
                     row.ds["region"] = ("obs", s.region)
                 parts.append(s._with_heights(row))

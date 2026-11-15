@@ -39,7 +39,7 @@ import warnings
 import numpy as np
 
 from .calibrate import recovery_score
-from .covariance import whitening_factors
+from .covariance import covariance_blocks, whitening_factors
 from .inversion import ACTIVE_SET_MAX_KKT, box_qp, prior_target, regularization_blocks
 from .regularize import scale_smoothing, slip_bounds
 from .resolution import weighted_design
@@ -139,8 +139,7 @@ def _noise_drawer(model, noise, block):
             return lambda rng: rng.normal(size=residual.size) * scale
         raise ValueError(f"noise must be 'blocks', 'white', 'weights', a covariance model or a callable, got {noise!r}")
     factors = whitening_factors(obs, noise)
-    track = np.asarray(obs.ds["track"].values, dtype=str)
-    rows = {name: np.flatnonzero(track == str(name)) for name in factors}
+    rows = {key: at for key, (_, at) in covariance_blocks(obs).items()}
 
     def draw(rng):
         out = np.zeros(residual.size)

@@ -673,15 +673,37 @@ def _pixel_counts(ds):
     return np.maximum(n, 1.0)
 
 
-def observation_covariance(obs, model, track=None):
-    """Dense `Cd` block for one track, m^2.
+def covariance_blocks(obs):
+    """`{key: (track, rows)}`: the blocks `Cd` is made of, each with its track's model.
+
+    One block per track, keyed by its name. Observations that carry `cov_group` (a
+    time-dependent series' virtual pairs, independent of one another) have one block per
+    track and group instead, keyed `"{track}|{group}"`.
+    """
+    track = np.asarray(obs.ds["track"].values, dtype=object).astype(str)
+    group = np.asarray(obs.ds["cov_group"].values) if "cov_group" in obs.ds else None
+    blocks = {}
+    for name in dict.fromkeys(track):
+        rows = np.flatnonzero(track == name)
+        if group is None:
+            blocks[name] = (name, rows)
+        else:
+            for g in dict.fromkeys(group[rows].tolist()):
+                blocks[f"{name}|{g}"] = (name, rows[group[rows] == g])
+    return blocks
+
+
+def observation_covariance(obs, model, track=None, rows=None):
+    """Dense `Cd` block for one track (or the given `rows`), m^2.
 
     `C[i, j] = sill * corr(d_ij)` off the diagonal and `sill + nugget / n_i`
     on it -- see the module docstring for why the nugget is the part that
     averages down and the sill is not.
     """
     ds = obs.ds
-    if track is not None:
+    if rows is not None:
+        ds = ds.isel(obs=np.asarray(rows))
+    elif track is not None:
         ds = ds.isel(obs=np.asarray(ds["track"].values, dtype=object) == track)
     x = np.asarray(ds["x"].values, dtype=float)
     y = np.asarray(ds["y"].values, dtype=float)
@@ -698,10 +720,10 @@ def observation_covariance(obs, model, track=None):
 
 
 def whitening_factors(obs, models, jitter=1e-10):
-    """Lower-triangular Cholesky factor of `Cd` per track.
+    """Lower-triangular Cholesky factor of `Cd` per block (`covariance_blocks`): per track.
 
     `models` is a `{track: CovarianceModel}` mapping, or one model applied to
-    every track. Returns `{track: L}` with `Cd = L L'`, which is what
+    every track. Returns `{key: L}` with `Cd = L L'` on the block's rows, which is what
     `slipsolve.inversion.SlipInversion.whiten` solves against.
 
     `jitter` is added to the diagonal as a fraction of its mean before
@@ -709,8 +731,8 @@ def whitening_factors(obs, models, jitter=1e-10):
     arithmetic; this covers the case where it is only *just* so and rounding
     takes it over.
     """
-    tracks = [str(t) for t in dict.fromkeys(
-        np.asarray(obs.ds["track"].values, dtype=object))]
+    blocks = covariance_blocks(obs)
+    tracks = list(dict.fromkeys(track for track, _ in blocks.values()))
     if isinstance(models, CovarianceModel):
         models = {t: models for t in tracks}
     missing = [t for t in tracks if t not in models]
@@ -722,11 +744,11 @@ def whitening_factors(obs, models, jitter=1e-10):
         )
 
     factors = {}
-    for track in tracks:
-        cd = observation_covariance(obs, models[track], track=track)
+    for key, (track, rows) in blocks.items():
+        cd = observation_covariance(obs, models[track], rows=rows)
         cd[np.diag_indices_from(cd)] += float(jitter) * float(np.mean(np.diag(cd)))
         try:
-            factors[track] = sla.cholesky(cd, lower=True)
+            factors[key] = sla.cholesky(cd, lower=True)
         except sla.LinAlgError as exc:                        # pragma: no cover
             raise ValueError(
                 f"Covariance for track {track!r} is not positive definite "
