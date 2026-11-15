@@ -835,10 +835,11 @@ class FaultMesh:
 
 #: Surface-fit options `FaultMesh.curved` forwards, so an unknown one is caught
 #: where the caller typed it rather than deep inside the gridder, or, on the
-#: closed-form `uniform_dip` path, not at all.
+#: closed-form `uniform_dip` path, not at all. The control points' weights are not
+#: among them: the surface builders set those themselves (`surface_weight_ratio`).
 _FIT_KWARGS = frozenset({
     "surface_weight_ratio", "samples_per_cell",
-    "interp", "regularizer", "autoscale", "solver", "weights",
+    "interp", "regularizer", "autoscale", "solver",
 })
 
 

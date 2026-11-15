@@ -693,3 +693,10 @@ def test_a_segment_drawn_against_the_trace_dips_to_its_left_all_the_same():
     b = FaultMesh.curved(trace, frame, segments=[along.reversed()], **kw)
     np.testing.assert_allclose(b.nodes, a.nodes, atol=1e-6)
     assert np.median(a.dip_direction) == pytest.approx(0.0, abs=1.0), "north: the trace's left"
+
+
+def test_a_fit_option_the_builders_set_themselves_is_refused_by_name():
+    trace = FaultTrace.from_lonlat(np.linspace(-68.0, -67.0, 11), np.full(11, 10.0), name="t")
+    frame = trace.local_frame()
+    with pytest.raises(TypeError, match="Unexpected keyword argument"):
+        FaultMesh.curved(trace, frame, segments=2, dips=[60.0, 70.0], max_depth=15e3, edge_length=3e3, weights=1.0)
