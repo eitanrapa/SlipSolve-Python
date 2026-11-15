@@ -1285,7 +1285,10 @@ class SlipModel:
         Every statistic below is meaningless otherwise, which is why it is a
         property of the model and not something buried in a log line.
         """
-        return bool(self.result.status > 0 and self.result.nit < self.options["max_iter"])
+        # The solver's own verdict: an accepted active-set solve is exact (status 1), lsq_linear's status 0 is its
+        # iteration cap. The count itself is no test: the dense fallback's cap is above max_iter, and an exact solve
+        # can settle on its last allowed step.
+        return bool(self.result.status > 0)
 
     @property
     def variance_reduction(self):

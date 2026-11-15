@@ -701,14 +701,24 @@ def test_nodal_slip_is_the_parameter_vector_for_a_nodal_model(recovery):
 def test_unconverged_models_refuse_to_export(recovery, tmp_path):
     """An iteration-capped solve has a meaningless fit; it must not be written out."""
     _, _, _, inversion = recovery
-    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), max_iter=1)
-    if model.converged:
-        pytest.skip("solver converged in a single iteration; nothing to assert")
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0), method="lsq_linear", max_iter=1)
+    assert model.result.status == 0 and not model.converged, "lsq_linear stopped by its cap"
     assert "UNCONVERGED" in repr(model)
     with pytest.raises(ValueError, match="unconverged"):
         model.to_text(tmp_path / "bad.txt")
     with pytest.raises(ValueError, match="unconverged"):
         model.to_vertex_text(tmp_path)
+
+
+def test_an_exact_solve_on_its_last_allowed_step_is_converged(recovery):
+    """`converged` is the solver's verdict, not a comparison of the step count with max_iter."""
+    mesh, _, obs, inversion = recovery
+    first = SlipInversion(mesh, obs, g=inversion.g).solve(smoothing=0.05, polarity=(-1, 0, 0))
+    steps = first.result.nit
+    edge = SlipInversion(mesh, obs, g=inversion.g).solve(smoothing=0.05, polarity=(-1, 0, 0), max_iter=steps)
+    assert edge.options["method"] == "active_set" and edge.result.nit == steps
+    assert edge.converged
+    np.testing.assert_allclose(edge.x, first.x, atol=1e-12)
 
 
 def test_persist_round_trip(recovery, tmp_path):
