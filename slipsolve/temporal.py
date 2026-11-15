@@ -476,8 +476,8 @@ class TimeDependentInversion(SlipInversion):
         series = [series] if isinstance(series, TrackSeries) else list(series)
         if not series:
             raise ValueError("needs at least one TrackSeries")
-        named = [s.name for s in series if s.ramp != "none"]
-        repeated = sorted({n for n in named if named.count(n) > 1})
+        names = [s.name for s in series]
+        repeated = sorted({s.name for s in series if s.ramp != "none" and names.count(s.name) > 1})
         if repeated:
             raise ValueError(f"series {repeated} would share one ramp: give each pair set its "
                              "own name (only ramp='none' series may share a name)")

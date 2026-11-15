@@ -565,6 +565,10 @@ def test_refusals(setup):
     a = TrackSeries(x, y, _LOOK["A"], np.zeros((1, x.size)), [0.0], [1.0], 0.01, name="A", ramp="linear", frame=frame)
     with pytest.raises(ValueError, match="share one ramp"):
         TimeDependentInversion(setup["mesh"], [a, a], TimeBasis.log_decay(1.0), engine=setup["engine"])
+    bare = TrackSeries(x, y, _LOOK["A"], np.zeros((1, x.size)), [0.0], [1.0], 0.01, name="A", frame=frame)
+    for pair in ([a, bare], [bare, a]):                    # either order: one name, and only one of them has a plane
+        with pytest.raises(ValueError, match="share one ramp"):
+            TimeDependentInversion(setup["mesh"], pair, TimeBasis.log_decay(1.0), engine=setup["engine"])
     before = TrackSeries(x, y, _LOOK["A"], np.zeros((1, x.size)), [-9.0], [-1.0], 0.01, name="A", frame=frame)
     with pytest.raises(ValueError, match="changes across"):
         TimeDependentInversion(setup["mesh"], [before], TimeBasis.log_decay(1.0), engine=setup["engine"])
