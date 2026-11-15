@@ -639,6 +639,28 @@ def test_a_bound_pressed_solution_is_refused(signal_setup):
         R.posterior_covariance(inversion, 3.0, model=pinched)
 
 
+def test_the_bound_count_reads_every_limit_the_solve_had(signal_setup):
+    """Both polarity flags, and limits given one per parameter, as `slip_bounds` applies them."""
+    from slipsolve.regularize import slip_bounds
+
+    _, _, mesh, _, parts = signal_setup
+    obs = Observations.concat(parts, normalize="none")
+    inversion = SlipInversion(mesh, obs, ramp="offset", covariance=CovarianceModel(sill=SILL, range_m=RANGE,
+                                                                                  nugget=NUGGET))
+    n = inversion.basis.n_basis
+    thrust = inversion.solve(smoothing=3.0, polarity=(0, 1))
+    lo, hi = slip_bounds(n, (-10.0, 10.0), (-10.0, 10.0), (0, 1))
+    x = np.r_[np.asarray(thrust.strike_slip), np.asarray(thrust.dip_slip)]
+    on = np.mean(np.isclose(x, lo, atol=1e-3) | np.isclose(x, hi, atol=1e-3))
+    assert on > R.MAX_BOUND_FRACTION, "the dip-slip polarity pins this model"
+    assert R.bound_fraction(thrust) == pytest.approx(on)
+    with pytest.raises(ValueError, match="sit on a bound"):
+        R.posterior_covariance(inversion, 3.0, model=thrust)
+    scalar = inversion.solve(smoothing=3.0, polarity=(-1, 0))
+    per = inversion.solve(smoothing=3.0, strike=(np.full(n, -10.0), np.full(n, 10.0)), polarity=(-1, 0))
+    assert R.bound_fraction(per) == pytest.approx(R.bound_fraction(scalar))
+
+
 def test_the_bias_grows_with_lambda_against_a_FIXED_reference(signal_setup):
     """`(R - I) m` -- the other half of the error. Two traps, both pinned.
 

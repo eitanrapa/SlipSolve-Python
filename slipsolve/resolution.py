@@ -1448,31 +1448,31 @@ POSTERIOR_KINDS = ("propagated", "posterior")
 
 
 def bound_fraction(model, tolerance=1e-3):
-    """Fraction of slip parameters sitting on one of their bounds.
+    """Fraction of the free slip parameters sitting on one of their bounds.
 
-    The gate on every linear uncertainty statement here -- see
-    `MAX_BOUND_FRACTION`.
+    The bounds are the solve's own (`slipsolve.regularize.slip_bounds` of its
+    `strike`, `dip` and `polarity`, scalars or one per parameter); a parameter
+    whose two limits are equal is fixed, not free, and is not counted. The gate on
+    every linear uncertainty statement here -- see `MAX_BOUND_FRACTION`.
     """
-    options = getattr(model, "options", None) or {}
-    strike = options.get("strike", (-10.0, 10.0))
-    dip = options.get("dip", (-10.0, 10.0))
-    polarity = options.get("polarity")
-    if polarity:
-        lo, hi = strike
-        if polarity[0] < 0:
-            hi = min(hi, 0.0)
-        elif polarity[0] > 0:
-            lo = max(lo, 0.0)
-        strike = (lo, hi)
+    from .regularize import slip_bounds
 
-    on = 0
-    for values, (lo, hi) in ((model.strike_slip, strike), (model.dip_slip, dip)):
-        v = np.asarray(values, dtype=float)
-        for edge in (lo, hi):
-            if np.isfinite(edge):
-                on += int(np.isclose(v, edge, atol=tolerance).sum())
-    total = np.size(model.strike_slip) + np.size(model.dip_slip)
-    return float(on) / max(total, 1)
+    options = getattr(model, "options", None) or {}
+    x = np.concatenate([np.ravel(np.asarray(model.strike_slip, dtype=float)),
+                        np.ravel(np.asarray(model.dip_slip, dtype=float))])
+    n = x.size // 2
+
+    def limits(pair):
+        # one value, one per parameter, or one per parameter of one field of several
+        return tuple(np.tile(v, n // v.size) if v.size > 1 and n % v.size == 0 else v
+                     for v in (np.ravel(np.asarray(edge, dtype=float)) for edge in pair))
+
+    lo, hi = slip_bounds(n, limits(options.get("strike", (-10.0, 10.0))), limits(options.get("dip", (-10.0, 10.0))),
+                         options.get("polarity"))
+    free = lo < hi
+    on = free & ((np.isfinite(lo) & np.isclose(x, lo, atol=tolerance))
+                 | (np.isfinite(hi) & np.isclose(x, hi, atol=tolerance)))
+    return float(on.sum()) / max(int(free.sum()), 1)
 
 
 def posterior_covariance(inversion, smoothing, kind="propagated", full=False,
