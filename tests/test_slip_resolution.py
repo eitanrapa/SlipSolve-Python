@@ -1163,3 +1163,34 @@ def test_the_curve_scores_the_profiled_minimum_separately(setup):
         smoothing=curve.attrs["profiled_smoothing"]))
     assert best == pytest.approx(curve.attrs["profiled_cv_rms"])
     assert best == curve["cv_rms_profiled"].values.min()
+
+
+def test_kernel_moments_stay_on_their_own_fault():
+    """On a joined mesh every fault's arc length starts at 0, so a weight on another fault is no spread along."""
+    lon_a, lat_a = np.array([-69.4, -69.0, -68.5]), np.array([10.55, 10.555, 10.56])
+    lon_b, lat_b = np.array([-68.5, -68.0, -67.6]), np.array([10.56, 10.565, 10.57])
+    ta, tb = FaultTrace.from_lonlat(lon_a, lat_a, name="A"), FaultTrace.from_lonlat(lon_b, lat_b, name="B")
+    frame = ta.local_frame()
+    parts = [FaultMesh.vertical(t, frame, max_depth=15e3, edge_length=5e3) for t in (ta, tb)]
+    mesh = FaultMesh.join(parts)
+    whole = FaultTrace.from_lonlat(np.r_[lon_a, lon_b[1:]], np.r_[lat_a, lat_b[1:]], name="AB")
+    slip = ss.tapered_slip(mesh, peak=-2.0)
+    obs = Observations.concat([Observations.from_los(
+        ss.forward_los_stack(mesh, slip, whole, frame, geometry=g, spacing=6000.0, noise=0.003, seed=1,
+                             half_x=150e3, half_y=60e3),
+        name=g, frame=frame, trace=whole, rms_min=0.004, width_min=6000.0, width_max=40000.0, exclude_within=4000.0)
+        for g in ("asc", "desc")])
+    inv = SlipInversion(mesh, obs, ramp="offset")
+    matrix = R.resolution_matrix(inv, 0.3)
+    kernels = R.resolution_kernels(inv, matrix)
+    n = inv.basis.n_basis
+    fault = inv.fault_labels()
+    s = mesh.element_params[:, 0]
+    block = np.abs(matrix[:n, :n]) * (fault[:, None] == fault[None, :])
+    ds = s[None, :] - s[:, None]
+    want = np.sqrt((block * ds ** 2).sum(axis=1) / block.sum(axis=1))
+    np.testing.assert_allclose(kernels["strike_slip_width_along"].values, want, rtol=1e-10)
+    junction = (fault == 0) & (s > s[fault == 0].max() - 6e3) & (mesh.element_params[:, 1] > -6e3)
+    across = np.abs(matrix[:n, :n])[junction][:, fault == 1].sum(axis=1) / np.abs(matrix[:n, :n])[junction].sum(axis=1)
+    assert across.min() > 0.2, "beside the junction a quarter of the kernel is on the other fault"
+    assert kernels["strike_slip_width_along"].values[junction].max() < 15e3

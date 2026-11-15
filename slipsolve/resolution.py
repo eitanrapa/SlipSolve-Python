@@ -374,7 +374,9 @@ def resolution_kernels(inversion, matrix):
 
     Widths are second moments of `|R[k, :]|` about parameter `k`'s own
     position, taken within each slip component (the strike-strike and dip-dip
-    diagonal blocks): a cross-component weight is not a spatial spread. Returned
+    diagonal blocks): a cross-component weight is not a spatial spread. On a
+    joined mesh they are taken over parameter `k`'s own fault, since arc length
+    and depth are coordinates of one fault only. Returned
     per component and combined as the pointwise maximum, matching how
     `resolution_diagonal` reports its diagonal.
 
@@ -414,18 +416,23 @@ def resolution_kernels(inversion, matrix):
     xyz = np.asarray(parameter_positions(inversion), dtype=float)
     distance = np.linalg.norm(xyz[None, :, :] - xyz[:, None, :], axis=-1)
 
+    labels = inversion.fault_labels()
+    same = labels[None, :] == labels[:, None]
+
     blocks = {}
     for name, start in (("strike_slip", 0), ("dip_slip", n)):
         block = np.abs(matrix[start:start + n, start:start + n])
         mass = block.sum(axis=1)
         safe = np.maximum(mass, 1e-300)
+        own = np.where(same, block, 0.0)                       # the moments' weights: the parameter's own fault
+        own_mass = np.maximum(own.sum(axis=1), 1e-300)
         ds = s[None, :] - s[:, None]
         dz = z[None, :] - z[:, None]
         blocks[name] = dict(
-            width_along=np.sqrt((block * ds ** 2).sum(axis=1) / safe),
-            width_down=np.sqrt((block * dz ** 2).sum(axis=1) / safe),
-            offset_along=(block * ds).sum(axis=1) / safe,
-            offset_down=(block * dz).sum(axis=1) / safe,
+            width_along=np.sqrt((own * ds ** 2).sum(axis=1) / own_mass),
+            width_down=np.sqrt((own * dz ** 2).sum(axis=1) / own_mass),
+            offset_along=(own * ds).sum(axis=1) / own_mass,
+            offset_down=(own * dz).sum(axis=1) / own_mass,
             self_weight=np.abs(np.diag(block)) / safe,
             width_gaussian=gaussian_kernel_width(block, distance),
         )
