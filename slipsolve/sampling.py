@@ -120,7 +120,14 @@ class Observations:
 
         ds = los_stack.ds
         epsg = stack_epsg(ds)
-        if frame is None:
+        if epsg is None:
+            # A lattice in a local frame: its x/y are that frame's metres, so it can only be sampled in it.
+            own = _frame_for(ds)
+            if frame is None:
+                frame = own
+            else:
+                own.require_match(frame.to_dict(), "The stack's lattice")
+        elif frame is None:
             frame = trace.local_frame() if trace is not None else _frame_for(ds)
 
         los = np.asarray(ds["los"].isel(pair=pair).values, dtype=float)

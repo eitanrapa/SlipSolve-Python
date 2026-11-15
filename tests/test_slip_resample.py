@@ -188,6 +188,22 @@ def test_sampling_a_resampled_stack_matches_the_utm_original(setup, scenes):
     assert warped.frame.matches(frame)
 
 
+def test_a_lattice_is_sampled_in_its_own_frame(setup, scenes):
+    """A lattice's x/y are metres of the frame it was made in, whatever trace measures the exclusion."""
+    trace, frame, _ = setup
+    other = FaultTrace(_LON + 0.4, _LAT + 0.3, name="another")
+    lattice = resample_to_frame(scenes["asc"], frame, spacing=5000.0)
+    kwargs = dict(name="asc", rms_min=0.006, width_min=6000.0, width_max=40000.0, exclude_within=5000.0)
+    by_trace = Observations.from_los(lattice, trace=other, **kwargs)
+    own = Observations.from_los(lattice, frame=frame, trace=trace, **kwargs)
+    assert by_trace.frame.matches(frame), "not the exclusion trace's frame"
+    lon, lat = by_trace.frame.to_lonlat(by_trace.ds["x"].values, by_trace.ds["y"].values)
+    ref_lon, ref_lat = own.frame.to_lonlat(own.ds["x"].values, own.ds["y"].values)
+    assert lon.min() == pytest.approx(ref_lon.min(), abs=0.05) and lat.max() == pytest.approx(ref_lat.max(), abs=0.05)
+    with pytest.raises(ValueError, match="different LocalFrame"):
+        Observations.from_los(lattice, frame=other.local_frame(), trace=trace, **kwargs)
+
+
 def test_surface_displacement_is_georeferenced_where_the_fault_is(setup, scenes):
     """A guard against mixing up `crs` and `local_crs`.
 
