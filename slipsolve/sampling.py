@@ -349,7 +349,10 @@ class Observations:
           squared.
         - `"none"`: no count normalisation.
 
-        `weights` optionally scales each named track on top of that.
+        `n` is a track's rows over all the items. A set that is itself a concatenation
+        has its earlier normalisation undone first (it is recorded per track in
+        `attrs["track_scale"]`), so a set combined in two steps is weighted as one
+        combined at once. `weights` optionally scales each named track on top of that.
         """
         if normalize not in ("sqrt_count", "count", "none"):
             raise ValueError("normalize must be 'sqrt_count', 'count' or 'none'")
@@ -358,25 +361,26 @@ class Observations:
             raise ValueError("Nothing to concatenate")
 
         frame = items[0].ds.attrs.get("frame")
-        parts = []
         for item in items:
             if item.ds.attrs.get("frame") != frame:
                 raise ValueError(
                     "All tracks must be sampled in the same LocalFrame; "
                     "pass frame= consistently to from_los."
                 )
-            ds = item.ds.copy(deep=True)
-            n = ds.sizes["obs"]
-            scale = {"sqrt_count": 1.0 / np.sqrt(n), "count": 1.0 / n, "none": 1.0}[normalize]
-
+        tracks = [np.asarray(item.ds["track"].values).astype(str) for item in items]
+        names, counts = np.unique(np.concatenate(tracks), return_counts=True)
+        scale = {str(name): {"sqrt_count": 1.0 / np.sqrt(n), "count": 1.0 / n, "none": 1.0}[normalize]
+                 for name, n in zip(names, counts)}
+        parts = []
+        for item, track in zip(items, tracks):
             # Build the scaled weights as a new array rather than editing in place,
-            # so the caller's Observations are never modified and passing the same
-            # object twice does not scale it twice.
-            track = ds["track"].values
-            factor = np.full(n, scale)
-            if weights:
-                for track_name in np.unique(track):
-                    factor[track == track_name] *= float(weights.get(str(track_name), 1.0))
+            # so the caller's Observations are never modified.
+            ds = item.ds.copy(deep=True)
+            earlier = ds.attrs.get("track_scale") or {}
+            factor = np.ones(track.size)
+            for name in np.unique(track):
+                factor[track == name] = (scale[name] / float(earlier.get(name, 1.0))
+                                         * float((weights or {}).get(name, 1.0)))
             ds["weight"] = ("obs", ds["weight"].values * factor)
             parts.append(ds)
         # Heights go in for every track or for none: a track without them would sit on the datum without saying so.
@@ -399,6 +403,7 @@ class Observations:
         out.attrs["frame"] = frame
         out.attrs["tracks"] = [t for item in items for t in item.ds.attrs.get("tracks", [])]
         out.attrs["normalize"] = normalize
+        out.attrs["track_scale"] = {name: float(v) for name, v in scale.items()}
 
         # `drop_conflicts` compares the per-track `quadtree` dicts whole, and the
         # per-scene thresholds differ between tracks, so the key would vanish and

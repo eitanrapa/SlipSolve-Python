@@ -143,13 +143,21 @@ def test_mostly_invalid_cells_are_discarded(trace, frame):
 def test_concat_weighting_modes(trace, frame):
     obs = _sample(trace, frame)
     before = obs.ds["weight"].values.copy()
+    ds = obs.ds.copy(deep=True)
+    ds["track"] = ("obs", np.full(obs.n, "other", dtype=object))
+    ds.attrs["tracks"] = ["other"]
+    other = Observations(ds)
 
     for mode, expected in (("none", 1.0),
                            ("sqrt_count", 1.0 / np.sqrt(obs.n)),
                            ("count", 1.0 / obs.n)):
-        merged = Observations.concat([obs, obs], normalize=mode)
+        merged = Observations.concat([obs, other], normalize=mode)
         assert merged.n == 2 * obs.n
         np.testing.assert_allclose(merged.ds["weight"].values, expected, rtol=1e-12)
+
+    # one track in two pieces is one track of twice the rows
+    twice = Observations.concat([obs, obs])
+    np.testing.assert_allclose(twice.ds["weight"].values, 1.0 / np.sqrt(2 * obs.n), rtol=1e-12)
 
     # concat must not reach back into its inputs: Dataset.copy() is shallow, and
     # the same object appearing twice would otherwise be scaled twice.
@@ -241,3 +249,26 @@ def test_a_geographic_grid_is_sampled_in_metres():
     assert 0.5 < obs.n / ref.n < 2.0, (obs.n, ref.n)
     size = obs.ds["cell_size"].values
     assert 2000.0 <= size.min() < 2500.0 and size.max() < 25e3, "cells measured in metres"
+
+
+def test_concat_normalises_per_track_whatever_the_nesting():
+    rng = np.random.default_rng(0)
+    trace = FaultTrace(np.array([-68.5, -67.5]), np.array([10.5, 10.5]), name="t")
+    frame = trace.local_frame()
+
+    def track(name, n):
+        x, y = rng.uniform(-30e3, 30e3, n), rng.uniform(-20e3, 20e3, n)
+        return Observations.from_points(x, y, rng.normal(0.0, 0.01, n), (0.0, 0.0, 1.0), np.full(n, 0.01),
+                                        name=name, frame=frame, epsg=None)
+
+    a, b, c = track("a", 30), track("b", 120), track("c", 50)
+    flat = Observations.concat([a, b, c])
+    for nested in (Observations.concat([Observations.concat([a, b]), c]),
+                   Observations.concat([Observations.concat([a, b], normalize="none"), c]),
+                   Observations.concat([Observations.concat([a, b], normalize="count"), c])):
+        np.testing.assert_allclose(nested.ds["weight"].values, flat.ds["weight"].values, rtol=1e-12)
+    for name, n in (("a", 30), ("b", 120), ("c", 50)):
+        w = flat.ds["weight"].values[flat.track_mask(name)]
+        assert np.sum((w * 0.01) ** 2) == pytest.approx(1.0), "every track's total influence is one"
+    raw = Observations.concat([flat, track("d", 10)], normalize="none")
+    np.testing.assert_allclose(raw.ds["weight"].values[raw.track_mask("a")], 100.0, rtol=1e-12)
