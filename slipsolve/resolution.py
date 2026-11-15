@@ -1019,6 +1019,11 @@ def cell_folds(obs, cell=50e3, n_folds=8, seed=0, groups=None):
     return out
 
 
+def _fnmatch_literal(label):
+    """`label` as an `fnmatch` pattern that matches it alone."""
+    return "".join(f"[{c}]" if c in "*?[" else c for c in label)
+
+
 def _held_in(inversion, keep):
     """The same inversion restricted to rows `keep`, sharing nothing writable.
 
@@ -1065,11 +1070,16 @@ def _held_in(inversion, keep):
 
 
 def _fold_problems(inversion, folds):
-    """`[(held_in_inversion, test_rows), ...]`, built once for a whole sweep.
+    """`[(held_in_inversion, test_rows, scored_rows), ...]`, built once for a whole sweep.
 
     The per-fold whitening is a Cholesky per track and the subset is a copy of
     two matrices; doing that once and reusing it across every smoothing weight
     is what keeps a sweep to about the cost of a rank ladder.
+
+    A nuisance column with no training row in a fold (a region wholly inside it)
+    and no prior is pinned at zero there, and the held-out rows that load it are not
+    scored: their constant was never fitted. A track left with no more training rows
+    than its other nuisance columns is refused.
     """
     fold = np.asarray(getattr(folds, "values", folds)).ravel()
     if fold.size != inversion.obs.n:
@@ -1079,23 +1089,30 @@ def _fold_problems(inversion, folds):
 
     labels = np.unique(fold)
     track = np.asarray(inversion.obs.ds["track"].values, dtype=object)
-    per_track_ramp = inversion.n_ramp / max(len(np.unique(track)), 1)
+    ramp = np.asarray(inversion.ramp, dtype=float) if inversion.n_ramp else np.zeros((inversion.obs.n, 0))
+    loads = ramp != 0
+    with_prior = [i for i, _ in inversion._matched_priors()] if hasattr(inversion, "_matched_priors") else []
 
     problems = []
     for label in labels:
         test = np.flatnonzero(fold == label)
         keep = np.flatnonzero(fold != label)
-        # A track with no training rows has unconstrained ramp columns, so
-        # its held-out rows cannot be predicted at all -- the fit would put an
-        # arbitrary constant there and the score would be noise. This is the
-        # reason the folds are cut along strike rather than by track: an
-        # along-strike block leaves every track most of its own samples.
+        starved_cols = np.flatnonzero(~loads[keep].any(axis=0))
+        starved_cols = starved_cols[~np.isin(starved_cols, with_prior)]
+        # A track whose training rows cannot fix its own nuisance columns has an
+        # arbitrary constant (or plane) in the fit, and its held-out rows would be
+        # scored against it. This is the reason the folds are cut along strike
+        # rather than by track: an along-strike block leaves every track most of
+        # its own samples. Only a column of a region the fold holds out whole, on a
+        # track that keeps training rows, is pinned instead.
         for name in np.unique(track):
+            own = np.flatnonzero(loads[track == name].any(axis=0))
             left = int(np.sum(track[keep] == name))
-            if left <= per_track_ramp:
+            live = own[~np.isin(own, starved_cols)]
+            if own.size and left <= live.size:
                 raise ValueError(
                     f"fold {int(label)} leaves track {name!r} with {left} "
-                    f"training rows against ~{per_track_ramp:.0f} ramp columns "
+                    f"training rows against {live.size} ramp columns "
                     "of its own, so its nuisance columns are unconstrained and "
                     "its held-out rows are unpredictable. Use fewer folds, or "
                     "a lower ramp degree.")
@@ -1109,7 +1126,14 @@ def _fold_problems(inversion, folds):
                     f"fold {int(label)} leaves block(s) {starved} too few rows to fix a rotation, so their "
                     "held-out rows are predicted from nothing and can decide the score. Hold out "
                     "cells (cell_folds) rather than slabs.", RuntimeWarning, stacklevel=3)
-        problems.append((_held_in(inversion, keep), test))
+        held = _held_in(inversion, keep)
+        if starved_cols.size:
+            # pinned as `slipsolve.selection` pins them: a unit prior on a column nothing else touches
+            pins = {_fnmatch_literal(inversion.ramp_labels[i]): (0.0, 1.0) for i in starved_cols}
+            for pattern, value in (held.nuisance_prior or {}).items():
+                pins.setdefault(pattern, value)
+            held.nuisance_prior = pins
+        problems.append((held, test, test[~loads[np.ix_(test, starved_cols)].any(axis=1)]))
     return problems
 
 
@@ -1124,7 +1148,9 @@ def _score_folds(inversion, problems, smoothing, **solve_kwargs):
     # (it grows with the number of dates). So there `cv_rms` reads 1 at the noise level.
     noise_units = bool(getattr(inversion, "cv_in_noise_units", False))
     scale = inversion.w if noise_units else 1.0
-    for held_in, test in problems:
+    scored = np.zeros(n, bool)
+    for held_in, test, rows in problems:
+        scored[rows] = True
         model = held_in.solve(smoothing=smoothing, **solve_kwargs)
         converged &= bool(model.converged)
         slip, ramp = model.x[:inversion.n_slip], model.x[inversion.n_slip:]
@@ -1143,18 +1169,18 @@ def _score_folds(inversion, problems, smoothing, **solve_kwargs):
                                        rcond=None)
             profiled[test] = fault + design @ coef
 
-    residual = (inversion.d - predicted) * scale
+    residual = np.where(scored, (inversion.d - predicted) * scale, 0.0)
     per_fold = np.array([
-        float(np.sqrt(np.mean(residual[test] ** 2))) for _, test in problems])
+        float(np.sqrt(np.mean(residual[rows] ** 2))) if rows.size else np.nan for _, _, rows in problems])
     out = {"smoothing": _smoothing_label(smoothing),
            # Every observation is held out exactly once, so the pooled figure is
            # an rms over the whole data set -- directly comparable with
            # `SlipModel.rms_misfit`, which is the *fitted* residual on the same
            # rows. Prediction error above fit is the gap regularisation is for.
-           "cv_rms": float(np.sqrt(np.mean(residual ** 2))),
-           "cv_rms_spread": float(np.std(per_fold)),
-           "cv_rms_worst": float(per_fold.max()),
-           "converged": converged, "n_folds": len(problems), "n_obs": int(n)}
+           "cv_rms": float(np.sqrt(np.mean(residual[scored] ** 2))),
+           "cv_rms_spread": float(np.nanstd(per_fold)),
+           "cv_rms_worst": float(np.nanmax(per_fold)),
+           "converged": converged, "n_folds": len(problems), "n_obs": int(scored.sum())}
 
     # Secondary, and deliberately not the criterion. Whitening the held-out
     # residual by `Cd` would put the fitted covariance back into the score and
@@ -1163,7 +1189,7 @@ def _score_folds(inversion, problems, smoothing, **solve_kwargs):
     # two disagreeing is itself informative about the noise model.
     if inversion.covariance is not None:
         whitened = inversion.whiten(residual)
-        out["cv_whitened_rms"] = float(np.sqrt(np.mean(whitened ** 2)))
+        out["cv_whitened_rms"] = float(np.sqrt(np.mean(whitened[scored] ** 2)))
 
     # What the profiled score removes is exact: by construction the two scores
     # differ by the held-out residual's component in the block's ramp subspace,
@@ -1181,7 +1207,7 @@ def _score_folds(inversion, problems, smoothing, **solve_kwargs):
     # the in-sample fit. Read it for where it minimises, never for its level.
     if inversion.n_ramp:
         out["cv_rms_profiled"] = float(
-            np.sqrt(np.mean(((inversion.d - profiled) * scale) ** 2)))
+            np.sqrt(np.mean((((inversion.d - profiled) * scale)[scored]) ** 2)))
     return out
 
 

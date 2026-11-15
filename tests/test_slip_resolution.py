@@ -1020,7 +1020,7 @@ def test_every_observation_is_predicted_by_a_model_that_never_saw_it(setup):
     problems = R._fold_problems(inversion, folds)
 
     seen = np.zeros(inversion.obs.n, dtype=int)
-    for held_in, test in problems:
+    for held_in, test, _ in problems:
         seen[test] += 1
         assert held_in.obs.n == inversion.obs.n - test.size
         # The training rows really are the complement, by value not just count.
@@ -1122,7 +1122,7 @@ def test_profiled_score_is_the_projection_onto_the_ramps_complement(setup):
     # Rebuild it as an explicit orthogonal projection, from a QR of each block's
     # ramp columns -- a different route to the same number.
     total = 0.0
-    for held_in, test in problems:
+    for held_in, test, _ in problems:
         model = held_in.solve(smoothing=1.0)
         fault = inversion.g[test] @ model.x[:inversion.n_slip]
         r = inversion.d[test] - fault
@@ -1194,3 +1194,28 @@ def test_kernel_moments_stay_on_their_own_fault():
     across = np.abs(matrix[:n, :n])[junction][:, fault == 1].sum(axis=1) / np.abs(matrix[:n, :n])[junction].sum(axis=1)
     assert across.min() > 0.2, "beside the junction a quarter of the kernel is on the other fault"
     assert kernels["strike_slip_width_along"].values[junction].max() < 15e3
+
+
+def test_a_region_held_out_whole_is_pinned_and_not_scored(setup):
+    """A region's own offset with no training row in a fold has nothing to fit it: its rows are not scored."""
+    import copy
+
+    _, _, _, inversion = setup
+    folds = R.blocked_folds(inversion.obs, n_folds=4)
+    f = np.asarray(folds.values)
+    track = np.asarray(inversion.obs.ds["track"].values).astype(str)
+    y = inversion.obs.ds["y"].values
+    island = (track == "asc") & (f == 2) & (y > np.median(y[f == 2]))
+    assert island.sum() >= 3
+    probe = copy.copy(inversion)
+    probe.ramp = np.hstack([inversion.ramp, island[:, None].astype(float)])
+    probe.ramp_labels = list(inversion.ramp_labels) + ["asc:offset@1"]
+    probe.n_ramp = probe.ramp.shape[1]
+    probe.d = inversion.d + 0.10 * island                   # the region's own constant
+    probe._normal_cache = None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")                     # no refused solve, no fallback
+        out = R.blocked_cross_validation(probe, 0.3, folds=folds)
+    plain = R.blocked_cross_validation(inversion, 0.3, folds=folds)
+    assert out["n_obs"] == inversion.obs.n - int(island.sum())
+    assert out["cv_rms"] < 1.5 * plain["cv_rms"], "the unfitted constant no longer decides the score"
