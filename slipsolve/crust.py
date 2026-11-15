@@ -164,7 +164,31 @@ class VelocityModel:
         a, b, c = z[..., 0], z[..., 1], z[..., 2]
         flat = (c - a) <= _FLAT_DEPTH
         mean = 2.0 * (divided(b, c) - divided(a, b)) / np.where(flat, 1.0, c - a)
-        return np.where(flat, self.at((a + b + c) / 3.0, field), mean)
+        result = np.asarray(np.where(flat, np.nan, mean), dtype=float)
+        if np.any(flat):
+            shape = result.shape
+            result, fa, fb, fc, ff = (np.atleast_1d(v).reshape(-1) for v in (result, a, b, c, flat))
+            result = result.copy()
+            result[ff] = [self._flat_mean(x, y, w, field) for x, y, w in zip(fa[ff], fb[ff], fc[ff])]
+            result = result.reshape(shape)
+        return result
+
+    def _flat_mean(self, a, b, c, field):
+        """The mean over a triangle a metre deep at most (vertex depths `a <= b <= c`): each layer it crosses by
+        its share of the area, from the triangle's depth distribution (triangular, with its mode at `b`). Within
+        one layer the property's change over that metre is left out."""
+        if c - a <= 0.0:
+            return float(self.at(a, field))
+
+        def below(x):
+            """The share of the area shallower than `x`."""
+            if x <= b:
+                return 0.0 if b == a else (x - a) ** 2 / ((c - a) * (b - a))
+            return 1.0 if c == b else 1.0 - (c - x) ** 2 / ((c - a) * (c - b))
+
+        edges = np.array([a, *[d for d in self.interfaces if a < d < c], c])
+        share = np.diff([below(x) for x in edges])
+        return float(np.sum(share * np.asarray(self.at(0.5 * (edges[:-1] + edges[1:]), field), dtype=float)))
 
     def _antiderivatives(self, field):
         """Knots from depth 0, the property and its slope there, and `P'` and `P`.

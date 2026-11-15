@@ -144,3 +144,15 @@ def test_a_velocity_model_reads_edgrn_and_psgrn_layer_blocks(tmp_path):
     np.testing.assert_allclose(model.vp, [2500.0, 4500.0])
     np.testing.assert_allclose(model.vs, [1200.0, 2600.0])
     np.testing.assert_allclose(model.rho, [2100.0, 2500.0])
+
+
+def test_a_flat_triangle_across_a_step_gets_each_layers_share():
+    model = VelocityModel([0.0, 18e3, 18e3, 60e3], [5800.0, 5800.0, 6800.0, 6800.0], [3360.0, 3360.0, 3900.0, 3900.0],
+                          [2700.0, 2700.0, 2900.0, 2900.0])
+    depths = np.array([17999.5, 18000.0, 18000.4])
+    u, v = np.meshgrid(np.linspace(0, 1, 801), np.linspace(0, 1, 801))
+    inside = u + v <= 1.0
+    z = depths[0] * (1 - u - v)[inside] + depths[1] * u[inside] + depths[2] * v[inside]
+    brute = float(np.mean(model.at(z, "mu")))
+    assert model.triangle_mean(depths) == pytest.approx(brute, rel=2e-3)
+    assert model.triangle_mean(np.full(3, 500.0)) == pytest.approx(float(model.at(500.0, "mu")))
