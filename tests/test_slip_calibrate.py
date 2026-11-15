@@ -274,3 +274,18 @@ def test_the_rank_ladder_reads_the_solves_own_regularisation(mesh):
         assert C._effective_rank(inversion, lam, solve_kwargs) == pytest.approx(system.rank(lam), rel=1e-4)
     rows = [dict(cell=c, rung=21.0, rank=20.8, correlation=v) for c, v in ((20e3, 0.9), (40e3, 0.95))]
     assert C.resolving_wavelength(rows, rank=21.0) is not None, "read by the rung asked for"
+
+
+def test_the_ceiling_counts_an_unstructured_meshs_own_spacing():
+    """On a Lloyd layout every node has its own arc length and depth: count edges, not distinct values."""
+    from scipy.spatial import cKDTree
+
+    from slipsolve.production import Sheet
+
+    trace = FaultTrace.from_lonlat(np.array([-68.9, -68.65, -68.4, -68.15]), np.array([10.50, 10.52, 10.53, 10.55]),
+                                   name="t")
+    mesh = Sheet("main", trace, trace.local_frame(), dip=90.0, depth=20e3).start(2.5e3)
+    gap = float(np.median(cKDTree(mesh.params).query(mesh.params, k=2)[0][:, 1]))
+    row = C.discretisation_ceiling(mesh, [1.5 * 2.5e3])[0]
+    assert row["samples_per_cell"] == pytest.approx(1.5 * 2.5e3 / gap, rel=0.3)
+    assert not row["usable"], "under two samples a cell"

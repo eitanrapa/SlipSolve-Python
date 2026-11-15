@@ -185,6 +185,20 @@ def plant_checkerboard(mesh, cell, bounds=None, base=1.25, swing=1.0,
     return target
 
 
+def _edge_spacings(mesh):
+    """`(along, down)`: the median length, along strike and down dip, of the mesh's edges that run mostly that way.
+
+    The node spacing of a layout that is not a lattice, where counting distinct arc lengths or depths counts every
+    node."""
+    tri = np.asarray(mesh.triangles)
+    edges = np.unique(np.sort(np.concatenate([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]]), axis=1), axis=0)
+    d = np.abs(mesh.params[edges[:, 1]] - mesh.params[edges[:, 0]])
+    along = d[:, 0] >= d[:, 1]
+    s, z = mesh.params[:, 0], mesh.params[:, 1]
+    return (float(np.median(d[along, 0])) if along.any() else float(np.ptp(s)) or np.inf,
+            float(np.median(d[~along, 1])) if (~along).any() else float(np.ptp(z)) or np.inf)
+
+
 def discretisation_ceiling(mesh, cells=DEFAULT_CELLS, probe=None,
                            threshold=CEILING_THRESHOLD):
     """How much of each wavelength the mesh can carry at all. Stage 0.
@@ -215,10 +229,13 @@ def discretisation_ceiling(mesh, cells=DEFAULT_CELLS, probe=None,
     # `pattern_correlation` falls smoothly with no natural cut. The Nyquist count
     # on each axis is the honest test.
     columns = np.unique(np.round(s, -2)).size
-    spacing = float(s.max() / max(columns - 1, 1))
     levels = np.unique(np.round(z, -2))
-    down = (float(np.abs(np.diff(levels)).max()) if levels.size > 1
-            else float(np.ptp(z)) or np.inf)
+    if columns * levels.size == s.size:              # a lattice of columns and depth levels: count them
+        spacing = float(s.max() / max(columns - 1, 1))
+        down = (float(np.abs(np.diff(levels)).max()) if levels.size > 1
+                else float(np.ptp(z)) or np.inf)
+    else:                                            # any other layout: its own edges, projected on each axis
+        spacing, down = _edge_spacings(mesh)
 
     rows = []
     for cell in cells:
