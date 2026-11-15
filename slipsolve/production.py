@@ -52,7 +52,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy import ndimage
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, RegularGridInterpolator
 from scipy.linalg import cho_factor, cho_solve
 from scipy.ndimage import gaussian_filter1d
 
@@ -444,7 +444,7 @@ def _start_worker(spec):
         _WORKER["engine"] = LayeredTDE(RemainderTables.load(path), **options)
     else:
         _WORKER["engine"] = HalfSpaceTDE(payload)
-    _WORKER["halfspace"] = HalfSpaceTDE(0.25)
+    _WORKER["halfspace"] = HalfSpaceTDE(payload if kind == "halfspace" else 0.25)
 
 
 def _green_rows(mesh, obs):
@@ -844,8 +844,8 @@ class Production:
 
     # -- sampling --------------------------------------------------------------------------------------------------
     def _halfspace(self):
-        """The half-space the surface field is forwarded in."""
-        return HalfSpaceTDE(0.25)
+        """The half-space the surface field is forwarded in: the engine itself if it is one."""
+        return self.engine if isinstance(self.engine, HalfSpaceTDE) else HalfSpaceTDE(0.25)
 
     def _forward(self, mesh, slip, x, y):
         """`_halfspace`'s east, north and up `(n, 3)` of element `slip` at the points, on the workers if any."""
@@ -876,11 +876,12 @@ class Production:
     def field(self, model, need=None, faults=None):
         """The model's east, north and up on the lattice: `(east, north, up)`, NaN outside `need`.
 
-        A half-space forward of the element means. It is computed exactly at the pixels within two
-        `field_spacing` of the fault's outcrop, where the field steps across the fault and bends fastest, and
-        elsewhere interpolated bilinearly from a `field_spacing` grid evaluated only at the nodes those pixels
-        use. No interpolated pixel reaches a node across the fault, and pixels within a metre of the outcrop,
-        where the solution is singular, are left NaN.
+        A half-space forward of the element means (in the engine's Poisson's ratio when the engine is a
+        half-space; `sample` adds the difference any other engine makes, `_engine_offset`). It is computed
+        exactly at the pixels within two `field_spacing` of the fault's outcrop, where the field steps across
+        the fault and bends fastest, and elsewhere interpolated bilinearly from a `field_spacing` grid
+        evaluated only at the nodes those pixels use. No interpolated pixel reaches a node across the fault,
+        and pixels within a metre of the outcrop, where the solution is singular, are left NaN.
 
         `need` is a boolean lattice of the pixels wanted (all of them by default), and `faults` keeps only
         those joined faults' slip, for a series that sees only some of them (`sees`).
@@ -919,6 +920,40 @@ class Production:
                     v[keep] = values[:, c]
                     out[c, rest] = RegularGridInterpolator((cy, cx), _fill_nearest(v.reshape(gx.shape)))(at)
         return [out[c].reshape(shape) for c in range(3)]
+
+    def _engine_offset(self, model, name, valid, faults=None):
+        """The engine's line of sight minus `field`'s half-space one, for series `name` on its `valid` pixels.
+
+        Zero for a half-space engine. Otherwise measured at the model's samples of the series, where the
+        engine's prediction is known exactly (`SlipModel.fault_prediction`), and interpolated linearly
+        between them (from the nearest sample outside their hull). The difference crosses the fault
+        continuously, since both fields step there by the slip.
+        """
+        if isinstance(self.engine, HalfSpaceTDE):
+            return 0.0
+        ds = model.obs.ds
+        rows = np.flatnonzero(np.asarray(ds["track"].values).astype(str) == name)
+        if rows.size:
+            outcrop = _surface_segments(model.mesh)
+            rows = rows[_far_enough(ds["x"].values[rows], ds["y"].values[rows], *outcrop, 1.0)]
+        if rows.size < 3:
+            self.log(f"    {name}: no samples in the last model; its field is the half-space one")
+            return 0.0
+        x, y = ds["x"].values[rows], ds["y"].values[rows]
+        enu = self._forward(model.mesh, self._slip_seen(model, faults), x, y)
+        hs = enu[:, 0] * ds["look_e"].values[rows] + enu[:, 1] * ds["look_n"].values[rows] \
+            + enu[:, 2] * ds["look_u"].values[rows]
+        delta = np.asarray(model.fault_prediction, float)[rows] - hs
+        lat = self._lattice
+        qx, qy = lat["X"][valid], lat["Y"][valid]
+        points = np.column_stack([x, y])
+        got = LinearNDInterpolator(points, delta)(qx, qy)
+        outside = ~np.isfinite(got)
+        if outside.any():
+            got[outside] = NearestNDInterpolator(points, delta)(qx[outside], qy[outside])
+        offset = np.zeros(valid.shape)
+        offset[valid] = got
+        return offset
 
     def _sigma(self, s, los, valid, regions, prediction, model):
         """A series' sigma from the model (`Recipe.sigma`)."""
@@ -984,6 +1019,7 @@ class Production:
                 enu = fields[faults]
                 prediction = (enu[0] * ds["los_east"].values + enu[1] * ds["los_north"].values
                               + enu[2] * ds["los_up"].values)
+                prediction = prediction + self._engine_offset(model, s.name, valid & np.isfinite(prediction), faults)
                 sigma = self._sigma(s, los, valid, extra.get("regions"), prediction, model)
                 kw = dict(rms_min=r.split[s.kind] * sigma, width_min=r.width_min,
                           field=np.where(valid, prediction, np.nan))

@@ -275,3 +275,44 @@ def test_the_surface_field_is_exact_beside_the_fault_and_never_crosses_it():
     partial = run.field(model, need)[0]
     assert np.isnan(partial[~need]).all() and np.allclose(partial[need], east[need], atol=1e-9)
 
+
+class _NotAHalfSpace:
+    """A half-space of Poisson's ratio 0.4 that is not a `HalfSpaceTDE`, as a layered engine is not."""
+
+    name = "not_a_half_space"
+
+    def __init__(self):
+        self._inner = HalfSpaceTDE(0.4)
+
+    def __getattr__(self, attr):
+        return getattr(self._inner, attr)
+
+
+def test_the_sigma_is_measured_against_the_models_own_engine(planted, tmp_path):
+    run, _, _, _ = planted
+    prod = Production(tmp_path / "engine", run.sheets, list(run.series.values()), engine=_NotAHalfSpace(),
+                      recipe=run.recipe, echo=False)
+    prod._setup_lattice()
+    obs, _ = prod.sample()
+    inv, system = prod.system([run.sheets[0].start(6e3)], obs)
+    model = prod.solve(inv, system.lam_for_rank(15.0))
+    seen, measure = {}, prod._sigma
+
+    def spy(s, los, valid, regions, prediction, model):
+        seen[s.name] = (valid, prediction)
+        return measure(s, los, valid, regions, prediction, model)
+
+    prod._sigma = spy
+    prod.sample(model)
+    valid, prediction = seen["asc"]
+    ds, lat = run.series["asc"].grid.ds, prod._lattice
+    look = [np.asarray(ds[f"los_{c}"].values, float) for c in ("east", "north", "up")]
+    exact = model.forward(lat["X"][valid], lat["Y"][valid], look=[v[valid] for v in look])
+    half = sum(c * v for c, v in zip(prod.field(model, valid), look))[valid]
+
+    def rms(v):
+        return float(np.sqrt(np.mean(v ** 2)))
+
+    print(f"signal {rms(exact):.4f} m; half-space field off by {rms(half - exact):.5f}, "
+          f"with the engine's difference {rms(prediction[valid] - exact):.5f}")
+    assert rms(prediction[valid] - exact) < 0.15 * rms(half - exact)
