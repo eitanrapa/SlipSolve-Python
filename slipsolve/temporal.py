@@ -431,7 +431,7 @@ class TrackSeries:
 
 
 #: A joined mesh's records of its pieces (`slipsolve.mesh.FaultMesh.join`).
-_JOIN_KEYS = ("joined_nodes", "joined_elements", "n_faults", "layout")
+_JOIN_KEYS = ("joined_nodes", "joined_elements", "joined_attrs", "n_faults", "layout")
 
 
 class TimeDependentInversion(SlipInversion):

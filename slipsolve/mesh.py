@@ -225,7 +225,8 @@ class FaultMesh:
         attrs = dict(first.attrs)
         attrs.update(layout="joined", n_faults=len(meshes),
                      joined_nodes=[int(m.n_nodes) for m in meshes],
-                     joined_elements=[int(m.n_elements) for m in meshes])
+                     joined_elements=[int(m.n_elements) for m in meshes],
+                     joined_attrs=[dict(m.attrs) for m in meshes])
         return cls(np.concatenate(nodes), np.concatenate(triangles),
                    np.concatenate(params), frame=first.frame, attrs=attrs)
 
@@ -542,9 +543,13 @@ class FaultMesh:
             return [self]
         nodes = np.cumsum([0, *self.attrs["joined_nodes"]])
         elements = np.cumsum([0, *self.attrs["joined_elements"]])
-        attrs = {k: v for k, v in self.attrs.items() if k not in ("joined_nodes", "joined_elements", "n_faults", "layout")}
-        return [FaultMesh(self.nodes[a:b], self.triangles[c:d] - a, self.params[a:b], frame=self.frame, attrs=attrs)
-                for a, b, c, d in zip(nodes[:-1], nodes[1:], elements[:-1], elements[1:])]
+        own = self.attrs.get("joined_attrs")
+        if own is None:                       # joined before the pieces' own attrs were kept: the first one's
+            shared = {k: v for k, v in self.attrs.items()
+                      if k not in ("joined_nodes", "joined_elements", "n_faults", "layout")}
+            own = [shared] * (nodes.size - 1)
+        return [FaultMesh(self.nodes[a:b], self.triangles[c:d] - a, self.params[a:b], frame=self.frame, attrs=dict(attrs))
+                for a, b, c, d, attrs in zip(nodes[:-1], nodes[1:], elements[:-1], elements[1:], own)]
 
     # -- derived geometry --------------------------------------------------
     @property

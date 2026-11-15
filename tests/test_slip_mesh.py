@@ -342,3 +342,17 @@ def test_a_back_step_in_the_digitised_trace_does_not_fail_the_winding_check():
     for edge in (3e3, 2e3, 1e3, 500.0):
         mesh = FaultMesh.vertical(trace, frame, max_depth=10e3, edge_length=edge)
         assert np.all(mesh.normals[:, 1] > 0), edge
+
+
+def test_the_sheets_of_a_join_keep_their_own_attrs():
+    trace = FaultTrace.from_lonlat(np.array([-68.9, -68.5, -68.1]), np.array([10.50, 10.52, 10.55]), name="a")
+    frame = trace.local_frame()
+    other = FaultTrace.from_lonlat(np.array([-68.4, -68.2]), np.array([10.60, 10.62]), name="b")
+    parts = [FaultMesh.curved(trace, frame, uniform_dip=70.0, max_depth=15e3, edge_length=3e3),
+             FaultMesh.vertical(other, frame, max_depth=10e3, top_depth=2e3, edge_length=3e3)]
+    joined = FaultMesh.join(parts)
+    back = FaultMesh.from_dataset(joined.to_dataset())
+    for mesh in (joined, back):
+        for piece, original in zip(mesh.sheets(), parts):
+            for key in ("kind", "trace_name", "max_depth", "top_depth"):
+                assert piece.attrs[key] == original.attrs[key], key
