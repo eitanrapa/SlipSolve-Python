@@ -60,8 +60,10 @@ class VelocityModel:
     def from_file(cls, path):
         """Read `depth vp vs rho` rows (metres, m/s, m/s, kg/m^3).
 
-        Rows of five columns, whose first is an index (the layout of an EDGRN or
-        PSGRN input file's layer block), are read as their last four.
+        Rows of five columns, whose first is an index, are an EDGRN layer block
+        (metres, m/s); rows of eight are a PSGRN one, `no depth vp vs rho eta1 eta2
+        alpha` in km, km/s and kg/m^3, of which the elastic four are read. Fortran
+        `d` exponents are read as `e`.
         """
         path = Path(path).expanduser()
         rows = []
@@ -69,8 +71,16 @@ class VelocityModel:
             line = line.split("#")[0].strip()
             if not line:
                 continue
-            fields = [float(v) for v in re.split(r"[\s,]+", line)]
-            rows.append(fields[-4:] if len(fields) >= 5 else fields[:4])
+            fields = [float(v.replace("d", "e").replace("D", "e")) for v in re.split(r"[\s,]+", line)]
+            if len(fields) == 4:
+                rows.append(fields)
+            elif len(fields) == 5:                                      # EDGRN: index, then SI
+                rows.append(fields[1:])
+            elif len(fields) == 8:                                      # PSGRN: index, km, km/s, kg/m^3, viscosity
+                rows.append([1e3 * fields[1], 1e3 * fields[2], 1e3 * fields[3], fields[4]])
+            else:
+                raise ValueError(f"{path}: a row of {len(fields)} columns; expected depth vp vs rho, an EDGRN "
+                                 "layer row (5) or a PSGRN one (8)")
         table = np.asarray(rows, dtype=float)
         if table.ndim != 2 or table.shape[1] != 4:
             raise ValueError(f"{path} must have four columns: depth vp vs rho")

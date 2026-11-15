@@ -127,3 +127,20 @@ def test_round_trips_through_a_dict():
     for field in ("depth", "vp", "vs", "rho"):
         np.testing.assert_array_equal(getattr(back, field), getattr(model, field))
     assert back.name == "lid" and back.interfaces == [2e3]
+
+
+def test_a_velocity_model_reads_edgrn_and_psgrn_layer_blocks(tmp_path):
+    edgrn = tmp_path / "edgrn.txt"
+    edgrn.write_text("  1      0.000d+00      5.5700d+03      3.2160d+03     2.9000d+03\n"
+                     "  2      1.000d+04      6.0000d+03      3.4600d+03     2.9000d+03\n")
+    model = VelocityModel.from_file(edgrn)
+    np.testing.assert_allclose(model.depth, [0.0, 1e4])
+    np.testing.assert_allclose(model.vs, [3216.0, 3460.0])
+    psgrn = tmp_path / "psgrn.txt"
+    psgrn.write_text("1  0.0  2.5000  1.2000  2100.0  0.0E+00  1.0E+19  1.000\n"
+                     "2  1.5  4.5000  2.6000  2500.0  0.0E+00  1.0E+19  1.000\n")
+    model = VelocityModel.from_file(psgrn)
+    np.testing.assert_allclose(model.depth, [0.0, 1500.0])
+    np.testing.assert_allclose(model.vp, [2500.0, 4500.0])
+    np.testing.assert_allclose(model.vs, [1200.0, 2600.0])
+    np.testing.assert_allclose(model.rho, [2100.0, 2500.0])
