@@ -441,3 +441,17 @@ def test_an_element_model_is_still_drawn_flat(solved):
     fig, ax = slip_plot.plot_slip(model)
     assert not any(isinstance(c, TriMesh) for c in ax.collections)
     matplotlib.pyplot.close(fig)
+
+
+def test_a_component_panel_quotes_its_own_peak(solved):
+    """A strike or dip panel's title quotes that component's peak, not the magnitude's."""
+    _, mesh, obs, _, _ = solved
+    inversion = SlipInversion(mesh, obs, basis="node")
+    model = inversion.solve(smoothing=0.3, polarity=(-1, 0, 0))
+    dip = float(np.abs(model.dip_slip).max())
+    assert dip < 0.9 * model.max_slip, "the case tells the two apart"
+    for plot in (slip_plot.plot_slip, slip_plot.plot_slip_edges):
+        fig, ax = plot(model, component="dip")
+        assert f"max {dip:.2f} m" in ax.get_title() and f"{model.max_slip:.2f}" not in ax.get_title()
+        matplotlib.pyplot.close(fig)
+

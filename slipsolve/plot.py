@@ -58,10 +58,13 @@ def _slip_title(model, component, drawn=None):
     """
     head = (f"{component} slip -- VR {model.variance_reduction:.1f}%, "
             f"Mw {model.moment_magnitude:.2f}")
+    # the panel's own component: its peak over the nodes where the model lives on them
+    on_nodes = getattr(getattr(model, "basis", None), "name", None) == "node"
+    nodal = float(np.abs(_nodal_component(model, component) if on_nodes
+                         else _slip_component(model, component)).max())
     if drawn is None:
-        return head + f", max {model.max_slip:.2f} m"
+        return head + f", max {nodal:.2f} m"
     peak = float(np.abs(np.asarray(drawn)).max())
-    nodal = float(model.max_slip)
     if abs(nodal - peak) <= 0.01 * max(abs(nodal), 1e-9):
         return head + f", max {peak:.2f} m"
     return head + f", max {peak:.2f} m drawn ({nodal:.2f} m nodal)"
@@ -94,9 +97,12 @@ def plot_slip(model, component="magnitude", ax=None, cmap="magma_r",
     piecewise-linear tents, so it varies linearly across every triangle;
     colouring each one constant draws the piecewise-constant field of
     constant-slip elements instead, and a reader cannot tell the difference by
-    looking. The Gouraud interpolation is not a smoothing convenience, it is the
-    exact field, and it keeps the peak in the title and the top of the colour
-    scale the same number.
+    looking. For `"strike"` and `"dip"` the Gouraud interpolation is not a
+    smoothing convenience, it is the exact field, and it keeps the peak in the
+    title and the top of the colour scale the same number. `"magnitude"` is the
+    interpolation of the nodes' magnitudes, which is the exact field's peak at the
+    nodes but above it inside a triangle whose components change sign: read the
+    components for where slip is small.
 
     `plot_slip_edges` is the other view of a nodal model: slip along the
     element edges, which shows the gradients a shaded triangle hides.
