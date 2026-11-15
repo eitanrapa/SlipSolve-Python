@@ -18,20 +18,23 @@ import numpy as np
 
 from .frame import LocalFrame
 
-_KML_NS = {"kml": "http://www.opengis.net/kml/2.2"}
-
 
 def _read_kml(path):
-    """Every `<coordinates>` block of a KML, concatenated, as lon/lat.
+    """The `<coordinates>` of every `<LineString>` of a KML, concatenated, as lon/lat.
 
-    The namespace is declared on the root of every KML Google Earth writes, but
-    hand-edited files sometimes drop it, so the search falls back to matching on
-    the local tag name.
+    Points (a placemark pinned on the epicentre, say) are left out; a file with no
+    LineString gives every `<coordinates>` block. The namespace is declared on the
+    root of every KML Google Earth writes, but hand-edited files sometimes drop it,
+    so the search falls back to matching on the local tag name.
     """
+    def local(element):
+        return element.tag.rsplit("}", 1)[-1]
+
     root = ET.parse(path).getroot()
-    blocks = root.findall(".//kml:coordinates", _KML_NS)
-    if not blocks:
-        blocks = [el for el in root.iter() if el.tag.rsplit("}", 1)[-1] == "coordinates"]
+    every = [el for el in root.iter() if local(el) == "coordinates"]
+    lines = [el for line in root.iter() if local(line) == "LineString"
+             for el in line.iter() if local(el) == "coordinates"]
+    blocks = lines or every
     if not blocks:
         raise ValueError(f"No <coordinates> element in {path}")
 

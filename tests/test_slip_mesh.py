@@ -356,3 +356,16 @@ def test_the_sheets_of_a_join_keep_their_own_attrs():
         for piece, original in zip(mesh.sheets(), parts):
             for key in ("kind", "trace_name", "max_depth", "top_depth"):
                 assert piece.attrs[key] == original.attrs[key], key
+
+
+def test_a_kml_pin_beside_the_trace_is_not_part_of_it(tmp_path):
+    coords = " ".join(f"{a},{b},0" for a, b in zip(_LON[:3], _LAT[:3]))
+    path = tmp_path / "trace_and_pin.kml"
+    path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document>'
+        "<Placemark><name>epicentre</name><Point><coordinates>-67.5,10.8,0</coordinates></Point></Placemark>"
+        f"<Placemark><name>trace</name><LineString><coordinates>{coords}</coordinates></LineString></Placemark>"
+        "</Document></kml>")
+    trace = FaultTrace.from_file(path)
+    np.testing.assert_allclose(trace.lon, _LON[:3])
+    np.testing.assert_allclose(trace.lat, _LAT[:3])
