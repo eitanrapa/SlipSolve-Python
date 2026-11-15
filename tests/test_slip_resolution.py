@@ -1228,3 +1228,15 @@ def test_a_deep_kernel_is_pulled_up_and_says_so(setup):
     deep, shallow = depth >= np.percentile(depth, 80), depth <= np.percentile(depth, 20)
     down = kernels["strike_slip_offset_down"].values
     assert down[deep].mean() < 0 < down[shallow].mean(), "toward the data: up from the bottom, down from the top"
+
+
+def test_the_rank_is_the_solves_with_strongly_pinned_edges(setup):
+    """The Cholesky ridge is relative to the data: pinned edges far above them must not set it."""
+    from slipsolve.selection import NormalSystem
+
+    _, _, _, inversion = setup
+    for ratio in (1.0, 3e3):
+        system = NormalSystem(inversion, boundary_ratio=ratio)
+        for lam in (0.3, 30.0):
+            got = R.resolution_diagonal(inversion, lam, boundary_ratio=ratio).attrs["effective_rank"]
+            assert got == pytest.approx(system.rank(lam), rel=1e-6), (ratio, lam)

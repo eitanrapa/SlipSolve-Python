@@ -815,7 +815,7 @@ class Production:
         lam = system.lam_for_rank(rank)
         D, _, _ = system.normal()
         T = D + system.damping(lam)
-        T.flat[:: system.P + 1] += RANK_JITTER * np.trace(T) / system.P
+        T.flat[:: system.P + 1] += RANK_JITTER * (np.trace(D) or np.trace(T)) / system.P
         report = R.resolution_kernels(inv, cho_solve(cho_factor(T, lower=True), D))
         sizes = np.asarray(R.kernel_element_size(inv, lam, fraction=r.fraction, reduce="gaussian",
                                                  size_min=r.size_min, size_max=r.size_max, report=report), float)

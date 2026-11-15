@@ -72,8 +72,11 @@ from .layout import (
 )
 
 #: Ridge added to the normal equations before factorising, relative to the mean
-#: diagonal. Only to keep the Cholesky well posed when a parameter is completely
-#: unconstrained -- far below the smoothing term for anything the data sees.
+#: diagonal of the data block. Only to keep the Cholesky well posed when a parameter
+#: is completely unconstrained -- far below the smoothing term for anything the data
+#: sees. Relative to the data, not to the whole matrix: pinned edges and priors can
+#: put diagonals six orders of magnitude above it there, and the ridge would then
+#: damp the weakly resolved parameters.
 JITTER = 1e-10
 
 #: Grid the resolution-gain field is evaluated on, in metres. Deliberately much
@@ -138,7 +141,7 @@ def _factorized(inversion, smoothing, ss_ratio, ds_ratio, boundary_ratio, sides,
     data, damping = _normal_equations(inversion, smoothing, ss_ratio, ds_ratio,
                                       boundary_ratio, sides, smooth_weighting)
     total = data + damping
-    total.flat[:: total.shape[0] + 1] += JITTER * np.trace(total) / total.shape[0]
+    total.flat[:: total.shape[0] + 1] += JITTER * (np.trace(data) or np.trace(total)) / total.shape[0]
     return data, cho_factor(total, lower=True)
 
 
@@ -676,8 +679,9 @@ def _epic_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio, sides):
     # the condition is imposed on the slip parameters alone.
     smooth, boundary = regularization_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio, sides)
     design = weighted_design(inversion)
-    fixed = design.T @ design + (boundary.T @ boundary).toarray()
-    fixed.flat[:: fixed.shape[0] + 1] += JITTER * np.trace(fixed) / fixed.shape[0]
+    data = design.T @ design
+    fixed = data + (boundary.T @ boundary).toarray()
+    fixed.flat[:: fixed.shape[0] + 1] += JITTER * (np.trace(data) or np.trace(fixed)) / fixed.shape[0]
     return smooth, fixed
 
 

@@ -550,7 +550,7 @@ class DipSweep:
     def _rank(self, N, lam):
         """Effective rank: the trace of the slip block of `(N + damping)^-1 N`."""
         total = N + self._damping(lam)
-        total.flat[:: total.shape[0] + 1] += JITTER * np.trace(total) / total.shape[0]
+        total.flat[:: total.shape[0] + 1] += JITTER * (np.trace(N) or np.trace(total)) / total.shape[0]
         m = 2 * self.n
         columns = cho_solve(cho_factor(total, lower=True), np.eye(total.shape[0])[:, :m])
         return float(np.sum(columns * N[:, :m]))
@@ -578,7 +578,7 @@ class DipSweep:
 
     def _solve(self, N, g, lam):
         total = N + self._damping(lam)
-        total.flat[:: total.shape[0] + 1] += JITTER * np.trace(total) / total.shape[0]
+        total.flat[:: total.shape[0] + 1] += JITTER * (np.trace(N) or np.trace(total)) / total.shape[0]
         x0 = self._last["x"]
         if x0 is None or x0.size != total.shape[0]:
             x0 = np.zeros(total.shape[0])

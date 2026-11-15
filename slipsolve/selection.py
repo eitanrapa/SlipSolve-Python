@@ -262,7 +262,7 @@ class NormalSystem:
         """The effective rank at weight `lam`: the trace of the slip block of the resolution matrix."""
         D, _, _ = self.normal(drop)
         T = D + self.damping(lam)
-        T.flat[:: self.P + 1] += RANK_JITTER * np.trace(T) / self.P
+        T.flat[:: self.P + 1] += RANK_JITTER * (np.trace(D) or np.trace(T)) / self.P
         return float(np.trace(cho_solve(cho_factor(T, lower=True), D)[:2 * self.n, :2 * self.n]))
 
     def lam_for_rank(self, rank, drop=None, lo=1e-8, hi=1e10, tol=1e-4):
