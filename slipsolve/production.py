@@ -64,7 +64,8 @@ from .layout import MAX_COUNT_RATIO, clip_layout, lloyd_layout
 from .mesh import FaultMesh, _arc_length
 from .predict import _fill_nearest
 from .regularize import slip_bounds
-from .sampling import Observations
+from .sampling import Observations, _frame_axes
+from .sampling import frame_looks as _rotate_looks
 from .selection import CV_RANKS, RANK_JITTER, GridEdge, NormalSystem, choose_rank, slab_folds
 
 #: The stages `Production.run` knows, in order.
@@ -105,6 +106,9 @@ class Recipe:
             scatter). `DataSeries.first` overrides them for one series.
         min_region_km2: A connected region of a phase series smaller than this is dropped;
             every larger one gets its own offset.
+        min_region_samples: A phase region left with fewer samples than this after its
+            quadtree is dropped with them, since its own offset would absorb them (0: keep
+            every region).
         sigma: How each series' sigma is measured from the latest model. `"far"`: its
             residual beyond `sigma_far` of every trace, after its own nuisance terms, as
             `sigma_block` block medians. `"whole"`: every pixel of a phase series after
@@ -140,6 +144,7 @@ class Recipe:
     round0: dict = field(default_factory=lambda: {"phase": dict(rms_min=0.02, sigma=0.02),
                                                   "offset": dict(rms_min=0.2, sigma=None)})
     min_region_km2: float = 100.0
+    min_region_samples: int = 0
     sigma: str = "far"
     sigma_far: float = 10e3
     sigma_block: float = 2000.0
@@ -403,7 +408,8 @@ class DataSeries:
         regions: Phase only: integer labels on the lattice (0 for none), each with its own
             offset, used as given in place of the connected regions of at least
             `Recipe.min_region_km2` (labels drawn on the native product, a split by hand).
-            The `near` and `valid` masks apply on top; labels are not merged or dropped.
+            The `near` and `valid` masks apply on top; labels are not merged, and dropped
+            only by `Recipe.min_region_samples`.
     """
 
     name: str
@@ -447,21 +453,31 @@ class _Log:
 _WORKER = {}
 
 
-def _start_worker(spec):
-    """Build the worker's engines once: the run's own, and a half-space one for the surface field."""
+def _make_engine(spec):
+    """The engine `_engine_spec` describes."""
     kind, payload = spec
     if kind == "layered":
         from .layered_tde import LayeredTDE
         from .wavenumber import RemainderTables
         path, options = payload
-        _WORKER["engine"] = LayeredTDE(RemainderTables.load(path), **options)
-    else:
-        _WORKER["engine"] = HalfSpaceTDE(payload)
+        return LayeredTDE(RemainderTables.load(path), **options)
+    if kind == "curvature":
+        from .curvature import Curvature, CurvatureTables
+        base, path, order = payload
+        return Curvature(_make_engine(base), CurvatureTables.load(path), order=order)
+    return HalfSpaceTDE(payload)
+
+
+def _start_worker(spec):
+    """Build the worker's engines once: the run's own, and a half-space one for the surface field."""
+    kind, payload = spec
+    _WORKER["engine"] = _make_engine(spec)
     _WORKER["halfspace"] = HalfSpaceTDE(payload if kind == "halfspace" else 0.25)
 
 
-def _green_rows(mesh, obs):
-    return np.asarray(SlipInversion(mesh, obs, engine=_WORKER["engine"], ramp="none", basis="node").g, float)
+def _green_rows(mesh, obs, frame_looks=False):
+    return np.asarray(SlipInversion(mesh, obs, engine=_WORKER["engine"], ramp="none", basis="node",
+                                    frame_looks=frame_looks).g, float)
 
 
 def _forward_rows(mesh, slip, x, y):
@@ -486,7 +502,13 @@ def _element_faults(mesh):
 
 
 def _engine_spec(engine):
+    from .curvature import Curvature
     from .layered_tde import LayeredTDE
+    if isinstance(engine, Curvature):
+        path = getattr(engine.tables, "path", None)
+        if path is None:
+            raise ValueError("workers > 1 with a Curvature engine needs its tables loaded from (or saved to) a file")
+        return "curvature", (_engine_spec(engine.base), str(path), engine.order)
     if isinstance(engine, LayeredTDE):
         path = getattr(engine.tables, "path", None)
         if path is None:
@@ -495,7 +517,8 @@ def _engine_spec(engine):
                                            far=engine.strain_far, far_rule=engine.far_rule))
     if isinstance(engine, HalfSpaceTDE):
         return "halfspace", float(getattr(engine, "nu", 0.25))
-    raise ValueError(f"workers > 1 supports LayeredTDE and HalfSpaceTDE engines, not {type(engine).__name__}")
+    raise ValueError(f"workers > 1 supports LayeredTDE and HalfSpaceTDE engines and Curvature on them, "
+                     f"not {type(engine).__name__}")
 
 
 def _file_digest(path):
@@ -507,9 +530,19 @@ def _file_digest(path):
 def _engine_key(engine):
     """What an engine computes, as a short hash: the Green's function cache is shared by every run in a folder.
 
-    A half-space by its Poisson's ratio; a layered engine by its tables' crust and grids and its own settings; any
-    other engine by its type and its scalar settings.
+    A half-space by its Poisson's ratio; a layered engine by its tables' crust and grids and its own settings; a
+    `Curvature` by its base engine's key and its tables; any other engine by its type and its scalar settings.
     """
+    from .curvature import Curvature
+    if isinstance(engine, Curvature):
+        h = hashlib.sha1(b"Curvature")
+        h.update(_engine_key(engine.base).encode())
+        t = engine.tables
+        for a in [t.r, t.z, t.interfaces] + [t.values[k][c] for k in sorted(t.values) for c in sorted(t.values[k])]:
+            h.update(np.ascontiguousarray(a, dtype=float).tobytes())
+        h.update(json.dumps(t.attrs, sort_keys=True, default=str).encode())
+        h.update(f"order={engine.order}".encode())
+        return h.hexdigest()[:8]
     h = hashlib.sha1(type(engine).__name__.encode())
     tables = getattr(engine, "tables", None)
     if tables is not None:
@@ -572,7 +605,8 @@ class Production:
         points: `Observations` used as they are, weights included (GNSS). Each keeps its
             own track name.
         engine: The elastic engine: a `LayeredTDE` (its tables loaded from a file when
-            `workers > 1`) or a `HalfSpaceTDE` (the default).
+            `workers > 1`), a `HalfSpaceTDE` (the default), or `slipsolve.curvature.Curvature`
+            on either (its tables from a file too).
         velocity_model: The `VelocityModel` the moments integrate the rigidity of.
         recipe: The `Recipe`.
         sees: `{track: [sheet indices]}`: which sheets each named track sees
@@ -587,11 +621,15 @@ class Production:
             functions (`obs.n` rows; strike-slip then dip-slip columns, one per node of the
             joined mesh), added to them in stage X: an effect the engine leaves out, such as
             a rigidity contrast across the fault solved exactly. Without it stage X is skipped.
+        frame_looks: Rotate every look vector into the frame's axes, for the Green's functions
+            (`SlipInversion`'s `frame_looks`) and for the predictions the samples are drawn
+            and the sigmas measured from.
         echo: Print the log as well as writing it.
     """
 
     def __init__(self, out, sheets, series, points=(), engine=None, velocity_model=None, recipe=None, sees=None,
-                 events=None, traces=None, samples=None, constrain=None, correction=None, echo=True):
+                 events=None, traces=None, samples=None, constrain=None, correction=None, frame_looks=False,
+                 echo=True):
         self.out = Path(out)
         self.sheets = list(sheets)
         self.series = {s.name: s for s in series}
@@ -607,6 +645,7 @@ class Production:
         self.samples = samples
         self.constrain = constrain
         self.correction = correction
+        self.frame_looks = bool(frame_looks)
         self.echo = echo
         self.frame = self.sheets[0].frame
         self.direction = self.sheets[0].direction
@@ -635,7 +674,20 @@ class Production:
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, dist)
         spacing = float(np.median(np.abs(np.diff(x))))
-        self._lattice = dict(x=x, y=y, X=X, Y=Y, dist=dist, spacing=spacing)
+        axes = None
+        if self.frame_looks:                     # true east and north in the frame's axes, for `_lattice_look`
+            east, north = _frame_axes(self.frame, X, Y)
+            axes = (east.astype(np.float32), north.astype(np.float32))
+        self._lattice = dict(x=x, y=y, X=X, Y=Y, dist=dist, spacing=spacing, axes=axes)
+
+    def _lattice_look(self, ds):
+        """A series' look vector on the lattice, `(x, y, up)`: rotated into the frame's axes with `frame_looks`."""
+        e, n, u = (np.asarray(ds[f"los_{c}"].values, float) for c in ("east", "north", "up"))
+        axes = self._lattice.get("axes")
+        if axes is None:
+            return e, n, u
+        east, north = axes
+        return e * east[0] + n * north[0], e * east[1] + n * north[1], u
 
     def _usable(self, s):
         """`(los, valid, kwargs)`: a series' pixels to sample, and its sampler's extra keywords."""
@@ -678,6 +730,9 @@ class Production:
                                              initializer=_start_worker, initargs=(_engine_spec(self.engine),))
         return self._pool
 
+    def _engine_name(self):
+        return str(getattr(self.engine, "name", type(self.engine).__name__))
+
     def close(self):
         """Shut the worker processes down (`run` does at its end)."""
         if self._pool is not None:
@@ -686,16 +741,20 @@ class Production:
 
     def _green(self, mesh, obs):
         """The node-basis Green's matrix of `obs` against `mesh`, cached in `out/g_cache`."""
-        path = self.out / "g_cache" / f"g_{mesh.digest()[:12]}_{_digest(obs)}_{_engine_key(self.engine)}.npy"
+        rotated = "_fl" if self.frame_looks else ""
+        path = (self.out / "g_cache"
+                / f"g_{mesh.digest()[:12]}_{_digest(obs)}_{_engine_key(self.engine)}{rotated}.npy")
         if path.exists():
             return np.load(path)
         t0 = time.time()
         pool = self._workers()
         if pool is None:
-            g = np.asarray(SlipInversion(mesh, obs, engine=self.engine, ramp="none", basis="node").g, float)
+            g = np.asarray(SlipInversion(mesh, obs, engine=self.engine, ramp="none", basis="node",
+                                         frame_looks=self.frame_looks).g, float)
         else:
             edges = np.linspace(0, obs.n, 3 * self.recipe.workers + 1).astype(int)
-            jobs = [(mesh, Observations(obs.ds.isel(obs=slice(a, b)))) for a, b in zip(edges[:-1], edges[1:]) if b > a]
+            jobs = [(mesh, Observations(obs.ds.isel(obs=slice(a, b))), self.frame_looks)
+                    for a, b in zip(edges[:-1], edges[1:]) if b > a]
             g = np.vstack(list(pool.map(_green_rows, *zip(*jobs))))
         path.parent.mkdir(parents=True, exist_ok=True)
         np.save(path, g)
@@ -765,7 +824,7 @@ class Production:
         if fixed is not None and fixed.any():
             g[:, fixed] = 0.0
         inv = SlipInversion(mesh, obs, engine=self.engine, g=g, basis="node", ramp=self._ramps(obs),
-                            velocity_model=self.velocity_model, sees=self.sees)
+                            velocity_model=self.velocity_model, sees=self.sees, frame_looks=self.frame_looks)
         if any(s.meeting is not None for s in self.sheets):
             inv.pinned = np.concatenate([s.lower_edge(m) for s, m in zip(self.sheets, meshes)])
         if self.constrain is not None:
@@ -985,8 +1044,10 @@ class Production:
             return 0.0
         x, y = ds["x"].values[rows], ds["y"].values[rows]
         enu = self._forward(model.mesh, self._slip_seen(model, faults), x, y)
-        hs = enu[:, 0] * ds["look_e"].values[rows] + enu[:, 1] * ds["look_n"].values[rows] \
-            + enu[:, 2] * ds["look_u"].values[rows]
+        look = [ds[k].values[rows] for k in ("look_e", "look_n", "look_u")]
+        if self.frame_looks:
+            look = _rotate_looks(self.frame, x, y, *look)
+        hs = enu[:, 0] * look[0] + enu[:, 1] * look[1] + enu[:, 2] * look[2]
         delta = np.asarray(model.fault_prediction, float)[rows] - hs
         lat = self._lattice
         qx, qy = lat["X"][valid], lat["Y"][valid]
@@ -1061,8 +1122,7 @@ class Production:
             else:
                 faults = self._seen(model, s.name)
                 enu = fields[faults]
-                prediction = (enu[0] * ds["los_east"].values + enu[1] * ds["los_north"].values
-                              + enu[2] * ds["los_up"].values)
+                prediction = sum(c * v for c, v in zip(enu, self._lattice_look(ds)))
                 prediction = prediction + self._engine_offset(model, s.name, valid & np.isfinite(prediction), faults)
                 sigma = self._sigma(s, los, valid, extra.get("regions"), prediction, model)
                 kw = dict(rms_min=r.split[s.kind] * sigma, width_min=r.width_min,
@@ -1070,6 +1130,16 @@ class Production:
             obs = Observations.from_los(LosGrid(ds), name=s.name, frame=self.frame, trace=self.sheets[0].trace,
                                         width_max=r.width_max, stat="median", min_valid_fraction=r.min_valid_fraction,
                                         **kw, **extra)
+            if s.kind == "phase" and r.min_region_samples > 1 and "region" in obs.ds:
+                labels, counts = np.unique(obs.ds["region"].values, return_counts=True)
+                small = labels[counts < r.min_region_samples]
+                if small.size:
+                    keep = np.flatnonzero(~np.isin(obs.ds["region"].values, small))
+                    self.log(f"    {s.name}: {small.size} of {labels.size} regions with fewer than "
+                             f"{r.min_region_samples} samples left out ({obs.n - keep.size} samples)")
+                    if keep.size == 0:
+                        continue
+                    obs = Observations(obs.ds.isel(obs=keep))
             obs.ds["weight"] = ("obs", np.full(obs.n, 1.0 / sigma))
             sigmas[s.name] = sigma
             self.log(f"    {s.name}: {obs.n} samples, sigma {1e3 * sigma:.1f} mm")
@@ -1164,7 +1234,8 @@ class Production:
         self.log(f"run {self.out.name}: stages {list(stages)}; sheets " + ", ".join(
             f"{s.name} {s.length / 1e3:.0f} km at {s.dip:g}" for s in self.sheets) + f"; series {list(self.series)}; "
             f"points {[t for p in self.points for t in p.tracks]}; rank0 {r.rank0:g}; sigma {r.sigma}; "
-            f"CV {r.folds} slabs x {r.shifts}; workers {r.workers}")
+            f"CV {r.folds} slabs x {r.shifts}; workers {r.workers}; engine {self._engine_name()}"
+            + ("; looks in the frame's axes" if self.frame_looks else ""))
         for s in self.sheets:
             if s.meeting is not None:
                 cut = s.meeting[1] < s.depth
@@ -1308,7 +1379,7 @@ class Production:
                                                 bounds=_jsonable(sh.bounds),
                                                 curved=_jsonable(getattr(sh, "curved", None)))
                                            for sh in self.sheets],
-                    corrected=corrected,
+                    corrected=corrected, engine=self._engine_name(), frame_looks=self.frame_looks,
                     **s, rows_by_track=counts, converged=extra.get("converged"), stages=record),
                     indent=1, default=float))
             elif (self.out / "final.slip.zip").exists() and model is None:

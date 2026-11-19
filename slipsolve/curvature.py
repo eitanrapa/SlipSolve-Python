@@ -356,6 +356,7 @@ class CurvatureTables:
         self.values = values
         self.interfaces = np.asarray(interfaces, dtype=float)
         self.attrs = dict(attrs or {})
+        self.path = None
 
     @classmethod
     def compute(cls, model, *, r_max=1000e3, nr=501, z_min=500.0, z_max=39500.0, nz=40, radius=None,
@@ -406,6 +407,9 @@ class CurvatureTables:
         path = _npz(Path(path).expanduser())
         flat = {f"{kind}.{comp}": v for kind, comps in self.values.items() for comp, v in comps.items()}
         np.savez(path, r=self.r, z=self.z, interfaces=self.interfaces, attrs=json.dumps(self.attrs), **flat)
+        #: The file the tables were saved to or loaded from: where pool workers load their own copy
+        #: (`slipsolve.production`).
+        self.path = path
         return path
 
     @classmethod
@@ -416,9 +420,12 @@ class CurvatureTables:
         from .wavenumber import _npz
 
         path = Path(path).expanduser()
-        d = np.load(path if path.exists() else _npz(path))
+        path = path if path.exists() else _npz(path)
+        d = np.load(path)
         values = {kind: {comp: d[f"{kind}.{comp}"] for comp in comps} for kind, comps in COMPONENTS.items()}
-        return cls(d["r"], d["z"], values, interfaces=d["interfaces"], attrs=json.loads(str(d["attrs"])))
+        out = cls(d["r"], d["z"], values, interfaces=d["interfaces"], attrs=json.loads(str(d["attrs"])))
+        out.path = path.resolve()
+        return out
 
     def __repr__(self):
         return (f"<CurvatureTables r 0-{self.r[-1] / 1e3:.0f} km ({self.r.size}), z {self.z[0] / 1e3:.1f}-"

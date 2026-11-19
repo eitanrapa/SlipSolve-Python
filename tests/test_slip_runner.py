@@ -371,3 +371,110 @@ def test_the_slip_change_between_rounds_is_relative_to_the_slip():
     slip = rng.normal(size=200)                    # strike then dip, 100 nodes
     moved = slip * (1.0 + 0.0244 * rng.choice([-1.0, 1.0], 200))
     assert _slip_change(moved, slip) == pytest.approx(0.0244, rel=0.05), "not 0.0244 / sqrt(2)"
+
+
+def test_regions_with_too_few_samples_are_left_out(planted, tmp_path):
+    from dataclasses import replace
+
+    run, _, _, _ = planted
+    grid = run.series["asc"].grid
+    ny, nx = grid.ds["los"].shape[1:]
+    labels = np.ones((ny, nx), int)
+    labels[-4:, -4:] = 2                                  # a corner region of 16 pixels: a few samples at most
+    s = DataSeries("asc", grid, kind="phase", ramp="linear", near=2e3, regions=labels)
+
+    def counts(recipe, name):
+        prod = Production(tmp_path / name, run.sheets, [s], recipe=recipe, echo=False)
+        prod._setup_lattice()
+        obs, _ = prod.sample()
+        region = np.asarray(obs.ds["region"].values)
+        return obs, {k: int(np.sum(region == k)) for k in (1, 2)}
+
+    everything, n = counts(run.recipe, "all")
+    assert 0 < n[2] < n[1]
+    kept, m = counts(replace(run.recipe, min_region_samples=n[2] + 1), "kept")
+    assert m == {1: n[1], 2: 0}, "the small region goes, and nothing else changes"
+    big = np.asarray(everything.ds["region"].values) == 1
+    np.testing.assert_array_equal(kept.ds["los"].values, everything.ds["los"].values[big])
+
+
+def test_frame_looks_reach_the_greens_functions_and_the_samples(planted, tmp_path):
+    from slipsolve import SlipInversion
+    from slipsolve.sampling import frame_looks
+
+    run, model, _, _ = planted
+    series = list(run.series.values())
+    prod = Production(tmp_path / "fl", run.sheets, series, points=run.points, recipe=run.recipe, sees=run.sees,
+                      frame_looks=True, echo=False)
+    prod._setup_lattice()
+    got = prod._green(model.mesh, model.obs)
+    want = SlipInversion(model.mesh, model.obs, ramp="none", basis="node", frame_looks=True).g
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-12 * np.abs(want).max())
+    plain = Production(tmp_path / "fl", run.sheets, series, echo=False)._green(model.mesh, model.obs)
+    assert not np.allclose(got, plain, rtol=0, atol=1e-9 * np.abs(want).max())
+    assert len(list((tmp_path / "fl" / "g_cache").glob("g_*.npy"))) == 2, "the cache keeps them apart"
+
+    inv, system = prod.system([model.mesh], model.obs)
+    assert inv.use_frame_looks
+    rotated = prod.solve(inv, system.lam_for_rank(15.0))
+    ds, lat = run.series["asc"].grid.ds, prod._lattice
+    look = [np.asarray(ds[f"los_{c}"].values, float) for c in ("east", "north", "up")]
+    want = frame_looks(prod.frame, lat["X"].ravel(), lat["Y"].ravel(), *(v.ravel() for v in look))
+    for a, b in zip(prod._lattice_look(ds), want):
+        np.testing.assert_allclose(a.ravel(), b, rtol=0, atol=1e-6)
+
+    seen, measure = {}, prod._sigma
+
+    def spy(s, los, valid, regions, prediction, model):
+        seen[s.name] = (valid, prediction)
+        return measure(s, los, valid, regions, prediction, model)
+
+    prod._sigma = spy
+    prod.sample(rotated)
+    valid, prediction = seen["asc"]
+    field = prod.field(rotated, valid)
+    expect = sum(f * v for f, v in zip(field, prod._lattice_look(ds)))
+    unrotated = sum(f * v for f, v in zip(field, look))
+    np.testing.assert_allclose(prediction[valid], expect[valid], rtol=0, atol=1e-9)
+    assert np.abs(prediction - unrotated)[valid].max() > 1e3 * 1e-9
+
+
+def _toy_curvature_tables(scale=1.0):
+    from slipsolve.curvature import COMPONENTS, CurvatureTables
+
+    r, z = np.linspace(0.0, 300e3, 61), np.linspace(500.0, 15500.0, 16)
+    shape = (1.0 + r / 1e5)[:, None] * (1.0 + z / 1e4)[None, :]
+    values = {kind: {comp: scale * 1e-7 * (k + 1) * (c + 1) * shape for c, comp in enumerate(comps)}
+              for k, (kind, comps) in enumerate(COMPONENTS.items())}
+    return CurvatureTables(r, z, values, attrs={"radius": 6371e3, "gravity": 9.8})
+
+
+def test_a_curvature_engine_runs_on_workers_and_keys_the_cache(planted, tmp_path):
+    from dataclasses import replace
+
+    from slipsolve import SlipInversion
+    from slipsolve.curvature import Curvature, CurvatureTables
+    from slipsolve.production import _engine_key, _engine_spec
+
+    run, model, _, _ = planted
+    series = list(run.series.values())
+    unsaved = Curvature(HalfSpaceTDE(0.25), _toy_curvature_tables())
+    with pytest.raises(ValueError, match="loaded from"):
+        _engine_spec(unsaved)
+    unsaved.tables.save(tmp_path / "curv.npz")
+    engine = Curvature(HalfSpaceTDE(0.25), CurvatureTables.load(tmp_path / "curv.npz"))
+    prod = Production(tmp_path / "c", run.sheets, series, engine=engine, recipe=replace(run.recipe, workers=2),
+                      echo=False)
+    try:
+        got = prod._green(model.mesh, model.obs)
+    finally:
+        prod.close()
+    want = SlipInversion(model.mesh, model.obs, engine=engine, ramp="none", basis="node").g
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-12 * np.abs(want).max())
+    base = SlipInversion(model.mesh, model.obs, engine=HalfSpaceTDE(0.25), ramp="none", basis="node").g
+    assert not np.allclose(got, base), "the correction is in"
+    other = Curvature(HalfSpaceTDE(0.25), _toy_curvature_tables(2.0))
+    keys = {_engine_key(HalfSpaceTDE(0.25)), _engine_key(engine), _engine_key(other),
+            _engine_key(Curvature(HalfSpaceTDE(0.3), engine.tables))}
+    assert len(keys) == 4
+    assert _engine_key(engine) == _engine_key(Curvature(HalfSpaceTDE(0.25), CurvatureTables.load(tmp_path / "curv.npz")))

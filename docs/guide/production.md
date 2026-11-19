@@ -54,7 +54,8 @@ if __name__ == "__main__":
   the run's lattice, with `los` positive toward the sensor.
   - `kind="phase"`: masked within `near` of every trace. Every connected region of at
     least `Recipe.min_region_km2` gets its own offset, and the series gets the polynomial
-    `ramp`.
+    `ramp`. A region left with fewer than `Recipe.min_region_samples` samples after its
+    quadtree is dropped with them, since its own offset would absorb them.
   - `kind="offset"`: pixel offsets, used from `near` to `reach` of the traces, with
     `ramp` as their nuisance terms.
   - `valid=` masks pixels (a coherence threshold, a zone to leave out).
@@ -65,6 +66,12 @@ if __name__ == "__main__":
 - `sees={"gnss_e1": [0, 1]}` restricts which sheets a track sees, so GNSS that resolves
   two events can be given to each event's faults. `events={"e1": [0, 1]}` reports a
   moment per group of sheets.
+- `frame_looks=True` rotates every look vector into the frame's axes, for the Green's
+  functions (as `SlipInversion(frame_looks=True)` does) and for the predictions the samples
+  and sigmas are drawn from. It matters once the data reach a degree or more of longitude
+  from the frame's meridian at mid latitudes.
+- `engine` may be a `slipsolve.curvature.Curvature` around the layered engine, which adds
+  Earth's curvature and gravity for data hundreds of kilometres from the fault.
 
 The run writes everything to its folder: `run.log`, a checkpoint per stage, the
 Green's-function cache, the convergence and cross-validation tables, `final.slip.zip`,
@@ -217,5 +224,6 @@ ratios go in `Recipe.solve`, which is passed to both `SlipInversion.solve` and
 
 With `workers` above one, the Green's functions and the surface field are computed in
 that many spawned processes. Each process loads the layered tables from their file, so
-`LayeredTDE` tables must have been loaded from, or saved to, a file. Spawned processes
+`LayeredTDE` tables must have been loaded from, or saved to, a file, and so must a
+`Curvature` engine's tables. Spawned processes
 re-import the calling script, so keep the run under `if __name__ == "__main__":`.
