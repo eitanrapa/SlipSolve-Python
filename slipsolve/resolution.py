@@ -522,10 +522,13 @@ def epic_prior(inversion, sigma_target, ss_ratio=1.0, ds_ratio=3.0,
     """Ortega-Culaciati et al. (2021)'s EPIC prior, as per-row smoothing weights.
 
     Equal Posterior Information Condition: choose a diagonal prior covariance
-    `Ch` on the regularized quantity `h = H m` so that every slip parameter
-    comes out with the *same* posterior variance,
+    `Ch` on the regularized quantity `h = H m` so that every free slip
+    parameter comes out with the *same* posterior variance,
 
         diag[(G' Cd^-1 G + H' Ch^-1 H)^-1]_ii = sigma_target^2
+
+    or, with `sigma_target` a `(strike, dip)` pair, the same within each slip
+    component: strike-slip at the first, dip-slip at the second.
 
     -- a square nonlinear system in `diag(Ch)`, solved here by trust-region
     least squares (their Coleman & Li choice). The result is returned as weights
@@ -561,15 +564,40 @@ def epic_prior(inversion, sigma_target, ss_ratio=1.0, ds_ratio=3.0,
     exactly what might drive more parameters onto their bounds.
 
     `sigma_target` is bounded from both sides, and both bounds are
-    structural. Above, by the best-resolved parameter's data-only standard
-    deviation: `H' diag(a) H` is positive semidefinite, so a prior can only
-    tighten a posterior variance and never loosen one. Below, by the smoothing
-    operator's null space: a curvature operator does not see a slip field
-    that varies linearly across the fault, so that component is constrained by
-    the data alone however overwhelming the prior, and the achievable variance
-    stalls. Both raise with the reachable number rather than returning weights
-    that quietly missed. The window is a property of the geometry and the
-    coverage, so measure it rather than assuming a range transfers.
+    structural. Above, by the best-resolved free parameter's data-only
+    standard deviation: `H' diag(a) H` is positive semidefinite, so a prior can only
+    tighten a posterior variance and never loosen one. Below, by the
+    least-held parameter's standard deviation at overwhelming prior weight:
+    the smoothing ties each parameter to its neighbours, and so in the end to
+    what the operator does not see. That is its null space (a curvature
+    operator does not see a slip field varying linearly across the fault), or,
+    with zero-slip edges, the edge values, held only as tightly as
+    `boundary_ratio` holds them. Both raise with the reachable number rather
+    than returning weights that quietly missed. The window is a property of the
+    geometry and the coverage, so measure it rather than assuming a range
+    transfers.
+
+    The parameters the zero-slip rows hold (the `sides`, and
+    `SlipInversion.pinned`) are left out of the condition and of the
+    ceiling. They are edge values rather than unknowns: their variance is
+    whatever `boundary_ratio` makes it, and asking it to equal the target would
+    tie the prior everywhere to how hard the edges are held. Their own
+    smoothing rows get weight zero, so the Laplacian is imposed at the free
+    nodes only, with the edge values in their stencils, which is a zero-slip
+    (Dirichlet) edge. With the edge rows the prior is then proper, and the
+    floor is set by how tightly the edges are held rather than by the
+    operator's null space.
+
+    `ss_ratio` and `ds_ratio` do not change the prior. A row's weight absorbs
+    any scaling of that row, so one target asks both slip components for the
+    same variance, and the preference the ratios express is gone. With
+    dip-slip meant to be smoothed harder on a strike-slip fault, the dip-slip
+    is freed instead, and at a given rank the strike-slip is smoothed harder
+    to pay for it. A `(strike, dip)` pair keeps a preference: each component
+    is equalised to its own target. A neutral split is plain smoothing's own
+    at the rank wanted, the ratio of the two components' median posterior
+    standard deviations there (`posterior_covariance` with
+    `kind="posterior"`).
 
     Node basis only. `H` must be square for the condition to be a square
     system with one prior variance per slip parameter, which is what makes
@@ -589,37 +617,58 @@ def epic_prior(inversion, sigma_target, ss_ratio=1.0, ds_ratio=3.0,
     if getattr(inversion, "covariance", None) is None:
         raise ValueError(
             "epic_prior needs a noise model: sigma_target is a posterior "
-            "standard deviation in METRES OF SLIP, and without a covariance "
+            "standard deviation in metres of slip, and without a covariance "
             "`whiten` multiplies by 1/sqrt(n) per track -- which is not "
             "Cd^-1/2 and carries no units, so the variance it equalises would "
             "be a number in arbitrary units. Build the inversion with "
             "SlipInversion(..., covariance={track: CovarianceModel}). Same rule "
             "as posterior_covariance and SlipModel.chi_square."
         )
-    target = float(sigma_target)
-    if not target > 0:
+    targets = np.atleast_1d(np.asarray(sigma_target, dtype=float))
+    if targets.shape not in ((1,), (2,)):
+        raise ValueError(
+            f"sigma_target is one standard deviation or a (strike, dip) pair, "
+            f"got {sigma_target!r}"
+        )
+    if not np.all(targets > 0):
         raise ValueError(f"sigma_target must be positive, got {sigma_target!r}")
+    asked = (f"{targets[0]:.4g} m" if targets.size == 1
+             else f"(strike {targets[0]:.4g}, dip {targets[1]:.4g}) m")
 
     smooth, fixed = _epic_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio,
                                  sides)
     operator = smooth.toarray() if sp.issparse(smooth) else np.asarray(smooth)
     n_rows = operator.shape[0]
-    n_slip = 2 * inversion.basis.n_basis
+    # On the node basis row i of the operator is the Laplacian at parameter i, so
+    # one index set picks both the parameters the condition is on and the rows
+    # whose weights are solved for.
+    free = np.flatnonzero(~_epic_held(inversion, boundary_ratio, sides))
+    if free.size == 0:
+        raise ValueError(
+            "every slip parameter is held at zero by a zero-slip row, so there "
+            "is no posterior variance left for epic_prior to equalise."
+        )
+    operator = operator[free]
+    dip = free >= inversion.basis.n_basis
+    component = np.where(dip, "dip-slip", "strike-slip")
+    target = np.where(dip, targets[-1], targets[0])
     wanted = np.log(target ** 2)
 
     # There is a ceiling on what can be asked for. `H' diag(a) H` is positive
     # semidefinite for `a >= 0`, so adding it can only *shrink* the diagonal of
     # the inverse: the prior can tighten a parameter and never loosen one. The
     # largest posterior variance reachable is therefore the data's own, and the
-    # binding one is the best-resolved parameter's.
-    ceiling = float(np.sqrt(np.diag(np.linalg.inv(fixed))[:n_slip].min()))
-    if target > ceiling:
+    # binding one is the best-resolved free parameter's, in each component.
+    alone = np.sqrt(np.diag(np.linalg.inv(fixed))[free])
+    worst = int(np.argmin(alone / target))
+    if target[worst] > alone[worst]:
         raise ValueError(
-            f"sigma_target={target:.4g} m is above what a positive prior can "
-            f"reach: the best-resolved parameter already has a posterior "
-            f"standard deviation of {ceiling:.4g} m from the data alone, and "
-            "regularization only tightens. Ask for less than that. (There is a "
-            "floor as well as this ceiling -- see the null-space message.)"
+            f"sigma_target={asked} is above what a positive prior can "
+            f"reach: the best-resolved free {component[worst]} parameter already "
+            f"has a posterior standard deviation of {alone[worst]:.4g} m from the "
+            "data alone, and regularization only tightens. Ask for less than "
+            "that. (There is a floor as well as this ceiling -- see the "
+            "null-space message.)"
         )
 
     # Variances more than ten orders below the target carry no information about
@@ -627,10 +676,10 @@ def epic_prior(inversion, sigma_target, ss_ratio=1.0, ds_ratio=3.0,
     floor = 1e-10 * target ** 2
 
     def variances(scale):
-        """Posterior variance of each slip parameter at prior weights `scale`."""
+        """Posterior variance of each free slip parameter at prior weights `scale`."""
         total = fixed + operator.T @ (scale[:, None] * operator)
         inverse = np.linalg.inv(total)
-        return np.maximum(np.diag(inverse)[:n_slip], floor), inverse
+        return np.maximum(np.diag(inverse)[free], floor), inverse
 
     def residual(log_scale):
         return np.log(variances(np.exp(log_scale))[0]) - wanted
@@ -642,10 +691,10 @@ def epic_prior(inversion, sigma_target, ss_ratio=1.0, ds_ratio=3.0,
         # the inverse the residual already formed. Without it this needs one
         # factorization per unknown and EPIC would not be affordable.
         projected = inverse @ operator.T
-        derivative = -(projected[:n_slip] ** 2)
+        derivative = -(projected[free] ** 2)
         return derivative * (scale / v[:, None])
 
-    start = np.log(_epic_start(operator, fixed, n_slip, target))
+    start = np.log(_epic_start(operator, fixed, free, target, component, asked))
     # Bounded around the scalar start, which is already the right decade. Left
     # unbounded the search walks into a region where every variance has hit the
     # floor and the Jacobian says nothing.
@@ -654,21 +703,24 @@ def epic_prior(inversion, sigma_target, ss_ratio=1.0, ds_ratio=3.0,
                         max_nfev=int(max_iter), verbose=2 if verbose else 0)
 
     scale = np.exp(fit.x)
-    achieved = np.sqrt(np.maximum(variances(scale)[0], 0.0))
-    spread = float(np.abs(achieved - target).max() / target)
+    ratio = np.sqrt(np.maximum(variances(scale)[0], 0.0)) / target
+    spread = float(np.abs(ratio - 1.0).max())
     if spread > EPIC_UNIFORMITY_TOLERANCE:
         warnings.warn(
             f"EPIC did not reach a uniform posterior: achieved standard "
-            f"deviations span {achieved.min():.4g} to {achieved.max():.4g} m "
-            f"against a target of {target:.4g} m ({spread:.1%} worst deviation, "
-            f"{fit.nfev} evaluations). The weights are still usable but they are "
+            f"deviations span {ratio.min():.4g} to {ratio.max():.4g} times the "
+            f"target of {asked} ({spread:.1%} worst deviation, {fit.nfev} "
+            "evaluations). The weights are still usable but they are "
             "not the equal-information prior the name promises -- raise "
             "max_iter, or ask for a sigma_target the data can support.",
             RuntimeWarning, stacklevel=2,
         )
     # `solve` divides the operator by its own row count, so undo that here and
-    # the caller passes these straight through as `smoothing=`.
-    return n_rows * np.sqrt(scale)
+    # the caller passes these straight through as `smoothing=`. The held rows
+    # stay at zero.
+    weights = np.zeros(n_rows)
+    weights[free] = n_rows * np.sqrt(scale)
+    return weights
 
 
 def _epic_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio, sides):
@@ -685,17 +737,28 @@ def _epic_blocks(inversion, ss_ratio, ds_ratio, boundary_ratio, sides):
     return smooth, fixed
 
 
-def _epic_reachable(operator, fixed, n_slip, scale):
-    """Median slip posterior variance at a uniform prior weight `scale`."""
+def _epic_held(inversion, boundary_ratio, sides):
+    """Mask over the slip parameters of those the zero-slip rows hold, both components."""
+    from .inversion import _held_mask
+
+    n = inversion.basis.n_basis
+    if not boundary_ratio * inversion.boundary_scale > 0:
+        return np.zeros(2 * n, dtype=bool)
+    mask = _held_mask(inversion.basis, sides, getattr(inversion, "pinned", None))
+    return np.concatenate([mask, mask])
+
+
+def _epic_variances(operator, fixed, free, scale):
+    """The `free` slip parameters' posterior variances at a uniform prior weight `scale` (NaN if singular)."""
     total = fixed + operator.T @ (scale * operator)
     try:
-        return float(np.median(np.diag(np.linalg.inv(total))[:n_slip]))
+        return np.diag(np.linalg.inv(total))[free]
     except np.linalg.LinAlgError:
-        return np.nan
+        return np.full(len(free), np.nan)
 
 
-def _epic_start(operator, fixed, n_slip, target):
-    """A uniform prior weight whose *median* posterior variance is already right.
+def _epic_start(operator, fixed, free, target, component, asked):
+    """A uniform prior weight at which the *median* variance-to-target ratio is already one.
 
     Starting from an arbitrary scale costs iterations and can leave the solver
     where variances have underflowed; bisecting one scalar first is a few dense
@@ -705,26 +768,33 @@ def _epic_start(operator, fixed, n_slip, target):
     values: an absolute bracket can put `a` where the normal matrix is singular
     to working precision and the variances come back `nan`.
 
-    Raises when the target is not bracketed, which is not a solver failure but a
-    statement about the operator -- see `epic_prior`.
+    Raises when the target is below the least-held parameter's variance at
+    overwhelming weight, which is not a solver failure but a statement about
+    the operator -- see `epic_prior`. The largest of those variances is the
+    floor: more weight on any row only lowers a variance, so none of them can be
+    pushed below its own value there, and the condition needs every one at the
+    target.
     """
     base = np.trace(fixed) / max(float((operator ** 2).sum()), 1e-300)
     lo, hi = 1e-12 * base, 1e12 * base
-    reachable = _epic_reachable(operator, fixed, n_slip, hi)
-    if not np.isfinite(reachable) or reachable > target ** 2:
+    stalled = _epic_variances(operator, fixed, free, hi) / target ** 2
+    if not np.all(np.isfinite(stalled)) or stalled.max() > 1.0:
+        worst = int(np.nanargmax(stalled)) if np.isfinite(stalled).any() else 0
         raise ValueError(
-            f"sigma_target={target:.4g} m is below what this smoothing operator "
-            f"can reach: even at overwhelming prior weight the median posterior "
-            f"standard deviation stalls at {np.sqrt(reachable):.4g} m. A "
-            "curvature operator has a null space -- a slip field varying "
-            "linearly across the fault has zero second derivative -- so the "
-            "component of the model lying in it is constrained by the data "
-            "alone, however strong the prior. Ask for more than that."
+            f"sigma_target={asked} is below what this smoothing operator "
+            f"can reach: even at overwhelming prior weight the least-held "
+            f"{component[worst]} parameter's posterior standard deviation stalls "
+            f"at {np.sqrt(stalled[worst]) * target[worst]:.4g} m. The smoothing "
+            "ties each parameter to its neighbours, and so in the end to what "
+            "the operator does not see: its null space (a curvature operator "
+            "does not see a slip field varying linearly across the fault), or, "
+            "with zero-slip edges, the edge values, held only as tightly as "
+            "boundary_ratio holds them. Ask for more than that."
         )
     for _ in range(80):
         mid = np.sqrt(lo * hi)
         # More prior weight means less posterior variance, so the bracket flips.
-        if _epic_reachable(operator, fixed, n_slip, mid) > target ** 2:
+        if np.median(_epic_variances(operator, fixed, free, mid) / target ** 2) > 1.0:
             lo = mid
         else:
             hi = mid

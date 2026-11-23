@@ -131,15 +131,20 @@ def _per_parameter(basis, mesh, factor):
     return (basis.projection().T @ (areas * factor)) / basis.lumped_areas()
 
 
-def _boundary_rows(basis, sides, ratio, pinned=None):
-    """Selection rows pulling the flagged boundary parameters, and any `pinned` ones, toward zero."""
+def _held_mask(basis, sides, pinned=None):
+    """Mask of the basis functions the zero-slip rows hold: those on `sides`, and any `pinned` ones."""
     mask = np.asarray(basis.boundary(sides), dtype=bool)
     if pinned is not None:
         pinned = np.asarray(pinned, dtype=bool)
         if pinned.shape != mask.shape:
             raise ValueError(f"pinned has {pinned.shape} entries against {mask.shape} basis functions")
         mask = mask | pinned
-    idx = np.nonzero(mask)[0]
+    return mask
+
+
+def _boundary_rows(basis, sides, ratio, pinned=None):
+    """Selection rows pulling the flagged boundary parameters, and any `pinned` ones, toward zero."""
+    idx = np.nonzero(_held_mask(basis, sides, pinned))[0]
     n = basis.n_basis
     if idx.size == 0:
         return sp.csr_matrix((0, 2 * n))

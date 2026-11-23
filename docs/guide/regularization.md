@@ -80,10 +80,28 @@ on your own coverage and noise ([below](#calibration-on-your-own-data)) scores
 against a known truth.
 
 **A spatially variable prior.** `epic_prior(inversion, sigma_target)` returns
-per-row smoothing weights that give every slip parameter the same posterior
+per-row smoothing weights that give every free slip parameter the same posterior
 standard deviation `sigma_target` (metres), the EPIC prior of Ortega-Culaciati et
 al. (2021). It needs an inversion with a covariance model and the node basis; pass
 its result as `solve(smoothing=...)`.
+
+- The zero-slip edges are held, not estimated, so they are left out of the
+  condition, and their own smoothing rows get weight zero.
+- `ss_ratio` and `ds_ratio` have no effect: the weights absorb them, and one
+  target asks both slip components for the same variance. On a strike-slip fault
+  that frees the dip-slip, which plain smoothing at `ds_ratio=3` holds back.
+  Give `sigma_target` as a `(strike, dip)` pair to keep a preference: each
+  component is equalised to its own target. Plain smoothing's own split at the
+  rank you want, the ratio of the two components' median posterior standard
+  deviations, is a neutral choice.
+- `sigma_target` has a window. It must be below the best-resolved parameter's
+  standard deviation from the data alone, and above the least-held parameter's
+  under overwhelming smoothing. Outside it, `epic_prior` raises and reports the
+  reachable value.
+- Within the window, the target plays the part of the weight: the lower it is,
+  the lower the effective rank. Score each candidate's weights with
+  `generalized_cross_validation`, or match a rank with `resolution_diagonal`;
+  both take per-row weights.
 
 ## Resolution
 

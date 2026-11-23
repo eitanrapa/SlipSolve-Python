@@ -693,6 +693,9 @@ def test_a_gcv_curve_needs_something_to_compare(setup):
 
 # -- EPIC: a prior that equalises posterior information -----------------------
 
+_SIDES = ("bottom", "left", "right")
+
+
 @pytest.fixture(scope="module")
 def epic_setup(setup):
     """The same problem with a real ``Cd``, which EPIC requires.
@@ -743,16 +746,19 @@ def test_epic_delivers_the_uniform_posterior_it_promises(epic_setup):
     assert target is not None, "no reachable sigma_target on this fixture"
 
     weights = R.epic_prior(inversion, target)
+    held = R._epic_held(inversion, 1.0, _SIDES)
     assert weights.shape == (2 * inversion.basis.n_basis,)
-    assert (weights > 0).all()
+    assert held.any() and (~held).any()
+    assert (weights[~held] > 0).all()
+    assert (weights[held] == 0).all()
 
     achieved = R.posterior_covariance(inversion, weights,
                                   kind="posterior")[:2 * inversion.basis.n_basis]
-    spread = np.abs(achieved - target).max() / target
+    spread = np.abs(achieved[~held] - target).max() / target
     assert spread <= R.EPIC_UNIFORMITY_TOLERANCE, spread
     # And it is genuinely non-uniform prior weight doing it -- a constant would
     # be Tikhonov, which is the thing being improved on.
-    assert weights.max() / weights.min() > 1.5
+    assert weights[~held].max() / weights[~held].min() > 1.5
 
 
 def test_a_scalar_prior_does_not_equalise_the_posterior(epic_setup):
@@ -761,11 +767,12 @@ def test_a_scalar_prior_does_not_equalise_the_posterior(epic_setup):
     inversion = epic_setup
     target = _epic_window(inversion)
     weights = R.epic_prior(inversion, target)
-    flat = np.full_like(weights, float(np.exp(np.mean(np.log(weights)))))
+    free = ~R._epic_held(inversion, 1.0, _SIDES)
+    flat = np.where(free, float(np.exp(np.mean(np.log(weights[free])))), 0.0)
 
     n = 2 * inversion.basis.n_basis
-    epic = R.posterior_covariance(inversion, weights, kind="posterior")[:n]
-    tikhonov = R.posterior_covariance(inversion, flat, kind="posterior")[:n]
+    epic = R.posterior_covariance(inversion, weights, kind="posterior")[:n][free]
+    tikhonov = R.posterior_covariance(inversion, flat, kind="posterior")[:n][free]
     assert epic.max() / epic.min() < tikhonov.max() / tikhonov.min()
 
 
@@ -817,19 +824,18 @@ def test_the_epic_jacobian_is_wired_to_the_right_matrices(epic_setup):
     the smoothing row's leverage, and far smaller here.
     """
     inversion = epic_setup
-    smooth, fixed = R._epic_blocks(inversion, 1.0, 3.0, 1.0,
-                                   ("bottom", "left", "right"))
-    operator = smooth.toarray()
-    n_slip = 2 * inversion.basis.n_basis
+    smooth, fixed = R._epic_blocks(inversion, 1.0, 3.0, 1.0, _SIDES)
+    free = np.flatnonzero(~R._epic_held(inversion, 1.0, _SIDES))
+    operator = smooth.toarray()[free]
     rng = np.random.default_rng(0)
     scale = np.exp(rng.normal(size=operator.shape[0]) * 0.2) * 1e-3
 
     def variances(a):
         return np.diag(np.linalg.inv(
-            fixed + operator.T @ (a[:, None] * operator)))[:n_slip]
+            fixed + operator.T @ (a[:, None] * operator)))[free]
 
     inverse = np.linalg.inv(fixed + operator.T @ (scale[:, None] * operator))
-    analytic = -((inverse @ operator.T)[:n_slip] ** 2)
+    analytic = -((inverse @ operator.T)[free] ** 2)
 
     for j in rng.choice(operator.shape[0], size=6, replace=False):
         step = 1e-1 * scale[j]
@@ -856,6 +862,97 @@ def test_sigma_target_is_bounded_from_both_sides(epic_setup):
         R.epic_prior(inversion, 1e-6)
     with pytest.raises(ValueError, match="must be positive"):
         R.epic_prior(inversion, 0.0)
+
+
+def test_how_hard_the_edges_are_held_does_not_cap_the_target(epic_setup):
+    """The zero-slip edges are not in the condition.
+
+    Held there, an edge's standard deviation is about one over
+    `boundary_ratio`, whatever the data. Were the edges asked to match the
+    target, that would be the ceiling: held a thousand times harder, they would
+    force every parameter down to a millimetre and the rank to almost nothing.
+    Left out, a target thirty times theirs is reached on the free parameters,
+    and the edges stay as held.
+    """
+    inversion = epic_setup
+    n = 2 * inversion.basis.n_basis
+    held = R._epic_held(inversion, 1e3, _SIDES)
+    target = 0.03
+    weights = R.epic_prior(inversion, target, boundary_ratio=1e3)
+    sd = R.posterior_covariance(inversion, weights, kind="posterior", boundary_ratio=1e3)[:n]
+    assert np.abs(sd[~held] - target).max() / target <= R.EPIC_UNIFORMITY_TOLERANCE
+    assert sd[held].max() < 0.1 * target
+    assert R.resolution_diagonal(inversion, weights, boundary_ratio=1e3).attrs["effective_rank"] > 5.0
+
+
+def test_pinned_parameters_are_held_as_the_sides_are(epic_setup):
+    """`SlipInversion.pinned` (a sheet's edge where it ends on another) is a zero-slip row like a side's."""
+    import copy
+
+    inversion = copy.copy(epic_setup)
+    n = inversion.basis.n_basis
+    sides = R._epic_held(inversion, 1.0, _SIDES)[:n]
+    pinned = np.zeros(n, dtype=bool)
+    pinned[np.flatnonzero(~sides)[:3]] = True
+    inversion.pinned = pinned
+    held = R._epic_held(inversion, 1.0, _SIDES)
+    assert held[:n][pinned].all() and held[n:][pinned].all()
+    assert held.sum() == 2 * (sides.sum() + 3)
+    weights = R.epic_prior(inversion, _epic_window(inversion))
+    assert (weights[held] == 0).all() and (weights[~held] > 0).all()
+
+
+def test_the_component_ratios_do_not_change_the_epic_prior(epic_setup):
+    """A row's weight absorbs any scaling of the row, so `ds_ratio` is undone.
+
+    Both components are asked for the same variance, so the damping block comes
+    out the same whatever the ratio: the harder dip-slip smoothing plain
+    Tikhonov uses on a strike-slip fault does not survive into EPIC.
+    """
+    from slipsolve.inversion import regularization_blocks
+    from slipsolve.regularize import scale_smoothing
+
+    inversion = epic_setup
+    target = _epic_window(inversion)
+    blocks = []
+    for ratio in (1.0, 3.0):
+        weights = R.epic_prior(inversion, target, ds_ratio=ratio)
+        smooth, _ = regularization_blocks(inversion, 1.0, ratio, 1.0, _SIDES)
+        scaled = scale_smoothing(smooth, weights)
+        blocks.append((scaled.T @ scaled).toarray())
+    assert np.abs(blocks[0] - blocks[1]).max() < 1e-6 * np.abs(blocks[0]).max()
+
+
+def test_a_target_per_component_equalises_each_component(epic_setup):
+    """`(strike, dip)`: each component at its own posterior standard deviation.
+
+    The pair keeps a preference between the components that one target cannot,
+    since the weights absorb `ds_ratio`. Two equal targets are the scalar.
+    """
+    inversion = epic_setup
+    n = inversion.basis.n_basis
+    free = ~R._epic_held(inversion, 1.0, _SIDES)
+    dip = np.arange(2 * n) >= n
+    weights = R.epic_prior(inversion, (0.6, 0.45))
+    sd = R.posterior_covariance(inversion, weights, kind="posterior")[:2 * n]
+    for part, target in ((free & ~dip, 0.6), (free & dip, 0.45)):
+        assert np.abs(sd[part] - target).max() / target <= R.EPIC_UNIFORMITY_TOLERANCE
+    target = _epic_window(inversion)
+    np.testing.assert_allclose(R.epic_prior(inversion, (target, target)),
+                               R.epic_prior(inversion, target), rtol=1e-10)
+
+
+def test_each_component_has_its_own_window(epic_setup):
+    """A pair is checked per component, and the message names the one outside."""
+    inversion = epic_setup
+    with pytest.raises(ValueError, match="above what a positive prior.*dip-slip"):
+        R.epic_prior(inversion, (0.6, 1e3))
+    with pytest.raises(ValueError, match="below what this smoothing operator.*dip-slip"):
+        R.epic_prior(inversion, (0.6, 1e-4))
+    with pytest.raises(ValueError, match="pair"):
+        R.epic_prior(inversion, (0.6, 0.45, 0.3))
+    with pytest.raises(ValueError, match="must be positive"):
+        R.epic_prior(inversion, (0.6, -0.45))
 
 
 def test_epic_refuses_the_element_basis_by_name(setup):
