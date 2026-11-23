@@ -12,7 +12,7 @@ back out of the sweep as the dips it was built with.
 import numpy as np
 import pytest
 
-from slipsolve import (CovarianceModel, DipSweep, FaultMesh, FaultTrace, Observations,
+from slipsolve import (CovarianceModel, DipSweep, FaultMesh, FaultTrace, HalfSpaceTDE, Observations,
                        SlipInversion, dip_profile_offsets, geometry_key)
 from slipsolve.covariance import observation_covariance
 from slipsolve.evidence import pinned_nodes
@@ -323,6 +323,234 @@ def test_the_bootstrap_needs_an_evidence_result(setup):
     _, _, _, sweep = setup
     with pytest.raises(ValueError, match="score='evidence'"):
         sweep.bootstrap(sweep.run(rank=RANK, fix={0: 90.0, 1: 90.0}))
+
+
+# -- continuous profiles -----------------------------------------------------------
+def test_optimize_finds_planted_dips_between_the_grid_values(setup):
+    """Off-grid planar dips on two segments, found from the grid's best to a hundredth of a degree."""
+    _, _, _, sweep = setup
+    planted = (74.0, 103.0)
+    data = sweep.predict(planted, sweep.evaluate(planted, rank=RANK)["x"])
+    fit = sweep.optimize(data=data, bounds=(60.0, 120.0))
+    assert fit.converged
+    np.testing.assert_allclose(fit.table.dip, planted, atol=0.01)
+    assert fit.log_evidence == pytest.approx(sweep.evidence(fit.dips, data=data)["log_evidence"],
+                                             rel=1e-12)
+    grid = sweep.run(score="evidence", data=data, method="exhaustive")
+    assert fit.log_evidence > grid.table.log_evidence.max()
+
+
+def test_optimize_refines_a_planted_profile_one_knot_at_a_time(setup):
+    """Planar first, then two knots on the first segment: the dip that changes with depth comes back."""
+    _, _, _, sweep = setup
+    planted = ((76.0, 58.0), 100.0)
+    data = sweep.predict(planted, sweep.evaluate(planted, rank=RANK)["x"])
+    planar = sweep.optimize(data=data, bounds=(40.0, 130.0))
+    fit = sweep.optimize(knots=[2, 1], start=planar, data=data, bounds=(40.0, 130.0))
+    assert isinstance(fit.dips[0], tuple) and isinstance(fit.dips[1], float)
+    np.testing.assert_allclose(fit.table.dip, [76.0, 58.0, 100.0], atol=0.01)
+    np.testing.assert_allclose(fit.table.depth_km, [0.0, sweep.depths.max() / 1e3, 0.0])
+    assert fit.log_evidence > planar.log_evidence
+
+
+def test_a_knot_depth_holds_the_deepest_dip_below_it(setup):
+    """Knots spread down to `knot_depth`; below it every node keeps the deepest dip."""
+    trace, frame, obs, _ = setup
+    sweep = DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, knot_depth=9e3, **KW)
+    profile = (75.0, 55.0)
+    bent, upright = sweep._mesh(profile), sweep._mesh(90.0)
+    depth = -bent.params[:, 1]
+    shift = np.hypot(*(bent.nodes[:, :2] - upright.nodes[:, :2]).T)
+    np.testing.assert_allclose(shift, np.abs(dip_profile_offsets(depth, profile, 0.0, 9e3)),
+                               rtol=1e-6, atol=1e-3)
+    below = depth > 9e3
+    assert below.any()
+    at_knot = dip_profile_offsets(np.array([9e3]), profile, 0.0, 9e3)[0]
+    np.testing.assert_allclose(shift[below], at_knot + (depth[below] - 9e3) / np.tan(np.radians(55.0)),
+                               rtol=1e-6, atol=1e-3)
+    planted = (profile, 100.0)
+    data = sweep.predict(planted, sweep.evaluate(planted, rank=RANK)["x"])
+    fit = sweep.optimize(knots=[2, 1], start=(70.0, 100.0), data=data, bounds=(40.0, 130.0))
+    np.testing.assert_allclose(fit.table.dip, [75.0, 55.0, 100.0], atol=0.01)
+    np.testing.assert_allclose(fit.table.depth_km, [0.0, 9.0, 0.0])
+    for bad in (0.0, 2 * KW["max_depth"]):
+        with pytest.raises(ValueError, match="knot_depth"):
+            DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, knot_depth=bad, **KW)
+
+
+def test_optimize_holds_fixed_segments_and_checks_its_arguments(setup):
+    _, _, _, sweep = setup
+    planted = (74.0, 103.0)
+    data = sweep.predict(planted, sweep.evaluate(planted, rank=RANK)["x"])
+    fit = sweep.optimize(fix={0: 74.0}, start=(74.0, 110.0), data=data, bounds=(60.0, 120.0))
+    assert fit.dips[0] == 74.0 and list(fit.table.segment) == [2]
+    assert fit.table.dip.iloc[0] == pytest.approx(103.0, abs=0.01)
+    with pytest.warns(UserWarning, match="on a bound"):
+        pinned = sweep.optimize(start=(74.0, 100.0), data=data, bounds=(60.0, 100.0))
+    assert pinned.table.on_bound.tolist() == [False, True]
+    for bad in (dict(knots=0), dict(knots=[1, 1, 1]), dict(bounds=(0.0, 90.0)),
+                dict(fix={0: 70.0, 1: 90.0}), dict(data=data[:-1]), dict(step=2.0)):
+        with pytest.raises(ValueError):
+            sweep.optimize(start=(70.0, 110.0), **bad)
+
+
+def test_the_profile_bootstrap_flags_a_knot_on_its_bound(setup):
+    """A knot held on its bound has no spread to report: no sd, and a one-sided interval."""
+    _, _, _, sweep = setup
+    planted = (74.0, 103.0)
+    data = sweep.predict(planted, sweep.evaluate(planted, rank=RANK)["x"])
+    with pytest.warns(UserWarning, match="on a bound"):
+        fit = sweep.optimize(start=(74.0, 100.0), data=data, bounds=(60.0, 100.0))
+    model = CovarianceModel(sill=(5e-3) ** 2, range_m=15e3, nugget=(1e-3) ** 2)
+    with pytest.warns(UserWarning, match="one-sided"):
+        boot = sweep.bootstrap(fit, noise=model, draws=20, compare=False)
+    free, held = boot.intervals().itertuples(index=False)
+    assert not free.on_bound and free.sd > 0.0 and np.isfinite([free.normal_lo, free.basic_hi]).all()
+    assert held.on_bound and held.pinned > 0.5
+    assert np.isnan([held.sd, held.normal_lo, held.normal_hi, held.basic_hi]).all()
+    assert held.basic_lo <= 100.0 and held.estimate == pytest.approx(100.0)
+    assert "(on a bound)" in repr(boot)
+
+
+def test_optimize_continuity_closes_the_tear_between_segments(setup):
+    """The tear is the two segments' offset difference; `continuity` trades evidence for closing it."""
+    _, _, _, sweep = setup
+    planted = (74.0, 103.0)
+    expected = dip_offset(sweep.depths, 74.0) - dip_offset(sweep.depths, 103.0)
+    np.testing.assert_allclose(sweep.tears(planted), expected[None, :], rtol=1e-12)
+    assert np.abs(sweep.tears((80.0, 80.0))).max() == 0.0
+    data = sweep.predict(planted, sweep.evaluate(planted, rank=RANK)["x"])
+    loose = sweep.optimize(data=data, bounds=(60.0, 120.0))
+    assert loose.penalty == 0.0 and loose.continuity is None
+    assert loose.tears.rms_m.iloc[0] == pytest.approx(np.sqrt(np.mean(expected ** 2)), rel=0.01)
+    tied = sweep.optimize(data=data, bounds=(60.0, 120.0), continuity=20.0)
+    assert tied.continuity == 20.0 and "penalty" in tied.history
+    assert tied.tears.rms_m.iloc[0] < 0.1 * loose.tears.rms_m.iloc[0]
+    assert tied.log_evidence < loose.log_evidence
+    # it maximised the penalised objective: the loose optimum scores worse under the same prior
+    loose_cost = 0.5 * (loose.tears.rms_m.iloc[0] / 20.0) ** 2
+    assert tied.log_evidence - tied.penalty > loose.log_evidence - loose_cost
+    boot = sweep.bootstrap(tied, noise=CovarianceModel(sill=(5e-3) ** 2, range_m=15e3, nugget=(1e-3) ** 2),
+                           draws=10, compare=False)
+    assert np.isfinite(boot.intervals().sd).all()
+    with pytest.raises(ValueError, match="continuity"):
+        sweep.optimize(data=data, bounds=(60.0, 120.0), continuity=0.0)
+
+
+def test_the_profile_bootstrap_covers_the_truth_like_the_grid_bootstrap(single):
+    """Exact forward model, correlated noise: the continuous fit and its one-step bootstrap.
+
+    Over 40 seeds: the continuous estimate is the grid's splined one to 0.023 deg rms (0.094
+    worst), the bootstrap sd 0.74 against the grid bootstrap's 0.80 and an actual spread of
+    0.85, coverage 0.90 for both, consistency z sd 1.08. Twelve seeds keep the test quick.
+    """
+    from slipsolve.sweep import _refine
+
+    sweep, signal, model, factors = single
+    covered, z = [], []
+    for seed in range(12):
+        data = _noisy(sweep, signal, factors, 100 + seed)
+        grid = sweep.run(score="evidence", data=data)
+        fit = sweep.optimize(start=grid, data=data)
+        splined = _refine(list(grid.table.dip_1), grid.table.log_evidence.to_numpy())[0]
+        assert fit.table.dip.iloc[0] == pytest.approx(splined, abs=0.1)
+        boot = sweep.bootstrap(fit, noise=model, draws=20, seed=seed)
+        row = boot.intervals().iloc[0]
+        assert row.sd > 0.0 and row.estimate == pytest.approx(fit.table.dip.iloc[0], abs=0.01)
+        covered.append(row.normal_lo < 70.0 < row.normal_hi)
+        z.append(boot.consistency().iloc[0].z)
+    assert np.mean(covered) >= 9 / 12
+    assert np.all(np.isfinite(z)) and np.max(np.abs(z)) < 4.0
+
+
+def test_smoothed_normals_embed_the_layout_as_a_production_sheet_does(setup):
+    """`normal_smoothing` moves each node as `Sheet` does, so the sweep scores the surface a run will mesh."""
+    from slipsolve.production import Sheet
+
+    trace, frame, obs, sweep = setup
+    smoothed = DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, normal_smoothing=10e3, **KW)
+    knots = np.linspace(0.0, smoothed.knot_depth, 2)
+    cases = [(70.0, dict(dip=70.0), 1e-6), (110.0, dict(dip=110.0), 1e-6),
+             # a profile, to the sheet's own quadrature of cot(dip)
+             ((75.0, 55.0), dict(profile=lambda s, z: np.interp(z, knots, (75.0, 55.0))), 0.1)]
+    for geometry, shape, tol in cases:
+        sheet = Sheet("s", trace, frame, depth=KW["max_depth"], normal_smoothing=10e3,
+                      spacing=KW["edge_length"], **shape)
+        reference = sheet.mesh(smoothed.layout).nodes
+        for j in range(smoothed.n_segments):
+            nodes = smoothed.segment_nodes[j]
+            assert np.abs(smoothed.segment_mesh(j, geometry).nodes - reference[nodes]).max() < tol
+    # a different embedding from the local normal's on this bending trace, and the blocks still sum
+    assert np.abs(smoothed.segment_mesh(0, 70.0).nodes - sweep.segment_mesh(0, 70.0).nodes).max() > 10.0
+    direct = SlipInversion(smoothed._mesh(70.0), obs, basis="node").g
+    np.testing.assert_allclose(smoothed.design((70.0, 70.0)), direct,
+                               rtol=1e-10, atol=1e-12 * np.abs(direct).max())
+    with pytest.raises(ValueError, match="normal_smoothing"):
+        DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, normal_smoothing=-1.0, **KW)
+
+
+def test_a_fit_hands_its_profile_to_a_production_sheet(setup):
+    """`ProfileFit.profile` is each segment's dip blended across the breaks; `sheet` builds the run's sheet on it."""
+    _, _, _, sweep = setup
+    planted = ((76.0, 58.0), 100.0)
+    data = sweep.predict(planted, sweep.evaluate(planted, rank=RANK)["x"])
+    fit = sweep.optimize(knots=[2, 1], start=planted, data=data, bounds=(40.0, 130.0))
+    b, z = sweep.breaks[1], sweep.depths
+    step = fit.profile(blend=0.0)
+    left, right = step(np.full(z.shape, b - 1.0), z), step(np.full(z.shape, b + 1.0), z)
+    np.testing.assert_allclose(left, np.interp(z, [0.0, sweep.knot_depth], fit.dips[0]))
+    np.testing.assert_allclose(right, fit.dips[1])
+    blended = fit.profile(blend=5e3)
+    np.testing.assert_allclose(blended(np.full(z.shape, b), z), 0.5 * (left + right))
+    np.testing.assert_allclose(blended(b - 5e3, z), left)
+    np.testing.assert_allclose(blended(b + 5e3, z), right)
+    # on the sweep's own resampling of the trace, each segment's surface away from the break
+    sheet = fit.sheet("main", blend=0.0, spacing=KW["edge_length"])
+    assert sheet.depth == sweep.depths.max()
+    mesh = sheet.mesh(sweep.layout)
+    for j in range(sweep.n_segments):
+        nodes = sweep.segment_nodes[j]
+        far = np.abs(sweep.layout.params[nodes, 0] - b) > KW["edge_length"]
+        assert np.abs(mesh.nodes[nodes][far] - sweep.segment_mesh(j, fit.dips[j]).nodes[far]).max() < 0.5
+    # on a finer one the arc lengths differ, and the break is carried by position: to the nearest point
+    fine = fit.sheet("main", blend=0.0)
+    assert fine.length > sweep.length
+    s = np.linspace(b - 2e3, b + 2e3, 4001)
+    dips = fine.profile(s, np.zeros_like(s))
+    switch = s[np.argmax(dips != dips[0])]
+    point = np.interp(b, sweep._s, sweep._rx), np.interp(b, sweep._s, sweep._ry)
+    track = fine.position(s, 0.0)
+    gap = np.hypot(track[0] - point[0], track[1] - point[1])
+    assert abs(switch - s[np.argmin(gap)]) <= 2.0
+    with pytest.raises(ValueError, match="breaks"):
+        fit.profile(breaks=[b, b + 1.0])
+
+
+def test_blocks_from_workers_and_from_the_cache_are_the_serial_ones(setup, tmp_path):
+    """`workers` splits each block's rows over processes; `cache` keeps the blocks, keyed by mesh, samples and engine."""
+    import pickle
+
+    trace, frame, obs, sweep = setup
+    combo = (70.0, 90.0)
+    serial = sweep.design(combo)
+    pooled = DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, workers=2, cache=tmp_path, **KW)
+    try:
+        np.testing.assert_allclose(pooled.design(combo), serial, rtol=1e-12, atol=0.0)
+        pickle.dumps(pooled)
+    finally:
+        pooled.close()
+    assert len(list(tmp_path.glob("g_*.npy"))) == 2
+    # a block in the cache is the one used: doubled on disk, it comes back doubled
+    again = DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, cache=tmp_path, **KW)
+    [path] = tmp_path.glob(f"g_{again.segment_mesh(0, 70.0).digest()[:12]}_*.npy")
+    np.save(path, 2.0 * np.load(path))
+    np.testing.assert_array_equal(again._segment_block(0, 70.0), 2.0 * sweep._segment_block(0, 70.0))
+    # another engine reads none of them
+    other = DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, cache=tmp_path, engine=HalfSpaceTDE(0.3), **KW)
+    other.design(combo)
+    assert len(list(tmp_path.glob("g_*.npy"))) == 4
+    with pytest.raises(ValueError, match="workers"):
+        DipSweep(trace, obs, frame=frame, segments=2, dips=GRID, workers=0, **KW)
 
 
 def test_the_combination_count_does_not_wrap():

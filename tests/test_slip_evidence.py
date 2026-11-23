@@ -143,6 +143,37 @@ def test_the_alpha_grid_is_fixed_by_the_first_geometry_and_brackets_the_mode():
     assert 0.0 < first["rank"][0] < p
 
 
+def test_the_gradient_is_the_derivative_of_the_log_evidence():
+    """`gradient` against central differences of `log_evidence`, iid and whitened, alpha^2 integrated."""
+    obs = _observations(seed=7)
+    n = obs.ds.sizes["obs"]
+    rng = np.random.default_rng(8)
+    names, rows, _ = track_blocks(obs, None)
+    blocks = {}
+    for t, r in zip(names, rows):
+        a = rng.normal(size=(r.size, r.size))
+        blocks[t] = a @ a.T / r.size + 0.5 * np.eye(r.size)
+    ramp = np.column_stack([np.ones(n), obs.ds["x"].values / 1e5])
+    p = 7
+    lq = rng.normal(size=(p + 2, p))
+    q = lq.T @ lq + 0.2 * np.eye(p)
+    g = rng.normal(size=(n, p))
+    d = g @ rng.normal(size=p) + 0.3 * rng.normal(size=n)
+    for covariance in (None, blocks):
+        ev = GeometryEvidence(obs, q, np.arange(p), ramp, covariance=covariance)
+        dh, s0 = ev.prepare(d)
+        gh = ev.project(ev.whiten(g))
+        dec = ev.decompose_whitened(gh)
+        np.testing.assert_allclose(ev.decompose(g)["mu"], dec["mu"], rtol=1e-12)
+        grad = ev.gradient(dec, dh, s0)
+        for _ in range(3):
+            e = rng.normal(size=gh.shape)
+            h = 1e-6 * np.linalg.norm(gh) / np.linalg.norm(e)
+            up = ev.score(ev.decompose_whitened(gh + h * e), dh, s0)["log_evidence"][0]
+            down = ev.score(ev.decompose_whitened(gh - h * e), dh, s0)["log_evidence"][0]
+            assert np.sum(grad * e) == pytest.approx((up - down) / (2 * h), rel=1e-5)
+
+
 def test_an_unknown_covariance_spelling_is_refused():
     obs = _observations()
     with pytest.raises(ValueError, match="covariance must be"):

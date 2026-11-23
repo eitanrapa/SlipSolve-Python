@@ -485,6 +485,27 @@ def _arc_length(x, y):
     return np.concatenate([[0.0], np.cumsum(step)])
 
 
+def _smoothed_normals(x, y, s, width):
+    """Unit left-hand normals of the polyline `(x, y)` at arc lengths `s`, smoothed along it over `width` (m).
+
+    The tangent is a central difference in `s`. With `width` (0 or None for none) both
+    components of the normal are smoothed by a Gaussian of that standard deviation in arc
+    length, the ends held, and renormalised: a bend then turns the normal gradually, and a
+    sheet stepped along it does not fold at depth.
+    """
+    from scipy.ndimage import gaussian_filter1d
+
+    tx, ty = np.gradient(x, s), np.gradient(y, s)
+    norm = np.hypot(tx, ty)
+    nx, ny = -ty / norm, tx / norm
+    if width:
+        step = float(np.median(np.diff(s)))
+        nx = gaussian_filter1d(nx, width / step, mode="nearest")
+        ny = gaussian_filter1d(ny, width / step, mode="nearest")
+    norm = np.hypot(nx, ny)
+    return nx / norm, ny / norm
+
+
 class TraceSet:
     """Several traces read as one by what only asks how far away a fault is: the sampling of observations.
 

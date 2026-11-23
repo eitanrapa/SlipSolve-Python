@@ -62,7 +62,8 @@ LOS grids, offsets, GNSS ──> Observations ┘
   loop that adapts the mesh and the sampling to the resolution.
 - **Geometry search.** Per-segment dip sweeps, including dips that change with
   depth, scored by misfit at fixed effective rank or by the marginal likelihood,
-  with bootstrap intervals (`DipSweep`, `GeometryEvidence`).
+  with bootstrap intervals; and a continuous search of each segment's dip profile
+  by the marginal likelihood (`DipSweep`, `DipSweep.optimize`, `GeometryEvidence`).
 - **Production runs.** The whole recipe in checkpointed stages: meshes adapted to the
   resolution, samples redrawn from the model, each data set weighted by its own noise, and
   the rank chosen by blocked cross-validation averaged over shifted partitions

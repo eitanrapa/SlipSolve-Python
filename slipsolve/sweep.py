@@ -34,22 +34,39 @@ sum of per-segment blocks, each depending on one segment's geometry:
 
 and the sweep costs one full assembly per geometry *value* -- seven for 60-120
 degrees in steps of 10 -- instead of one per combination, of which there are
-`7**K`. After that a combination costs one solve.
+`7**K`. After that a combination costs one solve. `workers` spreads each assembly
+over processes, and `cache` keeps the blocks on disk for the next run.
 
 **What the geometry is.** Each segment is what `FaultMesh.curved` builds for
 it: every node stepped along the trace's local normal by `depth / tan(dip)`, or,
 for a dip that changes with depth, by the integral of `cot(dip)` down to that
-depth. Adjacent segments meet on the surface trace and step apart below it, by
+depth; with `normal_smoothing`, along the trace's normal smoothed along strike, as
+`slipsolve.production.Sheet` steps it. Adjacent segments meet on the surface trace
+and step apart below it, by
 `depth * |cot(dip_a) - cot(dip_b)|` -- 3.5 km at 20 km depth for 80 against 90.
 The slip does not step: boundary nodes are shared parameters, so the slip field
 stays continuous along strike and only the geometry kinks. The fault is torn,
-not a blended surface, so rebuild the winning combination as one surface
-(`FaultMesh.curved(surface=...)`) before reporting a model on it.
+not a blended surface, so rebuild the winning combination as one surface before
+reporting a model on it: `ProfileFit.sheet` builds a production `Sheet` with the
+dips blended across the breaks, and `FaultMesh.curved(surface=...)` takes any
+surface.
 
 **What is held fixed.** The samples, the `(s, z)` node layout, the bounds, the
 ramp columns, the boundary rows and the smoothing operator. The operator is built
 once, on the layout embedded at `reference_dip`, so the regularization is
 identical across geometries rather than re-derived from each one's 3-D metric.
+
+**Continuous profiles.** `DipSweep.optimize` maximises the evidence over each
+segment's dip profile without a grid: a few dips at evenly spaced depths per
+segment, linear in depth between them. It is a trust-region search on the design
+linearised in those dips. Because the design is a sum of per-segment blocks, a dip's
+derivative costs two assemblies of its own segment, and the evidence's gradient with
+respect to the design is analytic (`GeometryEvidence.gradient`). Start it from a sweep
+(it is local), add depth knots one at a time, and take intervals from
+`DipSweep.bootstrap`, which re-estimates the dips on each replicate by one Newton
+step on the linearised design. A dip that changes with depth is resolved far more
+coarsely than a planar dip, and extra knots can fit correlated noise; the guide's
+dip-sweep page has the numbers.
 
 Read the result as a profile, not a winner: a sweep can reject one dip direction
 clearly while its curve is shallow among the angles on the other side.
@@ -81,19 +98,20 @@ import pandas as pd
 import scipy.linalg as sla
 from scipy.interpolate import CubicSpline
 from scipy.linalg import cho_factor, cho_solve
-from scipy.optimize import brentq
+from scipy.optimize import brentq, minimize
 
 from .basis import NodeBasis
 from .covariance import CovarianceModel, fit_reml, observation_covariance
 from .evidence import GeometryEvidence, smoothing_precision
-from .inversion import (DEFAULT_SHEAR_MODULUS, SlipInversion, SlipModel, _boundary_rows,
-                        box_qp)
+from .greens import HalfSpaceTDE
+from .inversion import DEFAULT_SHEAR_MODULUS, SlipModel, _boundary_rows, box_qp
 from .layout import graded_layout
-from .mesh import FaultMesh, _arc_length, _depth_levels
+from .mesh import FaultMesh, _arc_length, _depth_levels, _layout_attrs, _snap_vertical_columns
 from .regularize import (check_ramp_tracks, laplace_beltrami, ramp_columns, ramp_spec,
                          slip_bounds)
 from .resolution import JITTER
 from .surface import FaultSurface, centres
+from .trace import _smoothed_normals, dip_offset
 
 #: Dips tried on every segment by default, in degrees: 60 to 120 in steps of 10.
 #: `FaultMesh.curved(uniform_dip=)`'s convention -- below 90 the fault dips
@@ -114,13 +132,27 @@ IMPROVEMENT = 1e-9
 #: off the spline through its profile.
 REFINE_STEP = 0.005
 
+#: `DipSweep.optimize` stops when the linearised design promises less than this gain in
+#: log evidence (natural units).
+GAIN_TOLERANCE = 1e-4
+
+#: The largest trust radius `DipSweep.optimize` grows to, in degrees.
+MAX_RADIUS = 20.0
+
+#: Step, in degrees, of the finite differences that give the Hessian of the linearised design.
+HESSIAN_STEP = 1e-3
+
+#: A bootstrap replicate within this many degrees of a bound counts as stopped on it.
+BOUND_TOLERANCE = 1e-6
+
 
 def geometry_key(value):
     """One segment's geometry, as the sweep keys it.
 
     A number is a planar dip in degrees. A sequence of two or more numbers is a
     dip that changes with depth: the dips at evenly spaced depths from the top of
-    the layout to its bottom, linear in between (see `dip_profile_offsets`).
+    the layout to the sweep's `knot_depth` (its bottom by default), linear in
+    between and held below (see `dip_profile_offsets`).
     A sequence whose entries are all equal is the planar dip and is returned as
     one, so the two spellings share a mesh and a Green's-function block.
     """
@@ -150,10 +182,11 @@ def dip_profile_offsets(depths, dips, top=None, bottom=None):
 
     `dips` are the dips (degrees) at evenly spaced depths from `top` to
     `bottom` (by default the shallowest and deepest of `depths`), linear in
-    depth between them. The offset is the integral of `cot(dip)` from `top`,
-    taken exactly on each piece (`ln sin` is its antiderivative), so a
-    constant profile reproduces `depth / tan(dip)` and the near-vertical
-    snapping of `slipsolve.trace.dip_offset` is left to the mesh builder.
+    depth between them and held below `bottom`. The offset is the integral of
+    `cot(dip)` from `top`, taken exactly on each piece (`ln sin` is its
+    antiderivative), so a constant profile reproduces `depth / tan(dip)` and the
+    near-vertical snapping of `slipsolve.trace.dip_offset` is left to the mesh
+    builder.
     """
     depths = np.asarray(depths, dtype=float)
     theta = np.radians(np.asarray(dips, dtype=float))
@@ -176,6 +209,25 @@ def dip_profile_offsets(depths, dips, top=None, bottom=None):
             total += (depth - bottom) * np.cos(theta[-1]) / np.sin(theta[-1])
         out.flat[i] = total
     return out
+
+
+def _project_arc(px, py, s, x, y):
+    """The arc length, on the polyline `(x, y)` measured by `s`, of the point nearest each `(px, py)`."""
+    s, x, y = (np.asarray(v, dtype=float) for v in (s, x, y))
+    dx, dy = np.diff(x), np.diff(y)
+    length2 = np.where(dx ** 2 + dy ** 2 > 0.0, dx ** 2 + dy ** 2, 1.0)
+    out = []
+    for qx, qy in zip(np.atleast_1d(px), np.atleast_1d(py)):
+        t = np.clip(((qx - x[:-1]) * dx + (qy - y[:-1]) * dy) / length2, 0.0, 1.0)
+        i = int(np.argmin((x[:-1] + t * dx - qx) ** 2 + (y[:-1] + t * dy - qy) ** 2))
+        out.append(s[i] + t[i] * (s[i + 1] - s[i]))
+    return np.array(out, dtype=float)
+
+
+def _knot_key(values):
+    """Knot dips as a geometry key: a number for one knot, a tuple otherwise."""
+    values = [float(v) for v in values]
+    return geometry_key(values[0] if len(values) == 1 else tuple(values))
 
 
 def segment_breaks(length, count=None, size=None, breaks=None):
@@ -286,6 +338,10 @@ class DipSweep:
     `reference_dip` is the geometry the smoothing operator is built on, once,
     for every combination. 90 measures it in the `(s, z)` plane itself.
 
+    `knot_depth` (m) is where a profile's deepest dip sits; below it the dip
+    holds. By default it is the base of the layout. Set it near the base of the
+    slip: a knot below the slip has little to fit, and moves with the noise.
+
     `contrast` puts the fault between blocks of different rigidity, in the
     scaled mode of `slipsolve.bimaterial`. `ratios` makes its ratio a
     sweep axis: one grid for every interval of the contrast, or one grid per
@@ -294,8 +350,22 @@ class DipSweep:
     followed by the intervals' ratios; anywhere a combination is taken, the dips
     alone mean the contrast's own ratios.
 
+    `normal_smoothing` (m) embeds the layout as `slipsolve.production.Sheet` does:
+    each node is moved along the trace's left-hand normal smoothed along strike by a
+    Gaussian of that standard deviation (0 for none), rather than along the trace's own
+    local normal as `FaultMesh.curved` moves it (None, the default). On a trace with
+    bends a fault that lies far from its trace at depth can fold with the local normal;
+    and to sweep the surface a production run will mesh, give its sheets' value
+    (10 km by default). Either way the trace is followed as resampled at `edge_length`.
+
     Green's functions are assembled lazily, one geometry at a time, and kept:
-    memory is about one full design matrix per geometry used.
+    memory is about one full design matrix per geometry used. `workers` above 1
+    assembles each block's rows on that many spawned processes, each with its own
+    copy of the engine (a `LayeredTDE` needs its tables loaded from a file); `close`
+    shuts them down. `cache`, a directory, keeps every block assembled -- `optimize`'s
+    finite-difference geometries too -- in a file named by the segment mesh, the
+    samples and the engine, so a repeated run, or another sweep on the same samples,
+    reads it back.
     """
 
     def __init__(self, trace, obs, *, frame=None, segments=None, segment_length=None,
@@ -304,7 +374,8 @@ class DipSweep:
                  ramp="none", reference_dip=90.0, velocity_model=None, ss_ratio=1.0,
                  ds_ratio=3.0, boundary_ratio=1.0, sides=("bottom", "left", "right"),
                  polarity=None, strike=(-10.0, 10.0), dip=(-10.0, 10.0),
-                 contrast=None, ratios=None, frame_looks=False):
+                 contrast=None, ratios=None, frame_looks=False, knot_depth=None,
+                 normal_smoothing=None, workers=1, cache=None):
         if hasattr(engine, "contrast"):
             raise ValueError("give the rigidity contrast to DipSweep(contrast=...), with a plain "
                              "engine, so the sweep can scale its blocks; not a Bimaterial engine")
@@ -320,8 +391,19 @@ class DipSweep:
         # The arc length exactly as `FaultMesh.curved` measures it, or the layout
         # and the meshes built on it would disagree about where the trace ends.
         resampled = trace.resample(self.edge_length, self.frame)
-        self._s = _arc_length(*resampled.to_local(self.frame))
+        self._rx, self._ry = resampled.to_local(self.frame)
+        self._s = _arc_length(self._rx, self._ry)
         self.length = float(self._s[-1])
+        if normal_smoothing is not None and not float(normal_smoothing) >= 0.0:
+            raise ValueError(f"normal_smoothing must be a length >= 0 (m) or None, got {normal_smoothing!r}")
+        self.normal_smoothing = None if normal_smoothing is None else float(normal_smoothing)
+        self._sheet_normals = (None if self.normal_smoothing is None
+                         else _smoothed_normals(self._rx, self._ry, self._s, self.normal_smoothing))
+        if int(workers) < 1:
+            raise ValueError(f"workers must be at least 1, got {workers!r}")
+        self.workers = int(workers)
+        self.cache = cache
+        self._process_pool = None
         if segments is None and segment_length is None and breaks is None:
             segments = 4
         self.breaks = segment_breaks(self.length, count=segments, size=segment_length,
@@ -331,9 +413,14 @@ class DipSweep:
                       else max(1, int(round(max_depth / edge_length))) + 1)
             depths = _depth_levels(0.0, float(max_depth), int(levels), float(bias_w))
         self.depths = np.asarray(depths, dtype=float)
+        top, base = float(self.depths.min()), float(self.depths.max())
+        self.knot_depth = base if knot_depth is None else float(knot_depth)
+        if not top < self.knot_depth <= base:
+            raise ValueError(f"knot_depth must lie below the top of the layout and no deeper than "
+                             f"its base ({base:.0f} m), got {self.knot_depth:.0f}")
         self.layout = segmented_layout(self.breaks, self.depths, self.edge_length)
         self.dips = tuple(dict.fromkeys(geometry_key(v) for v in dips))
-        self.engine = engine
+        self.engine = HalfSpaceTDE() if engine is None else engine
         self.ramp_kind = ramp_spec(ramp)
         self.velocity_model = velocity_model
         self.frame_looks = bool(frame_looks)
@@ -423,24 +510,56 @@ class DipSweep:
     def _profile_surface(self, key):
         """The `cross(s, z)` field of a dip that changes with depth, on the mesh lattice."""
         z_nodes = -self.depths[::-1]
-        top, bottom = float(self.depths.min()), float(self.depths.max())
+        top, bottom = float(self.depths.min()), self.knot_depth
         offsets = dip_profile_offsets(self.depths, key, top, bottom)
         cross = np.broadcast_to(offsets[::-1, None], (self.depths.size, self._s.size))
         s_c, z_c = centres(self._s), centres(z_nodes)
         centre = dip_profile_offsets(-z_c, key, top, bottom)
         return FaultSurface(self._s, z_nodes, np.array(cross), s_c, z_c,
                             np.array(np.broadcast_to(centre[:, None], (z_c.size, s_c.size))),
-                            attrs={"dips": [float(v) for v in key], "profile": "linear in depth"})
+                            attrs={"dips": [float(v) for v in key], "profile": "linear in depth",
+                                   "knot_depth": bottom})
 
     def _mesh(self, key):
         """The whole layout embedded at one geometry."""
         key = geometry_key(key)
         if key not in self._meshes:
-            geometry = ({"uniform_dip": key} if isinstance(key, float)
-                        else {"surface": self._profile_surface(key)})
-            self._meshes[key] = FaultMesh.from_layout(
-                self.layout, self.trace, self.frame, edge_length=self.edge_length, **geometry)
+            if self._sheet_normals is None:
+                geometry = ({"uniform_dip": key} if isinstance(key, float)
+                            else {"surface": self._profile_surface(key)})
+                self._meshes[key] = FaultMesh.from_layout(
+                    self.layout, self.trace, self.frame, edge_length=self.edge_length, **geometry)
+            else:
+                self._meshes[key] = self._smoothed_mesh(key)
         return self._meshes[key]
+
+    def _smoothed_mesh(self, key):
+        """The layout at one geometry, each node moved along the smoothed normal by the geometry's offset.
+
+        As `slipsolve.production.Sheet.mesh` places nodes, with the offsets the
+        segments' blocks are keyed by: at the layout's depths, near-vertical steps
+        snapped as `FaultMesh.curved` snaps them.
+        """
+        nx, ny = self._sheet_normals
+        params = np.asarray(self.layout.params, dtype=float)
+        s, depth = params[:, 0], -params[:, 1]
+        levels = _snap_vertical_columns(self._offsets(key)[:, None], self.depths)[:, 0]
+        step = np.interp(depth, self.depths, levels)
+        nodes = np.column_stack([np.interp(s, self._s, self._rx) + step * np.interp(s, self._s, nx),
+                                 np.interp(s, self._s, self._ry) + step * np.interp(s, self._s, ny),
+                                 params[:, 1]])
+        attrs = {"kind": "sweep", "max_depth": float(self.depths.max()),
+                 "top_depth": float(self.depths.min()), "edge_length": self.edge_length,
+                 "trace_length": self.length, "trace_name": self.trace.name,
+                 "normal_smoothing": self.normal_smoothing, **_layout_attrs(self.layout)}
+        if isinstance(key, float):
+            attrs["dip_deg"] = key
+        else:
+            attrs.update(dips=[float(v) for v in key], profile="linear in depth",
+                         knot_depth=self.knot_depth)
+        mesh = FaultMesh(nodes, self.layout.triangles, params, frame=self.frame, attrs=attrs)
+        mesh._check_winding((self._s, nx, ny))
+        return mesh
 
     def segment_mesh(self, j, dip):
         """Segment `j` (0-based) of the layout, embedded at `dip`.
@@ -465,6 +584,27 @@ class DipSweep:
         """Every segment at its own geometry, in order -- the stepped fault `dips` describes."""
         return [self.segment_mesh(j, v) for j, v in enumerate(self._combination(dips))]
 
+    def _offsets(self, key):
+        """A geometry's horizontal offset from the trace at each of the layout's depths, m."""
+        key = geometry_key(key)
+        if isinstance(key, tuple):
+            return dip_profile_offsets(self.depths, key, float(self.depths.min()), self.knot_depth)
+        return np.asarray(dip_offset(self.depths, key), dtype=float)
+
+    def tears(self, dips):
+        """How far apart neighbouring segments' surfaces lie where they meet, `(breaks, depths)`, m.
+
+        Row `b` is segment `b`'s offset from the trace less segment `b + 1`'s, at each
+        of the layout's `depths`, on the column at `breaks[b + 1]` that both share.
+        Each segment is meshed at its own geometry, so the stepped fault tears there
+        unless the two geometries agree; the shared column's nodes carry one slip at
+        both positions. `optimize(continuity=)` penalises the tear.
+        """
+        combo = self._combination(dips)[: self.n_segments]
+        offsets = [self._offsets(v) for v in combo]
+        return np.array([offsets[j] - offsets[j + 1] for j in range(self.n_segments - 1)]
+                        ).reshape(self.n_segments - 1, self.depths.size)
+
     def _combination(self, dips):
         if isinstance(dips, (int, float, np.integer, np.floating)):
             dips = (dips,)
@@ -487,15 +627,65 @@ class DipSweep:
         return geometry + ratios
 
     # -- the design matrix ---------------------------------------------------
-    def _segment_blocks(self, dip):
-        """Each segment's Green's columns at `dip`, one assembly of the whole fault."""
-        dip = geometry_key(dip)
-        if dip not in self._blocks:
-            self._blocks[dip] = [
-                np.asarray(SlipInversion(self.segment_mesh(j, dip), self.obs, engine=self.engine,
-                                         basis="node", frame_looks=self.frame_looks).g, dtype=float)
-                for j in range(self.n_segments)]
-        return self._blocks[dip]
+    def _assemble(self, j, dip):
+        """Segment `j`'s nodal Green's columns at geometry `dip`, `(n_obs, 2 n_j)`."""
+        from .production import _cached_green
+
+        g, _ = _cached_green(self.segment_mesh(j, dip), self.obs, self.engine,
+                             frame_looks=self.frame_looks, cache=self.cache, pool=self._processes,
+                             workers=self.workers)
+        return g
+
+    def _processes(self):
+        """The process pool, started on first use when `workers` is above 1."""
+        if self.workers < 2:
+            return None
+        if self._process_pool is None:
+            from .production import _worker_pool
+
+            self._process_pool = _worker_pool(self.engine, self.workers)
+        return self._process_pool
+
+    def close(self):
+        """Shut the worker processes down; a later assembly starts them again."""
+        if self._process_pool is not None:
+            self._process_pool.shutdown()
+            self._process_pool = None
+
+    def __getstate__(self):
+        # A process pool cannot be pickled; an unpickled sweep starts its own on first use.
+        return {**self.__dict__, "_process_pool": None}
+
+    def _segment_block(self, j, dip):
+        """`_assemble`, kept: one block per segment and geometry used."""
+        key = (int(j), geometry_key(dip))
+        if key not in self._blocks:
+            self._blocks[key] = self._assemble(*key)
+        return self._blocks[key]
+
+    def _transient_block(self, j, dip):
+        """`_assemble` without keeping it or the meshes it builds: `optimize` visits each geometry once."""
+        key = geometry_key(dip)
+        kept = (key in self._meshes, (int(j), key) in self._submeshes)
+        try:
+            return self._assemble(int(j), key)
+        finally:
+            if not kept[1]:
+                self._submeshes.pop((int(j), key), None)
+            if not kept[0]:
+                self._meshes.pop(key, None)
+
+    def _compose(self, blocks, ratios):
+        """The nodal design from per-segment blocks `{segment: block}`, scaled by any contrast."""
+        g = np.zeros((self.d.size, 2 * self.n))
+        for j, block in blocks.items():
+            nodes = self.segment_nodes[j]
+            g[:, np.concatenate([nodes, self.n + nodes])] += block
+        if self.n_ratios:
+            rows, columns, _ = self._contrast_factors(ratios)
+            g *= rows[:, None]
+            g *= columns[None, :]
+        return g
 
     def design(self, dips):
         """The nodal Green's matrix of a combination, `(n_obs, 2 * n)`.
@@ -506,15 +696,8 @@ class DipSweep:
         """
         combo = self._combination(dips)
         k = self.n_segments
-        g = np.zeros((self.d.size, 2 * self.n))
-        for j, dip in enumerate(combo[:k]):
-            nodes = self.segment_nodes[j]
-            g[:, np.concatenate([nodes, self.n + nodes])] += self._segment_blocks(dip)[j]
-        if self.n_ratios:
-            rows, columns, _ = self._contrast_factors(combo[k:])
-            g *= rows[:, None]
-            g *= columns[None, :]
-        return g
+        return self._compose({j: self._segment_block(j, dip) for j, dip in enumerate(combo[:k])},
+                             combo[k:])
 
     def _contrast_factors(self, ratios):
         """Row factors, nodal column factors and element rigidity factors at `ratios`.
@@ -822,6 +1005,304 @@ class DipSweep:
         return SweepResult(self, rows, best, method=method, score=score, rank=rank,
                            smoothing=smoothing, covariance=covariance, data=data)
 
+    # -- continuous profiles --------------------------------------------------
+    def optimize(self, knots=1, *, start=None, fix=None, bounds=None, data=None, covariance=None,
+                 continuity=None, step=0.25, radius=5.0, max_iter=30, xtol=0.01, log=None):
+        """Maximise the evidence over each segment's dip profile, continuously; returns a `ProfileFit`.
+
+        A segment's geometry is `knots` dips at evenly spaced depths from the top of the
+        layout to `knot_depth`, linear in depth between them (`geometry_key`'s tuples): one
+        knot is a planar dip, two a dip that changes steadily with depth, three or more a
+        curved profile. `knots` is one count for every segment or a list of counts.
+        `fix={segment: geometry}` (0-based) holds segments; a contrast's ratios are held
+        at the start's.
+
+        `start` is where the search begins: a combination, a `SweepResult` (its best) or
+        a `ProfileFit` (re-knotted when the counts differ, so a fit can be refined one
+        knot at a time). Without it, `run(score="evidence")` over the grid supplies one.
+        The search is local, so start it from a sweep, which sees the whole grid.
+        `bounds=(lo, hi)` limits every knot, in degrees, by default to the span of the
+        grid's dips; a knot that ends on a bound is flagged and warned about.
+
+        **Tears.** Each segment is meshed at its own geometry, so where two segments
+        with different geometries meet, their surfaces lie apart at depth (`tears`,
+        reported per break in `ProfileFit.tears`). Nothing in the evidence keeps that
+        gap small: a real fault that bends between segments stays continuous.
+        `continuity`, a length in metres, adds a prior that each break's rms tear over
+        depth is of that order: the search maximises the log evidence less
+        `0.5 * sum((rms tear / continuity) ** 2)` over the breaks, and the bootstrap
+        re-estimates under the same prior.
+
+        **How.** A trust-region search on a design linearised in the knots. Each knot's
+        derivative comes from central differences of `step` degrees, two assemblies of
+        its own segment only, because the design is a sum of per-segment blocks. The
+        evidence of the linearised design is maximised within `radius` degrees of the
+        iterate using its analytic gradient (`GeometryEvidence.gradient`). The step is
+        kept if the assembled design confirms the gain, and the radius follows how well
+        the two agreed. The search stops when the linearised design finds no gain, or a
+        kept step is under `xtol` degrees. An iteration costs about two segment
+        assemblies per knot, and the search is then relinearised at the optimum for
+        `bootstrap`.
+
+        `data` and `covariance` as `evidence` takes them; `log` is called with one line
+        per iteration. Read the uncertainty from `bootstrap(fit)`, not from the evidence's
+        curvature, which under iid noise is too narrow (see `slipsolve.evidence`), and
+        judge a knot by its interval rather than by the gain in log evidence it brings:
+        with correlated noise taken as iid, extra knots gain even on a planar fault.
+        """
+        k = self.n_segments
+        d = self.d if data is None else np.asarray(data, dtype=float)
+        if d.shape != self.d.shape:
+            raise ValueError(f"data has shape {d.shape}; the samples need {self.d.shape}")
+        fixed = {}
+        for j, value in (fix or {}).items():
+            if not 0 <= int(j) < k:
+                raise ValueError(f"fix names segment {j}; segments are 0-{k - 1}")
+            fixed[int(j)] = geometry_key(value)
+        counts = [int(knots)] * k if np.ndim(knots) == 0 else [int(c) for c in knots]
+        if len(counts) != k or min(counts) < 1:
+            raise ValueError(f"knots must be a positive count, or one per segment ({k}); got {knots!r}")
+        free = [j for j in range(k) if j not in fixed]
+        if not free:
+            raise ValueError("every segment is fixed: nothing to optimise")
+        lo, hi = self._knot_bounds(bounds)
+        step, xtol = float(step), float(xtol)
+        if not 0.0 < step < 1.0 or xtol <= 0.0:
+            raise ValueError("step must lie between 0 and 1 degree, and xtol must be positive")
+        if continuity is not None and not float(continuity) > 0.0:
+            raise ValueError(f"continuity is a length in metres and must be positive, got {continuity!r}")
+        scale_tear = None if continuity is None or k < 2 else float(continuity)
+
+        combo = self._start_combination(start, data=data, covariance=covariance, fix=fixed)
+        geometry, ratios = list(combo[:k]), tuple(combo[k:])
+        for j, value in fixed.items():
+            geometry[j] = value
+        params = [(j, m) for j in free for m in range(counts[j])]
+        theta = np.clip(np.concatenate([self._knots_of(geometry[j], counts[j]) for j in free]), lo, hi)
+
+        def keys_of(values):
+            out, i = {}, 0
+            for j in free:
+                out[j] = _knot_key(values[i: i + counts[j]])
+                i += counts[j]
+            return out
+
+        def penalty(values):
+            """The continuity prior's cost: half the sum over breaks of (rms tear / continuity)^2."""
+            if scale_tear is None:
+                return 0.0
+            found = keys_of(values)
+            tears = self.tears(tuple(found[j] if j in found else fixed[j] for j in range(k)))
+            return 0.5 * float(np.sum(np.mean(tears ** 2, axis=1))) / scale_tear ** 2
+
+        def penalty_gradient(values):
+            out = np.zeros(values.size)
+            if scale_tear is None:
+                return out
+            for i in range(values.size):
+                e = np.zeros(values.size)
+                e[i] = HESSIAN_STEP
+                out[i] = (penalty(values + e) - penalty(values - e)) / (2.0 * HESSIAN_STEP)
+            return out
+
+        def penalty_hessian(values):
+            out = np.zeros((values.size, values.size))
+            if scale_tear is None:
+                return out
+            for i in range(values.size):
+                e = np.zeros(values.size)
+                e[i] = HESSIAN_STEP
+                out[:, i] = (penalty_gradient(values + e) - penalty_gradient(values - e)) / (2.0 * HESSIAN_STEP)
+            return 0.5 * (out + out.T)
+
+        ev = self.evidence_model(covariance)
+        dh, s0 = ev.prepare(d)
+        position = np.full(2 * self.n, -1)
+        position[ev.free] = np.arange(ev.p)
+        columns = {}
+        for j in free:
+            nodes = self.segment_nodes[j]
+            full = np.concatenate([nodes, self.n + nodes])
+            found = position[full]
+            columns[j] = (full, np.flatnonzero(found >= 0), found[found >= 0])
+        scale = self._contrast_factors(ratios)[:2] if self.n_ratios else None
+
+        def white(g):
+            return ev.project(ev.whiten(g))
+
+        def derivatives(values, current_blocks):
+            """Per knot: (free positions, whitened derivative, raw derivative over the segment's columns)."""
+            out = []
+            for i, (j, _) in enumerate(params):
+                up, down = values.copy(), values.copy()
+                up[i] = min(values[i] + step, 180.0 - 1e-6)
+                down[i] = max(values[i] - step, 1e-6)
+                b_up = (current_blocks[j] if up[i] == values[i]
+                        else self._transient_block(j, keys_of(up)[j]))
+                b_down = (current_blocks[j] if down[i] == values[i]
+                          else self._transient_block(j, keys_of(down)[j]))
+                raw = (b_up - b_down) / (up[i] - down[i])
+                full, cols, pos = columns[j]
+                if scale is not None:
+                    raw = raw * scale[0][:, None] * scale[1][full][None, :]
+                out.append((pos, white(raw[:, cols]), raw))
+            return out
+
+        def linear(gh0, deriv):
+            """Log evidence and its gradient in the knots, of the design linearised at `gh0`."""
+            def value(delta, with_gradient=True):
+                gh = gh0.copy()
+                for i, (pos, e, _) in enumerate(deriv):
+                    if delta[i]:
+                        gh[:, pos] += delta[i] * e
+                dec = ev.decompose_whitened(gh)
+                logev = float(ev.score(dec, dh, s0)["log_evidence"][0])
+                if not with_gradient:
+                    return logev
+                grad = ev.gradient(dec, dh, s0)
+                return logev, np.array([np.sum(grad[:, pos] * e) for pos, e, _ in deriv])
+            return value
+
+        def evidence_of(gh):
+            return float(ev.score(ev.decompose_whitened(gh), dh, s0)["log_evidence"][0])
+
+        def record(iteration, values, logev, **extra):
+            row = {"iteration": iteration, "log_evidence": logev, **extra}
+            row.update({f"s{j + 1}k{m + 1}": float(v) for (j, m), v in zip(params, values)})
+            history.append(row)
+
+        blocks = {j: self._segment_block(j, value) for j, value in fixed.items()}
+        keys = keys_of(theta)
+        for j in free:
+            blocks[j] = self._transient_block(j, keys[j])
+        assemblies = len(free)
+        gh_now = white(self._compose(blocks, ratios)[:, ev.free])
+        current_ev = evidence_of(gh_now)
+        current = current_ev - penalty(theta)            # the objective: the evidence less the prior
+        history = []
+        extra0 = {"penalty": penalty(theta)} if scale_tear is not None else {}
+        record(0, theta, current_ev, predicted=np.nan, ratio=np.nan, radius=float(radius), step=0.0,
+               accepted=True, **extra0)
+        r = float(radius)
+        deriv, at = None, None
+        converged, message = False, f"stopped after {int(max_iter)} iterations"
+        for iteration in range(1, int(max_iter) + 1):
+            if at is None or not np.array_equal(at, theta):
+                deriv = derivatives(theta, blocks)
+                assemblies += 2 * len(params)
+                at = theta.copy()
+            model = linear(gh_now, deriv)
+
+            def objective(x, model=model, base=theta):
+                value, grad = model(x)
+                if scale_tear is None:
+                    return -value, -grad
+                return -(value - penalty(base + x)), -(grad - penalty_gradient(base + x))
+
+            box = list(zip(np.maximum(-r, lo - theta), np.minimum(r, hi - theta)))
+            found = minimize(objective, np.zeros(theta.size), jac=True, method="L-BFGS-B", bounds=box,
+                             options={"maxiter": 200, "ftol": 1e-12, "gtol": 1e-5})
+            predicted = -float(found.fun) - current
+            if predicted <= GAIN_TOLERANCE:
+                converged, message = True, "the linearised design finds no further gain"
+                break
+            trial = np.clip(theta + found.x, lo, hi)
+            trial_keys = keys_of(trial)
+            trial_blocks = dict(blocks)
+            for j in free:
+                if trial_keys[j] != keys[j]:
+                    trial_blocks[j] = self._transient_block(j, trial_keys[j])
+                    assemblies += 1
+            gh_trial = white(self._compose(trial_blocks, ratios)[:, ev.free])
+            actual_ev = evidence_of(gh_trial)
+            cost = penalty(trial)
+            actual = actual_ev - cost
+            ratio = (actual - current) / predicted
+            moved = float(np.max(np.abs(trial - theta)))
+            accepted = actual > current
+            extra = {"penalty": cost} if scale_tear is not None else {}
+            record(iteration, trial, actual_ev, predicted=current + predicted + cost, ratio=ratio,
+                   radius=r, step=moved, accepted=accepted, **extra)
+            if log is not None:
+                log(f"optimize {iteration}: knots {' '.join(f'{v:.2f}' for v in trial)}: log evidence "
+                    f"{actual_ev:.3f} (predicted {current + predicted + cost:.3f})"
+                    + (f", continuity penalty {cost:.3f}" if scale_tear is not None else "")
+                    + f", step {moved:.3f} deg, radius {r:.3g}, {'kept' if accepted else 'refused'}")
+            if accepted:
+                theta, keys, blocks, gh_now = trial, trial_keys, trial_blocks, gh_trial
+                current_ev, current = actual_ev, actual
+            if ratio < 0.25:
+                r = 0.25 * min(r, max(moved, xtol))
+            elif ratio > 0.75 and moved > 0.9 * r:
+                r = min(2.0 * r, MAX_RADIUS)
+            if accepted and moved < xtol:
+                converged, message = True, f"a kept step under {xtol:g} degrees"
+                break
+            if r < xtol:
+                converged, message = True, f"the trust radius fell under {xtol:g} degrees"
+                break
+
+        if at is None or not np.array_equal(at, theta):
+            deriv = derivatives(theta, blocks)
+            assemblies += 2 * len(params)
+        model = linear(gh_now, deriv)
+        _, gradient = model(np.zeros(theta.size))
+        hessian = np.empty((theta.size, theta.size))
+        for i in range(theta.size):
+            e = np.zeros(theta.size)
+            e[i] = HESSIAN_STEP
+            hessian[:, i] = (model(e)[1] - model(-e)[1]) / (2.0 * HESSIAN_STEP)
+        hessian = 0.5 * (hessian + hessian.T)
+        prior = dict(gradient=penalty_gradient(theta), hessian=penalty_hessian(theta))
+
+        for j in free:
+            self._blocks.setdefault((j, keys[j]), blocks[j])
+        dips = tuple(keys[j] if j in keys else fixed[j] for j in range(k)) + ratios
+        solution = self.evidence(dips, data=data, covariance=covariance)
+        on_bound = (theta <= lo + 1e-9) | (theta >= hi - 1e-9)
+        fit = ProfileFit(self, dips=dips, params=params, counts=counts, theta=theta, bounds=(lo, hi),
+                         log_evidence=current_ev, gradient=gradient - prior["gradient"],
+                         hessian=hessian - prior["hessian"], solution=solution,
+                         history=pd.DataFrame(history), assemblies=assemblies,
+                         converged=converged, message=message, on_bound=on_bound,
+                         data=data, covariance=covariance, continuity=scale_tear,
+                         penalty=penalty(theta),
+                         linear=dict(design=self._compose(blocks, ratios), deriv=deriv, prior=prior))
+        for (j, m), flag, value in zip(params, on_bound, theta):
+            if flag:
+                warnings.warn(f"segment {j + 1}, knot {m + 1}: the best dip ({value:.2f}) is on a bound "
+                              f"({lo:g}-{hi:g}), so it cannot move past it; widen bounds=",
+                              stacklevel=2)
+        return fit
+
+    def _knot_bounds(self, bounds):
+        if bounds is None:
+            values = [v for key in self.dips for v in (key if isinstance(key, tuple) else (key,))]
+            lo, hi = float(min(values)), float(max(values))
+            if hi <= lo:
+                raise ValueError("the grid has one dip; give bounds=(lo, hi)")
+        else:
+            lo, hi = (float(v) for v in bounds)
+        if not 0.0 < lo < hi < 180.0:
+            raise ValueError(f"bounds must satisfy 0 < lo < hi < 180 degrees, got ({lo}, {hi})")
+        return lo, hi
+
+    def _knots_of(self, key, count):
+        """Geometry `key` as `count` dips at evenly spaced depths (exact when they include its own knots)."""
+        top, bottom = float(self.depths.min()), self.knot_depth
+        if isinstance(key, tuple):
+            return np.interp(np.linspace(top, bottom, count), np.linspace(top, bottom, len(key)), key)
+        return np.full(count, float(key))
+
+    def _start_combination(self, start, *, data, covariance, fix):
+        if start is None:
+            return self.run(score="evidence", data=data, covariance=covariance, fix=fix).best
+        if isinstance(start, SweepResult):
+            return start.best
+        if isinstance(start, ProfileFit):
+            return start.dips
+        return self._combination(start)
+
     # -- the uncertainty ----------------------------------------------------
     def bootstrap(self, result, *, noise="reml", draws=100, seed=0, compare=True, log=None):
         """Parametric bootstrap of an evidence sweep: each segment's dip with an honest spread.
@@ -849,30 +1330,24 @@ class DipSweep:
         wide carries little information. Mesh and other forward-model errors are
         not in these intervals; the weighted-vs-iid comparison is what detects
         them.
+
+        Given a `ProfileFit`, every knot is re-estimated on each data set by one
+        bounded Newton step of the evidence, on the design the fit linearised at
+        its optimum and with the observed data's Hessian: no assembly, and one
+        evidence gradient per data set. The step is exact for a quadratic evidence
+        and close while the replicates stay near the optimum. Returns a
+        `ProfileBootstrap`.
         """
+        if isinstance(result, ProfileFit):
+            return self._bootstrap_profile(result, noise=noise, draws=draws, seed=seed,
+                                           compare=compare, log=log)
         if result.score != "evidence":
             raise ValueError("bootstrap re-runs the evidence estimator; give it the result of "
                              "run(score='evidence')")
         combos = list(result._rows)
         d_obs = self.d if result.data is None else np.asarray(result.data, dtype=float)
         pred = self.predict(result.best, result.solution(result.best))
-        names = list(dict.fromkeys(self.track))
-        if isinstance(noise, str):
-            if noise != "reml":
-                raise ValueError(f"noise must be 'reml', a CovarianceModel or a mapping; got {noise!r}")
-            models = fit_reml(self.obs, d_obs - pred, ramp=self.ramp_kind)
-        elif isinstance(noise, CovarianceModel):
-            models = {t: noise for t in names}
-        else:
-            models = dict(noise)
-
-        rng = np.random.default_rng(seed)
-        replicates = np.repeat(pred[:, None], int(draws), axis=1)
-        for t in names:
-            rows = np.flatnonzero(self.track == t)
-            factor = sla.cholesky(observation_covariance(self.obs, models[t], track=t), lower=True)
-            replicates[rows] += factor @ rng.standard_normal((rows.size, int(draws)))
-        data = np.column_stack([d_obs, replicates])          # column 0 is the observed data
+        data, models = self._replicate_data(d_obs, pred, noise, draws, seed)
 
         estimators = {"primary": self.evidence_model(result.covariance)}
         if compare:
@@ -888,6 +1363,82 @@ class DipSweep:
                 log(f"bootstrap {i + 1}/{len(combos)}: {self.label(combo)}")
         estimates = {k: self._estimates(combos, v, result.best) for k, v in logev.items()}
         return BootstrapResult(self, result, estimates, models, compare=compare)
+
+    def _replicate_data(self, d_obs, pred, noise, draws, seed):
+        """The observed data, then `draws` replicates of `pred` plus noise; and the noise models."""
+        names = list(dict.fromkeys(self.track))
+        if isinstance(noise, str):
+            if noise != "reml":
+                raise ValueError(f"noise must be 'reml', a CovarianceModel or a mapping; got {noise!r}")
+            models = fit_reml(self.obs, d_obs - pred, ramp=self.ramp_kind)
+        elif isinstance(noise, CovarianceModel):
+            models = {t: noise for t in names}
+        else:
+            models = dict(noise)
+        rng = np.random.default_rng(seed)
+        replicates = np.repeat(pred[:, None], int(draws), axis=1)
+        for t in names:
+            rows = np.flatnonzero(self.track == t)
+            factor = sla.cholesky(observation_covariance(self.obs, models[t], track=t), lower=True)
+            replicates[rows] += factor @ rng.standard_normal((rows.size, int(draws)))
+        return np.column_stack([d_obs, replicates]), models          # column 0 is the observed data
+
+    def _bootstrap_profile(self, fit, *, noise, draws, seed, compare, log):
+        d_obs = self.d if fit.data is None else np.asarray(fit.data, dtype=float)
+        pred = self.predict(fit.dips, fit.solution["x"])
+        data, models = self._replicate_data(d_obs, pred, noise, draws, seed)
+        primary = self._newton_estimates(fit, self.evidence_model(fit.covariance), data)
+        if log is not None:
+            log(f"bootstrap: {data.shape[1] - 1} replicates re-estimated")
+        other = None
+        if compare:
+            plain = fit.covariance is None or isinstance(fit.covariance, str)
+            other = self._newton_estimates(fit, self.evidence_model(models if plain else None), data)
+        return ProfileBootstrap(fit, primary, other, models)
+
+    def _newton_estimates(self, fit, ev, data):
+        """Each data column's knots `(m, knots)`: one bounded Newton step of `ev`'s evidence from the fit."""
+        lin = fit._linear
+        gh0 = ev.project(ev.whiten(lin["design"][:, ev.free]))
+        position = np.full(2 * self.n, -1)
+        position[ev.free] = np.arange(ev.p)
+        deriv = []
+        for (j, _), (_, _, raw) in zip(fit._params, lin["deriv"]):
+            nodes = self.segment_nodes[j]
+            found = position[np.concatenate([nodes, self.n + nodes])]
+            keep = found >= 0
+            deriv.append((found[keep], ev.project(ev.whiten(raw[:, keep]))))
+        dec0 = ev.decompose_whitened(gh0)
+        dh, s0 = ev.prepare(data)
+
+        def gradient(dec, column):
+            grad = ev.gradient(dec, dh[:, [column]], s0[column])
+            return np.array([np.sum(grad[:, pos] * e) for pos, e in deriv])
+
+        def shifted(delta):
+            gh = gh0.copy()
+            for i, (pos, e) in enumerate(deriv):
+                gh[:, pos] += delta[i] * e
+            return ev.decompose_whitened(gh)
+
+        size = len(deriv)
+        hessian = np.empty((size, size))
+        for i in range(size):
+            e = np.zeros(size)
+            e[i] = HESSIAN_STEP
+            hessian[:, i] = (gradient(shifted(e), 0) - gradient(shifted(-e), 0)) / (2.0 * HESSIAN_STEP)
+        # the continuity prior, when the fit had one: the same for every data set
+        prior = lin.get("prior") or {"gradient": np.zeros(size), "hessian": np.zeros((size, size))}
+        w, v = np.linalg.eigh(-0.5 * (hessian + hessian.T) + prior["hessian"])
+        w = np.maximum(w, 1e-9 * max(float(w.max()), np.finfo(float).tiny))
+        curvature = (v * w) @ v.T
+        lo, hi = fit.bounds
+        theta = fit._theta
+        out = np.empty((data.shape[1], size))
+        for column in range(data.shape[1]):
+            step = box_qp(curvature, gradient(dec0, column) - prior["gradient"], lo - theta, hi - theta).x
+            out[column] = theta + step
+        return out
 
     def _estimates(self, combos, logev, fallback):
         """Per data column and coordinate: the continuous estimate, and the grid step around it."""
@@ -1129,3 +1680,263 @@ class BootstrapResult:
             else:
                 parts.append(f"{self._name(j)} {geometry_label(est)}")
         return f"<BootstrapResult {len(self.replicates)} draws: " + ", ".join(parts) + ">"
+
+
+class ProfileFit:
+    """The dip profiles `DipSweep.optimize` found.
+
+    Attributes
+    ----------
+    dips : tuple
+        The combination: each segment's geometry (a number for one knot, its knot dips
+        as a tuple otherwise), then any contrast ratios, as `DipSweep.evidence`,
+        `design` and `segment_meshes` take it.
+    table : pandas.DataFrame
+        One row per optimised knot: `segment` and `knot` (1-based), `depth_km`,
+        `dip`, `gradient` (of the objective, per degree, at the optimum) and
+        `on_bound`.
+    log_evidence : float
+        At the optimum.
+    penalty : float
+        The continuity prior's cost there (0 without `continuity`); the search
+        maximised `log_evidence - penalty`.
+    continuity : float or None
+        The tear scale the search was run with, m.
+    tears : pandas.DataFrame
+        One row per break between segments: `break` (1-based), `s_km`, and the
+        tear's `rms_m` and `max_m` over depth (see `DipSweep.tears`).
+    hessian : numpy.ndarray
+        Of the objective in the knots, per degree squared, on the design linearised
+        at the optimum. Its width is not an uncertainty; see `DipSweep.bootstrap`.
+    solution : dict
+        `DipSweep.evidence` at the optimum: the posterior-mean parameters `x`,
+        `Mw`, `rank`, `alpha2`, ...
+    history : pandas.DataFrame
+        One row per trust-region step: the knots tried, the log evidence of the
+        assembled design and the one the linearised design predicted, their `ratio`,
+        the `radius`, the `step` and whether it was `accepted` (and the `penalty`,
+        with `continuity`). The ratio and the acceptance are of the objective.
+    assemblies : int
+        Segment Green's-function assemblies used.
+    converged : bool
+        Whether the search stopped on its own criteria rather than `max_iter`.
+    message : str
+        Why it stopped.
+    bounds : tuple
+        The knots' limits, in degrees.
+    """
+
+    def __init__(self, sweep, *, dips, params, counts, theta, bounds, log_evidence, gradient,
+                 hessian, solution, history, assemblies, converged, message, on_bound, data,
+                 covariance, linear, continuity=None, penalty=0.0):
+        self.dips = tuple(dips)
+        self.log_evidence = float(log_evidence)
+        self.penalty = float(penalty)
+        self.continuity = None if continuity is None else float(continuity)
+        tears = sweep.tears(self.dips)
+        self.tears = pd.DataFrame({"break": np.arange(1, tears.shape[0] + 1),
+                                   "s_km": np.asarray(sweep.breaks[1:-1], dtype=float) / 1e3,
+                                   "rms_m": np.sqrt(np.mean(tears ** 2, axis=1)),
+                                   "max_m": np.abs(tears).max(axis=1) if tears.size else np.zeros(0)})
+        self.hessian = np.asarray(hessian, dtype=float)
+        self.solution = solution
+        self.history = history
+        self.assemblies = int(assemblies)
+        self.converged = bool(converged)
+        self.message = str(message)
+        self.bounds = tuple(float(v) for v in bounds)
+        self.data, self.covariance = data, covariance
+        self._params = list(params)
+        self._theta = np.asarray(theta, dtype=float)
+        self._linear = linear
+        top, bottom = float(sweep.depths.min()), sweep.knot_depth
+        self._geometry = SimpleNamespace(
+            breaks=np.asarray(sweep.breaks, dtype=float), top=top, knot_depth=float(bottom),
+            base=float(sweep.depths.max()), trace=sweep.trace, frame=sweep.frame,
+            polyline=(sweep._s, sweep._rx, sweep._ry), normal_smoothing=sweep.normal_smoothing,
+            n_segments=sweep.n_segments)
+        self.table = pd.DataFrame([
+            {"segment": j + 1, "knot": m + 1,
+             "depth_km": float(np.linspace(top, bottom, counts[j])[m]) / 1e3, "dip": float(value),
+             "gradient": float(g), "on_bound": bool(flag)}
+            for (j, m), value, g, flag in zip(params, theta, gradient, on_bound)])
+
+    def profile(self, blend=3e3, breaks=None):
+        """The fitted dip as a function of arc length and depth, for `slipsolve.production.Sheet`.
+
+        Returns `profile(s, z)`: the dip in degrees at arc lengths `s` and depths `z`
+        (m, positive down), arrays that broadcast. Each segment keeps its own profile
+        between its breaks, its knots at evenly spaced depths from the top of the layout
+        to `knot_depth`, linear in depth between them and held beyond. Across each break
+        the dip changes linearly over `blend` metres either side (0 for a step), so a
+        sheet built on it is one surface where the sweep's segments tore. `breaks` are
+        the interior breaks in the arc length the function will be called with, by
+        default the sweep's; `sheet` carries them onto a sheet's own.
+        """
+        g = self._geometry
+        k = g.n_segments
+        inner = np.asarray(g.breaks[1:-1] if breaks is None else breaks, dtype=float).ravel()
+        if inner.size != k - 1 or np.any(np.diff(inner) <= 0):
+            raise ValueError(f"breaks: {k - 1} increasing interior arc lengths, got {inner}")
+        half = float(blend)
+        if not half >= 0.0:
+            raise ValueError(f"blend must be a length >= 0 (m), got {blend!r}")
+        knots = []
+        for key in self.dips[:k]:
+            values = np.atleast_1d(np.asarray(key, dtype=float))
+            knots.append((np.linspace(g.top, g.knot_depth, values.size), values))
+
+        def segment_dip(j, z):
+            depths, values = knots[j]
+            return np.interp(z, depths, values) if values.size > 1 else np.full(z.shape, values[0])
+
+        def profile(s, z):
+            s, z = np.broadcast_arrays(np.asarray(s, dtype=float), np.asarray(z, dtype=float))
+            out = segment_dip(0, z)
+            for j, b in enumerate(inner, start=1):
+                w = ((s >= b).astype(float) if half == 0.0
+                     else np.clip((s - (b - half)) / (2.0 * half), 0.0, 1.0))
+                out = (1.0 - w) * out + w * segment_dip(j, z)
+            return out
+
+        return profile
+
+    def sheet(self, name, *, blend=3e3, normal_smoothing=None, depth=None, spacing=500.0, **kwargs):
+        """A `slipsolve.production.Sheet` on the sweep's trace, with this fit's dips (`profile`).
+
+        The hand-off to a production run. The breaks are carried onto the sheet's own arc
+        length by position: its trace is resampled at `spacing`, the sweep's at
+        `edge_length`, and the two measure slightly different lengths. `normal_smoothing`
+        is the sweep's by default (none if the sweep followed the local normal); `depth`
+        the base of the layout. Other keywords (`ends_on`, `bounds`) go to `Sheet`. A
+        contrast's ratios in the fit are not carried.
+        """
+        from .production import Sheet
+
+        g = self._geometry
+        if g.top > 0.0:
+            raise ValueError(f"the sweep's layout starts {g.top:.0f} m below the surface and a Sheet at it, so "
+                             "its surface would not be the sweep's; build one from profile() instead")
+        if normal_smoothing is None:
+            normal_smoothing = g.normal_smoothing or 0.0
+        depth = g.base if depth is None else float(depth)
+        own = Sheet(name, g.trace, g.frame, depth=depth, normal_smoothing=normal_smoothing, spacing=spacing)
+        s, x, y = g.polyline
+        inner = g.breaks[1:-1]
+        mapped = _project_arc(np.interp(inner, s, x), np.interp(inner, s, y), own._s, own._x, own._y)
+        lengths = np.diff(g.breaks)
+        mean = float(np.average([np.mean(np.atleast_1d(v)) for v in self.dips[:g.n_segments]],
+                                weights=lengths))
+        return Sheet(name, g.trace, g.frame, dip=mean, depth=depth, profile=self.profile(blend, mapped),
+                     normal_smoothing=normal_smoothing, spacing=spacing, **kwargs)
+
+    def __repr__(self):
+        parts = [f"segment {segment}: " + " / ".join(f"{v:.2f}" for v in group.dip)
+                 for segment, group in self.table.groupby("segment")]
+        state = "converged" if self.converged else "not converged"
+        return (f"<ProfileFit {', '.join(parts)}; log evidence {self.log_evidence:.3f}, "
+                f"{self.assemblies} assemblies, {state}>")
+
+
+class ProfileBootstrap:
+    """What `DipSweep.bootstrap` found for a `ProfileFit`: each knot's estimate and spread.
+
+    Attributes
+    ----------
+    fit : ProfileFit
+        The fit that was bootstrapped.
+    observed : numpy.ndarray
+        Each knot's estimate on the data, `(knots,)`.
+    replicates : numpy.ndarray
+        Its estimates on the synthetic data sets, `(draws, knots)`.
+    noise : dict
+        The per-track models the replicates were drawn from.
+    weighted : bool
+        Whether the fit's evidence was weighted by a noise model.
+    on_bound : numpy.ndarray
+        Whether each knot's estimate is on a bound, `(knots,)`.
+    pinned : numpy.ndarray
+        The share of each knot's replicates that stopped on a bound, `(knots,)`.
+    """
+
+    def __init__(self, fit, primary, other, noise):
+        self.fit = fit
+        self.noise = noise
+        self.observed = np.asarray(primary[0], dtype=float)
+        self.replicates = np.asarray(primary[1:], dtype=float)
+        self._other = None if other is None else np.asarray(other, dtype=float)
+        self.weighted = fit.covariance is not None and not isinstance(fit.covariance, str)
+        self._keys = fit.table[["segment", "knot", "depth_km"]].to_dict("records")
+        lo, hi = fit.bounds
+        self.on_bound = fit.table["on_bound"].to_numpy(dtype=bool)
+        self._upper = self.observed >= 0.5 * (lo + hi)        # which bound an estimate on one is on
+        stopped = (self.replicates <= lo + BOUND_TOLERANCE) | (self.replicates >= hi - BOUND_TOLERANCE)
+        self.pinned = stopped.mean(axis=0) if len(self.replicates) else np.zeros(self.observed.size)
+        for keys, est, flag, share in zip(self._keys, self.observed, self.on_bound, self.pinned):
+            name = f"segment {keys['segment']}, knot {keys['knot']}"
+            if flag:
+                warnings.warn(
+                    f"{name}: the estimate ({est:.2f}) is on a bound ({lo:g}-{hi:g}) and "
+                    f"{100 * share:.0f}% of the replicates stop there, so it has no sd: its interval "
+                    "is one-sided, open on the bound's side, and the other knots' intervals hold "
+                    "it on the bound", stacklevel=3)
+            elif share > 0.025:
+                warnings.warn(
+                    f"{name}: {100 * share:.0f}% of the replicates stop on a bound ({lo:g}-{hi:g}), "
+                    "which cuts that side of its interval short", stacklevel=3)
+
+    def intervals(self, level=0.95):
+        """Per knot: the estimate, its bootstrap sd, and normal and basic intervals at `level`.
+
+        `on_bound` and `pinned` (the share of replicates stopped on a bound) say which
+        rows to distrust. A knot whose estimate is on a bound has no sd or normal
+        interval (NaN): the data would take it past the bound. Its `basic_lo` or
+        `basic_hi` is then a one-sided limit -- the replicates' `level` quantile on
+        the inside -- and the other end is NaN.
+        """
+        from scipy.stats import norm
+        z = float(norm.ppf(0.5 + level / 2))
+        a = 100 * (1 - level) / 2
+        rows = []
+        for i, keys in enumerate(self._keys):
+            est, values = float(self.observed[i]), self.replicates[:, i]
+            flags = {"on_bound": bool(self.on_bound[i]), "pinned": float(self.pinned[i])}
+            if self.on_bound[i]:
+                inside = float(np.percentile(values, 100 * (1 - level) if self._upper[i] else 100 * level))
+                rows.append({**keys, "estimate": est, "sd": np.nan, "normal_lo": np.nan,
+                             "normal_hi": np.nan,
+                             "basic_lo": inside if self._upper[i] else np.nan,
+                             "basic_hi": np.nan if self._upper[i] else inside, **flags})
+                continue
+            sd = float(np.std(values, ddof=1))
+            q_lo, q_hi = np.percentile(values - values.mean(), [a, 100 - a])
+            rows.append({**keys, "estimate": est, "sd": sd,
+                         "normal_lo": est - z * sd, "normal_hi": est + z * sd,
+                         "basic_lo": est - q_hi, "basic_hi": est - q_lo, **flags})
+        return pd.DataFrame(rows)
+
+    def consistency(self):
+        """Weighted minus iid estimate per knot, against its spread under the noise model.
+
+        As `BootstrapResult.consistency`: with the forward model right, `|z|` is of
+        order one.
+        """
+        if self._other is None:
+            raise ValueError("bootstrap(compare=False) did not score the second estimator")
+        diffs = self._other - np.vstack([self.observed[None, :], self.replicates])
+        if self.weighted:                    # weighted minus iid either way round
+            diffs = -diffs
+        rows = []
+        for i, keys in enumerate(self._keys):
+            observed, replicate = diffs[0, i], diffs[1:, i]
+            sd = float(np.std(replicate, ddof=1))
+            rows.append({**keys, "difference": float(observed), "mean": float(replicate.mean()),
+                         "sd": sd, "z": float((observed - replicate.mean()) / sd) if sd > 0 else np.nan})
+        return pd.DataFrame(rows)
+
+    def __repr__(self):
+        sd = np.std(self.replicates, axis=0, ddof=1)
+        parts = [f"segment {k['segment']} knot {k['knot']} {est:.2f} "
+                 + ("(on a bound)" if flag else f"+- {s:.2g}")
+                 for k, est, s, flag in zip(self._keys, self.observed, sd, self.on_bound)]
+        return f"<ProfileBootstrap {len(self.replicates)} draws: " + ", ".join(parts) + ">"

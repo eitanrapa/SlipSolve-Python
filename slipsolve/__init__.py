@@ -49,7 +49,8 @@ Main entry points:
 - Choosing and judging a model: `blocked_cv_curve` and `gcv_curve` (the
   smoothing weight), `resolution_report` and `posterior_covariance`,
   `iterate_sampling` (model-driven resampling and remeshing), `DipSweep` (the
-  dip of each segment) and `calibrate` (synthetic recovery tests).
+  dip of each segment, on a grid or continuously) and `calibrate` (synthetic
+  recovery tests).
 
 Conventions:
 
@@ -138,8 +139,8 @@ from .readers import GnssTable, gnss_points, on_lattice, read_gnss_offsets, read
 from .sampling import Observations
 from .selection import NormalSystem, RankChoice, choose_rank, heldout_residuals, slab_folds
 from .surface import FaultSurface, gridfit
-from .sweep import (BootstrapResult, DipSweep, SweepResult, dip_profile_offsets,
-                    geometry_key, segment_breaks)
+from .sweep import (BootstrapResult, DipSweep, ProfileBootstrap, ProfileFit, SweepResult,
+                    dip_profile_offsets, geometry_key, segment_breaks)
 from .temporal import SlipSnapshot, TimeBasis, TimeDependentInversion, TimeDependentModel, TrackSeries
 from .trace import FaultSegment, FaultTrace, TraceSet
 from .tsurf import TSurf, read_tsurf
@@ -174,6 +175,8 @@ __all__ = [
     "NodeBasis",
     "Observations",
     "Pattern",
+    "ProfileBootstrap",
+    "ProfileFit",
     "RegionalModel",
     "RelaxationTables",
     "RemainderTables",

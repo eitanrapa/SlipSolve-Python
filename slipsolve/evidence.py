@@ -204,7 +204,16 @@ class GeometryEvidence:
 
     def decompose(self, g):
         """The data-independent part for one nodal design matrix `g` `(n, 2N)`."""
-        gh = self.project(self.whiten(np.asarray(g, dtype=float)[:, self.free]))
+        return self.decompose_whitened(self.project(self.whiten(np.asarray(g, dtype=float)[:, self.free])))
+
+    def decompose_whitened(self, gh):
+        """`decompose` for a design already whitened, ramp-projected and cut to the free parameters, `(n, p)`.
+
+        Whitening and the projection act on rows, so the transform of a sum of designs
+        is the sum of their transforms: a design linear in some parameters stays linear
+        here (`slipsolve.sweep.DipSweep.optimize`).
+        """
+        gh = np.asarray(gh, dtype=float)
         b = self.uq_inv.T @ (gh.T @ gh) @ self.uq_inv
         mu, v = np.linalg.eigh(0.5 * (b + b.T))
         mu = np.clip(mu, 0.0, None)
@@ -249,6 +258,38 @@ class GeometryEvidence:
             resid = s0 - np.sum(z2 * ((mu + 2.0 * a) / (mu + a) ** 2)[:, None], axis=0)
             out["rms_at_rank"] = np.sqrt(np.maximum(resid, 0.0) / n)
         return out
+
+    def gradient(self, dec, dh, s0):
+        """The derivative of `log_evidence` with respect to the whitened design `dec["gh"]`, `(n, p)`.
+
+        For one data column. At each `alpha^2`, with `A = gh'gh + alpha^2 Q` and `m`
+        the penalised least-squares slip, `log |A|` has derivative `2 gh A^-1` and
+        `S = min_m |dh - gh m|^2 + alpha^2 m'Qm` has `-2 (dh - gh m) m'`. So
+
+            d log_evidence / d gh = sum_alpha w(alpha^2) [-gh A^-1 + ((n - k) / S) (dh - gh m) m']
+
+        with `w` the integrand's normalised weights on the grid.
+        """
+        dh = np.asarray(dh, dtype=float).reshape(self.n, -1)
+        if dh.shape[1] != 1:
+            raise ValueError(f"gradient takes one data column, got {dh.shape[1]}")
+        s0 = float(np.ravel(s0)[0])
+        mu, gh, n = dec["mu"], dec["gh"], self.n
+        z = self._z(dec, dh)[:, 0]
+        a2 = self.alpha2
+        inv = 1.0 / (mu[None, :] + a2[:, None])                                   # (A, p)
+        s = np.maximum(s0 - inv @ (z * z), np.finfo(float).tiny)
+        level = (0.5 * self.p * np.log(a2) - 0.5 * np.sum(np.log(mu[None, :] + a2[:, None]), axis=1)
+                 - 0.5 * (n - self.k) * np.log(s))
+        w = np.exp(level - logsumexp(level))
+        keep = w > 1e-16 * w.max()
+        w, inv, s = w[keep], inv[keep], s[keep]
+        ws = w / s
+        t = self.uq_inv @ dec["v"]                                                # m = t y
+        inner = (inv.T * ws) @ inv * np.outer(z, z) * (n - self.k)
+        inner[np.diag_indices_from(inner)] += w @ inv
+        mbar = t @ (z * (ws @ inv))
+        return -gh @ (t @ inner @ t.T) + (n - self.k) * dh @ mbar[None, :]
 
     def posterior_mean(self, dec, dh, alpha2):
         """Free-parameter posterior mean `(p, m)`, each column at its own `alpha2`."""

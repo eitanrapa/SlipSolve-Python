@@ -54,7 +54,6 @@ import numpy as np
 from scipy import ndimage
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator, RegularGridInterpolator
 from scipy.linalg import cho_factor, cho_solve
-from scipy.ndimage import gaussian_filter1d
 
 from . import resolution as R
 from ._geo import LosGrid
@@ -67,6 +66,7 @@ from .regularize import slip_bounds
 from .sampling import Observations, _frame_axes
 from .sampling import frame_looks as _rotate_looks
 from .selection import CV_RANKS, RANK_JITTER, GridEdge, NormalSystem, choose_rank, slab_folds
+from .trace import _smoothed_normals
 
 #: The stages `Production.run` knows, in order.
 STAGES = ("A", "B", "C0", "C", "D", "E", "X", "report")
@@ -248,15 +248,7 @@ class Sheet:
         self._x, self._y = ref.nodes[top, 0][order], ref.nodes[top, 1][order]
         if abs(self._s[0]) > 1.0:
             raise ValueError(f"sheet {name}: the trace's parameterisation starts at s = {self._s[0]:.1f} m, not 0")
-        tx, ty = np.gradient(self._x, self._s), np.gradient(self._y, self._s)
-        norm = np.hypot(tx, ty)
-        nx, ny = -ty / norm, tx / norm
-        step = float(np.median(np.diff(self._s)))
-        if normal_smoothing:
-            nx = gaussian_filter1d(nx, normal_smoothing / step, mode="nearest")
-            ny = gaussian_filter1d(ny, normal_smoothing / step, mode="nearest")
-        norm = np.hypot(nx, ny)
-        self._nx, self._ny = nx / norm, ny / norm
+        self._nx, self._ny = _smoothed_normals(self._x, self._y, self._s, normal_smoothing)
         self.length = float(self._s[-1])
         self.ends_on = ends_on
         self.meeting = self.meeting_depth(ends_on) if ends_on is not None else None
@@ -478,6 +470,45 @@ def _start_worker(spec):
 def _green_rows(mesh, obs, frame_looks=False):
     return np.asarray(SlipInversion(mesh, obs, engine=_WORKER["engine"], ramp="none", basis="node",
                                     frame_looks=frame_looks).g, float)
+
+
+def _worker_pool(engine, workers):
+    """`workers` spawned processes, each with its own copy of `engine` (see `_engine_spec`)."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+    return ProcessPoolExecutor(int(workers), mp_context=get_context("spawn"), initializer=_start_worker,
+                               initargs=(_engine_spec(engine),))
+
+
+def _cached_green(mesh, obs, engine, *, frame_looks=False, cache=None, pool=None, workers=1):
+    """`(g, seconds)`: the node-basis Green's matrix of `obs` against `mesh`, and how long it took.
+
+    With `cache` (a directory) the matrix is read from or saved to a file named by what it
+    depends on: the mesh's nodes and triangles, the samples' positions and look vectors, the
+    engine and `frame_looks`. `seconds` is None when it was read. `pool`, a callable
+    returning a process pool or None, is asked only when the matrix has to be assembled; the
+    rows are then split into `3 * workers` chunks.
+    """
+    path = None
+    if cache is not None:
+        rotated = "_fl" if frame_looks else ""
+        path = Path(cache) / f"g_{mesh.digest()[:12]}_{_digest(obs)}_{_engine_key(engine)}{rotated}.npy"
+        if path.exists():
+            return np.load(path), None
+    t0 = time.time()
+    executor = pool() if pool is not None else None
+    if executor is None:
+        g = np.asarray(SlipInversion(mesh, obs, engine=engine, ramp="none", basis="node",
+                                     frame_looks=frame_looks).g, float)
+    else:
+        edges = np.linspace(0, obs.n, 3 * int(workers) + 1).astype(int)
+        jobs = [(mesh, Observations(obs.ds.isel(obs=slice(a, b))), frame_looks)
+                for a, b in zip(edges[:-1], edges[1:]) if b > a]
+        g = np.vstack(list(executor.map(_green_rows, *zip(*jobs))))
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(path, g)
+    return g, time.time() - t0
 
 
 def _forward_rows(mesh, slip, x, y):
@@ -724,10 +755,7 @@ class Production:
         if self.recipe.workers < 2:
             return None
         if self._pool is None:
-            from concurrent.futures import ProcessPoolExecutor
-            from multiprocessing import get_context
-            self._pool = ProcessPoolExecutor(int(self.recipe.workers), mp_context=get_context("spawn"),
-                                             initializer=_start_worker, initargs=(_engine_spec(self.engine),))
+            self._pool = _worker_pool(self.engine, self.recipe.workers)
         return self._pool
 
     def _engine_name(self):
@@ -741,24 +769,10 @@ class Production:
 
     def _green(self, mesh, obs):
         """The node-basis Green's matrix of `obs` against `mesh`, cached in `out/g_cache`."""
-        rotated = "_fl" if self.frame_looks else ""
-        path = (self.out / "g_cache"
-                / f"g_{mesh.digest()[:12]}_{_digest(obs)}_{_engine_key(self.engine)}{rotated}.npy")
-        if path.exists():
-            return np.load(path)
-        t0 = time.time()
-        pool = self._workers()
-        if pool is None:
-            g = np.asarray(SlipInversion(mesh, obs, engine=self.engine, ramp="none", basis="node",
-                                         frame_looks=self.frame_looks).g, float)
-        else:
-            edges = np.linspace(0, obs.n, 3 * self.recipe.workers + 1).astype(int)
-            jobs = [(mesh, Observations(obs.ds.isel(obs=slice(a, b))), self.frame_looks)
-                    for a, b in zip(edges[:-1], edges[1:]) if b > a]
-            g = np.vstack(list(pool.map(_green_rows, *zip(*jobs))))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(path, g)
-        self.log(f"  G {g.shape} in {time.time() - t0:.0f} s")
+        g, seconds = _cached_green(mesh, obs, self.engine, frame_looks=self.frame_looks,
+                                   cache=self.out / "g_cache", pool=self._workers, workers=self.recipe.workers)
+        if seconds is not None:
+            self.log(f"  G {g.shape} in {seconds:.0f} s")
         return g
 
     # -- systems and solves ------------------------------------------------------------------------------------------
